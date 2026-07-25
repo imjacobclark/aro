@@ -28,8 +28,23 @@ jobs:
       - run: swift test --package-path macos
       - run: make macos app
       - run: test -x macos/dist/Sonora.app/Contents/MacOS/sonora-server
+      - run: test -f macos/dist/Sonora.app/Contents/Resources/Montserrat-Variable.ttf
       - run: plutil -lint macos/dist/Sonora.app/Contents/Library/LaunchAgents/com.sonora.server.plist
       - run: codesign --verify --deep --strict macos/dist/Sonora.app
+      - name: Smoke-test packaged app launch
+        run: |
+          macos/dist/Sonora.app/Contents/MacOS/Sonora \
+            >"${RUNNER_TEMP}/sonora-launch.log" 2>&1 &
+          app_pid=$!
+          sleep 3
+          if ! kill -0 "${app_pid}" 2>/dev/null; then
+            cat "${RUNNER_TEMP}/sonora-launch.log"
+            wait "${app_pid}" || true
+            echo "Sonora exited during the launch smoke test" >&2
+            exit 1
+          fi
+          kill "${app_pid}" 2>/dev/null || true
+          wait "${app_pid}" || true
 
   docker:
     runs-on: ubuntu-24.04

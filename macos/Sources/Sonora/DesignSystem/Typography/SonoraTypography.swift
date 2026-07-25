@@ -35,10 +35,7 @@ enum SonoraFont {
     }
 
     static func register() {
-        guard let url = bundledFontURL() else {
-            assertionFailure("Bundled Montserrat font is missing")
-            return
-        }
+        guard let url = bundledFontURL() else { return }
 
         var error: Unmanaged<CFError>?
         _ = CTFontManagerRegisterFontsForURL(
@@ -54,6 +51,15 @@ enum SonoraFont {
             withExtension: "ttf"
         ) {
             return appURL
+        }
+
+        // A packaged app must not evaluate SwiftPM's generated Bundle.module
+        // accessor: it searches beside the .app, where signed bundles cannot
+        // contain arbitrary resources. The build script installs the font in
+        // Contents/Resources; a missing font should gracefully use SwiftUI's
+        // fallback rather than terminate at launch.
+        guard Bundle.main.bundleURL.pathExtension != "app" else {
+            return nil
         }
 
         return Bundle.module.url(

@@ -23,10 +23,16 @@ print "Building Sonora ($configuration)…"
 swift build --package-path "$project_dir" -c "$configuration"
 bin_dir=$(swift build --package-path "$project_dir" -c "$configuration" --show-bin-path)
 executable="$bin_dir/$app_name"
-resource_bundle="$bin_dir/Sonora_Sonora.bundle"
+resource_bundle_name="SonoraMac_Sonora.bundle"
+resource_bundle="$bin_dir/$resource_bundle_name"
 
 if [[ ! -x "$executable" ]]; then
     print -u2 "Build did not produce $executable"
+    exit 1
+fi
+
+if [[ ! -d "$resource_bundle" ]]; then
+    print -u2 "Build did not produce $resource_bundle"
     exit 1
 fi
 
@@ -53,12 +59,12 @@ ditto "$helper" "$staged_macos/sonora-server"
 ditto "$project_dir/../server/packaging/com.sonora.server.plist" \
     "$staged_launch_agents/com.sonora.server.plist"
 
-if [[ -d "$resource_bundle" ]]; then
-    ditto "$resource_bundle/Montserrat-Variable.ttf" \
-        "$staged_resources/Montserrat-Variable.ttf"
-    ditto "$resource_bundle/OFL-Montserrat.txt" \
-        "$staged_resources/OFL-Montserrat.txt"
-fi
+# App bundles expose resources through Contents/Resources. Bundle.module still
+# resolves the SwiftPM bundle when running the executable directly in builds.
+ditto "$resource_bundle/Montserrat-Variable.ttf" \
+    "$staged_resources/Montserrat-Variable.ttf"
+ditto "$resource_bundle/OFL-Montserrat.txt" \
+    "$staged_resources/OFL-Montserrat.txt"
 
 frameworks=("$bin_dir"/*.framework(N))
 for framework in "${frameworks[@]}"; do
