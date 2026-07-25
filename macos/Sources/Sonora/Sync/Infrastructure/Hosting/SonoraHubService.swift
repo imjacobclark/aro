@@ -9,6 +9,7 @@ final class SonoraHubService {
     private let service = SMAppService.agent(
         plistName: "com.sonora.server.plist"
     )
+    private let fileManager = FileManager.default
 
     var errorMessage: String?
 
@@ -36,16 +37,30 @@ final class SonoraHubService {
     var statusLabel: String {
         switch status {
         case .notRegistered:
-            "Not running"
+            "Ready to enable"
         case .enabled:
             "Running"
         case .requiresApproval:
             "Approval required in Login Items"
         case .notFound:
-            "Helper is not included in this build"
+            helperIsBundled
+                ? "Ready to enable"
+                : "Helper is not included in this build"
         @unknown default:
             "Unknown"
         }
+    }
+
+    private var helperIsBundled: Bool {
+        let bundle = Bundle.main.bundleURL
+        let helper = bundle.appendingPathComponent(
+            "Contents/MacOS/sonora-server"
+        )
+        let plist = bundle.appendingPathComponent(
+            "Contents/Library/LaunchAgents/com.sonora.server.plist"
+        )
+        return fileManager.isExecutableFile(atPath: helper.path)
+            && fileManager.fileExists(atPath: plist.path)
     }
 }
 

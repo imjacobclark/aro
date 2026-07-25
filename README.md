@@ -34,6 +34,22 @@ codesign --verify --deep --strict --verbose=2 \
   "$HOME/Applications/Sonora.app"
 ```
 
+### Enable LAN library hosting
+
+The hub helper is managed by macOS and needs a persistent server-data
+directory before it can start:
+
+1. Open **Sonora → Settings → Sync**.
+2. Under **Host This Library**, click **Choose…** beside **Server Data** and
+   select or create a directory with enough free space.
+3. Turn on **Enable Sonora Hub**.
+4. If Sonora reports **Approval required in Login Items**, open **System
+   Settings → General → Login Items & Extensions** and allow Sonora.
+
+The helper is embedded in `Sonora.app`; don’t move or delete the app after
+enabling hosting. Installing it in `~/Applications` with the commands above
+gives the helper a stable path across logins.
+
 ## Build and launch from source
 
 Install the current Xcode Command Line Tools and Rust, then clone and build:

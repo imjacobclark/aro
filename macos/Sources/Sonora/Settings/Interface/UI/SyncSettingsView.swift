@@ -24,6 +24,27 @@ struct SyncSettingsView: View {
     var body: some View {
         Form {
             Section("Host This Library") {
+                LabeledContent("Server Data") {
+                    HStack {
+                        Text(
+                            preferences.dataLocation.isEmpty
+                                ? "Choose a location to enable hosting"
+                                : preferences.dataLocation
+                        )
+                        .lineLimit(1)
+                        Button("Choose…", action: chooseDataLocation)
+                    }
+                }
+
+                if preferences.dataLocation.isEmpty {
+                    Text(
+                        "Sonora needs a server-data location before it can "
+                            + "create the hub configuration and start the helper."
+                    )
+                    .font(SonoraFont.footnote)
+                    .foregroundStyle(.secondary)
+                }
+
                 Toggle("Enable Sonora Hub", isOn: Binding(
                     get: { service.isEnabled || requestedHosting },
                     set: {
@@ -33,11 +54,6 @@ struct SyncSettingsView: View {
                     }
                 ))
                 .disabled(preferences.dataLocation.isEmpty)
-                .help(
-                    preferences.dataLocation.isEmpty
-                        ? "Choose a server-data location first."
-                        : ""
-                )
                 LabeledContent("Helper Status", value: service.statusLabel)
                 Button("Open Pairing Window") {
                     openHostingPairing()
@@ -52,18 +68,6 @@ struct SyncSettingsView: View {
                     Text("TLS fingerprint: \(hostingPairingWindow.fingerprint)")
                         .font(SonoraFont.footnote)
                         .textSelection(.enabled)
-                }
-
-                LabeledContent("Server Data") {
-                    HStack {
-                        Text(
-                            preferences.dataLocation.isEmpty
-                                ? "Required before import"
-                                : preferences.dataLocation
-                        )
-                        .lineLimit(1)
-                        Button("Choose…", action: chooseDataLocation)
-                    }
                 }
 
                 Picker("Import Mode", selection: $preferences.importMode) {
