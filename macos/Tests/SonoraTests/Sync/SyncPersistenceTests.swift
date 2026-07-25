@@ -334,10 +334,11 @@ final class SyncPersistenceTests: XCTestCase {
         XCTAssertTrue(store.pending().isEmpty)
         let manifest = store.manifest(hubID: hubID)
         XCTAssertEqual(manifest.count, 1)
-        XCTAssertEqual(manifest[0].hubTrackID, hubTrackID)
-        XCTAssertEqual(manifest[0].contentHash, "remote-hash")
+        let entry = try XCTUnwrap(manifest.first)
+        XCTAssertEqual(entry.hubTrackID, hubTrackID)
+        XCTAssertEqual(entry.contentHash, "remote-hash")
         XCTAssertEqual(
-            manifest[0].fields["artist"]?.value,
+            entry.fields["artist"]?.value,
             .string("Remote Artist")
         )
     }

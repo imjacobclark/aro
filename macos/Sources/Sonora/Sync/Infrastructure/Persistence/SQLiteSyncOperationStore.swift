@@ -801,41 +801,20 @@ struct SQLiteSyncOperationStore {
         }
         try run(
             """
-            INSERT INTO track_state
-                (track_id, hidden, favourite, rating, title_override,
-                 artist_override, deleted_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(track_id) DO UPDATE SET
-                hidden = COALESCE(excluded.hidden, hidden),
-                favourite = COALESCE(excluded.favourite, favourite),
-                rating = COALESCE(excluded.rating, rating),
-                title_override = COALESCE(
-                    excluded.title_override,
-                    title_override
-                ),
-                artist_override = COALESCE(
-                    excluded.artist_override,
-                    artist_override
-                ),
-                deleted_at = excluded.deleted_at,
-                updated_at = excluded.updated_at
+            INSERT OR IGNORE INTO track_state (track_id, updated_at)
+            VALUES (?, ?)
             """,
             connection
         ) {
             bind(localTrackID, $0, 1)
-            bindOptional(boolean(payload["hidden"]), $0, 2)
-            bindOptional(boolean(payload["favourite"]), $0, 3)
-            bindOptional(integer(payload["rating"]), $0, 4)
-            bindOptional(string(payload["title_override"]), $0, 5)
-            bindOptional(string(payload["artist_override"]), $0, 6)
-            if sequenced.kind == "tombstone"
-                || sequenced.kind == "delete" {
-                sqlite3_bind_double($0, 7, now)
-            } else {
-                sqlite3_bind_null($0, 7)
-            }
-            sqlite3_bind_double($0, 8, now)
+            sqlite3_bind_double($0, 2, now)
         }
+        try applyTrackState(
+            sequenced,
+            payload: payload,
+            localTrackID: localTrackID,
+            connection: connection
+        )
         if let contentHash,
            let byteCount = integer(payload["byte_count"]) {
             try run(
@@ -893,12 +872,17 @@ struct SQLiteSyncOperationStore {
         let rating = payload["rating"].flatMap {
             if case .number(let value) = $0 { Int(value) } else { nil }
         }
+        let titleOverride = string(payload["title_override"])
+        let artistOverride = string(payload["artist_override"])
+        let now = Date().timeIntervalSince1970
         try run(
             """
             UPDATE track_state
             SET hidden = COALESCE(?, hidden),
                 favourite = COALESCE(?, favourite),
                 rating = COALESCE(?, rating),
+                title_override = COALESCE(?, title_override),
+                artist_override = COALESCE(?, artist_override),
                 deleted_at = CASE
                     WHEN ? = 'delete' OR ? = 'tombstone' THEN ?
                     WHEN ? = 'restore' THEN NULL
@@ -924,12 +908,14 @@ struct SQLiteSyncOperationStore {
             } else {
                 sqlite3_bind_null($0, 3)
             }
-            bind(sequenced.kind, $0, 4)
-            bind(sequenced.kind, $0, 5)
-            sqlite3_bind_double($0, 6, Date().timeIntervalSince1970)
+            bindOptional(titleOverride, $0, 4)
+            bindOptional(artistOverride, $0, 5)
+            bind(sequenced.kind, $0, 6)
             bind(sequenced.kind, $0, 7)
-            sqlite3_bind_double($0, 8, Date().timeIntervalSince1970)
-            bind(localTrackID, $0, 9)
+            sqlite3_bind_double($0, 8, now)
+            bind(sequenced.kind, $0, 9)
+            sqlite3_bind_double($0, 10, now)
+            bind(localTrackID, $0, 11)
         }
     }
 
