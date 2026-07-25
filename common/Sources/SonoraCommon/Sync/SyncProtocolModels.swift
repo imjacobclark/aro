@@ -82,6 +82,26 @@ public struct SequencedSyncOperation: Hashable, Codable, Sendable {
     public let payload: JSONValue
     public let fieldVersions: [String: SyncFieldVersion]
 
+    public init(
+        sequence: UInt64,
+        operationID: UUID,
+        deviceID: UUID,
+        entityType: String,
+        entityID: String,
+        kind: String,
+        payload: JSONValue,
+        fieldVersions: [String: SyncFieldVersion]
+    ) {
+        self.sequence = sequence
+        self.operationID = operationID
+        self.deviceID = deviceID
+        self.entityType = entityType
+        self.entityID = entityID
+        self.kind = kind
+        self.payload = payload
+        self.fieldVersions = fieldVersions
+    }
+
     public var operation: SyncOperation {
         SyncOperation(
             operationID: operationID,

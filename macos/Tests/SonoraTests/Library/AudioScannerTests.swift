@@ -1,5 +1,6 @@
 #if canImport(XCTest)
 import Foundation
+import SonoraCommon
 import UniformTypeIdentifiers
 import XCTest
 @testable import Sonora

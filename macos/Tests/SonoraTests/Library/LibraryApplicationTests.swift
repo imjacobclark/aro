@@ -1,5 +1,6 @@
 #if canImport(Testing)
 import Foundation
+import SonoraCommon
 import Testing
 @testable import Sonora
 
