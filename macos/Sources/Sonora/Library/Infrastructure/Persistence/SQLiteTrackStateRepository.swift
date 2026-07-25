@@ -66,7 +66,7 @@ struct SQLiteTrackStateRepository: TrackStateRepository {
             do {
                 try execute("BEGIN IMMEDIATE", connection: connection)
                 try update(connection, now)
-                try appendChange(
+                try appendOutboxOperation(
                     trackID: trackID,
                     operation: operation,
                     payload: payload,
@@ -87,7 +87,7 @@ struct SQLiteTrackStateRepository: TrackStateRepository {
         try result.get()
     }
 
-    private func appendChange(
+    private func appendOutboxOperation(
         trackID: UUID,
         operation: String,
         payload: String,
@@ -96,10 +96,10 @@ struct SQLiteTrackStateRepository: TrackStateRepository {
     ) throws {
         try run(
             """
-            INSERT INTO changes
+            INSERT INTO sync_outbox
                 (operation_id, device_id, entity_type, entity_id, operation,
-                 payload, logical_clock, created_at)
-            VALUES (?, ?, 'track_state', ?, ?, ?, ?, ?)
+                 payload, physical_millis, logical_counter, created_at)
+            VALUES (?, ?, 'track_state', ?, ?, ?, ?, 0, ?)
             """,
             connection: connection
         ) {

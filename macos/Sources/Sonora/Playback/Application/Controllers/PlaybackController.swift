@@ -23,6 +23,9 @@ final class PlaybackController {
     @ObservationIgnored private let queuePolicy: PlaybackQueuePolicy
     @ObservationIgnored private let visualizerSmoother: VisualizerLevelSmoother
     @ObservationIgnored private let effectiveModeResolver: @MainActor () -> PlaybackMode
+    @ObservationIgnored private let prepareSong: PrepareSongForPlayback?
+    @ObservationIgnored private let mediaLocationResolver:
+        (@MainActor (Song) -> PlaybackMediaLocation?)?
     @ObservationIgnored private var playbackID = UUID()
     @ObservationIgnored private var progressTask: Task<Void, Never>?
     @ObservationIgnored private var preparationTask: Task<Void, Never>?
@@ -37,6 +40,9 @@ final class PlaybackController {
         visualizerSmoother: VisualizerLevelSmoother =
             VisualizerLevelSmoother(),
         effectiveModeResolver: (@MainActor () -> PlaybackMode)? = nil,
+        prepareSong: PrepareSongForPlayback? = nil,
+        mediaLocationResolver:
+            (@MainActor (Song) -> PlaybackMediaLocation?)? = nil,
         engineFactory: @escaping @MainActor () -> any AudioPlaybackEngine = {
             UnavailableAudioPlaybackEngine()
         }
@@ -48,6 +54,8 @@ final class PlaybackController {
         self.queuePolicy = queuePolicy
         self.visualizerSmoother = visualizerSmoother
         self.effectiveModeResolver = effectiveModeResolver ?? { [preferences] in preferences.mode }
+        self.prepareSong = prepareSong
+        self.mediaLocationResolver = mediaLocationResolver
         self.engineFactory = engineFactory
 
         if let engine {
@@ -263,6 +271,36 @@ final class PlaybackController {
         playbackID = UUID()
         let requestedPlaybackID = playbackID
 
+        if let prepareSong,
+           let location = mediaLocationResolver?(queue[index]) {
+            preparationTask = Task { [weak self] in
+                guard let self else { return }
+                do {
+                    let localURL = try await prepareSong.execute(location)
+                    guard !Task.isCancelled,
+                          requestedPlaybackID == self.playbackID else {
+                        return
+                    }
+                    let prepared = self.queue[index].replacingURL(localURL)
+                    self.queue[index] = prepared
+                    self.currentSong = prepared
+                    await self.prepareLoudnessAndStart(
+                        at: index,
+                        playbackID: requestedPlaybackID,
+                        skippingFailures: skippingFailures,
+                        from: startTime,
+                        shouldPlay: shouldPlay
+                    )
+                } catch is CancellationError {
+                    return
+                } catch {
+                    self.fail(error.localizedDescription)
+                }
+                self.preparationTask = nil
+            }
+            return
+        }
+
         if effectiveModeResolver() == .normalized {
             preparationTask = Task { [weak self] in
                 guard let self else {
@@ -294,6 +332,32 @@ final class PlaybackController {
                 shouldPlay: shouldPlay
             )
         }
+    }
+
+    private func prepareLoudnessAndStart(
+        at index: Int,
+        playbackID requestedPlaybackID: UUID,
+        skippingFailures: Bool,
+        from startTime: TimeInterval,
+        shouldPlay: Bool
+    ) async {
+        if effectiveModeResolver() == .normalized {
+            await prepareLoudnessRun(
+                startingAt: index,
+                playbackID: requestedPlaybackID
+            )
+        }
+        guard !Task.isCancelled,
+              requestedPlaybackID == playbackID else {
+            return
+        }
+        startPreparedSong(
+            at: index,
+            playbackID: requestedPlaybackID,
+            skippingFailures: skippingFailures,
+            from: startTime,
+            shouldPlay: shouldPlay
+        )
     }
 
     private func prepareLoudnessRun(

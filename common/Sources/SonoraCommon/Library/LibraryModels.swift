@@ -128,6 +128,24 @@ public struct Song: Identifiable, Hashable, Sendable {
     public var id: String {
         libraryID.uuidString
     }
+
+    public func replacingURL(_ url: URL) -> Song {
+        Song(
+            libraryID: libraryID,
+            url: url,
+            title: title,
+            artist: artist,
+            album: album,
+            genre: genre,
+            releaseYear: releaseYear,
+            artworkData: artworkData,
+            duration: duration,
+            fileSizeBytes: fileSizeBytes,
+            audioProperties: audioProperties,
+            fileFingerprint: fileFingerprint,
+            loudness: loudness
+        )
+    }
 }
 
 public enum SongLibrary {

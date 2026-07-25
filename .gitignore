@@ -1,5 +1,6 @@
 **/.build/
 **/.swiftpm/
 **/dist/
+**/target/
 .DS_Store
 *.xcuserstate

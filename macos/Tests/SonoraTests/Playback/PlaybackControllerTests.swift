@@ -145,6 +145,45 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertEqual(engine.playCount, 3)
     }
 
+    func testRemoteTrackIsPreparedBeforeEngineLoad() async throws {
+        let engine = FakeAudioPlaybackEngine()
+        let cachedURL = URL(fileURLWithPath: "/Cache/verified.flac")
+        let prepare = PrepareSongForPlayback(
+            downloader: FakeRemoteDownloader(url: cachedURL),
+            verifier: FakeMediaVerifier()
+        )
+        let controller = PlaybackController(
+            engine: engine,
+            prepareSong: prepare,
+            mediaLocationResolver: { song in
+                .remote(
+                    RemoteMedia(
+                        trackID: song.libraryID,
+                        contentHash: String(repeating: "a", count: 64),
+                        byteCount: 1,
+                        downloadURL: song.url
+                    )
+                )
+            }
+        )
+        let song = Song(
+            url: URL(string: "https://hub/v1/blobs/hash")!,
+            title: "Remote",
+            artist: "Artist",
+            duration: 180
+        )
+        defer { controller.stopAndClear() }
+
+        controller.play(song: song, queue: [song])
+        for _ in 0 ..< 20 where controller.state != .playing {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(engine.loadedURL, cachedURL)
+        XCTAssertEqual(controller.currentSong?.url, cachedURL)
+        XCTAssertEqual(controller.state, .playing)
+    }
+
     private func makeSongs(_ titles: [String]) -> [Song] {
         titles.map {
             Song(
@@ -177,6 +216,7 @@ private final class FakeAudioPlaybackEngine: AudioPlaybackEngine {
     var loadedFrom: TimeInterval = 0
     var playCount = 0
     var stopCount = 0
+    var loadedURL: URL?
 
     func load(
         songs: [Song],
@@ -185,6 +225,7 @@ private final class FakeAudioPlaybackEngine: AudioPlaybackEngine {
         playbackID: UUID
     ) throws -> TimeInterval {
         self.playbackID = playbackID
+        loadedURL = songs[index].url
         currentTime = time
         loadedFrom = time
         return loadedDuration
@@ -214,5 +255,17 @@ private final class FakeAudioPlaybackEngine: AudioPlaybackEngine {
     func finish(playbackID: UUID) {
         eventHandler?(.finished(playbackID))
     }
+}
+
+private struct FakeRemoteDownloader: RemoteMediaDownloading {
+    let url: URL
+
+    func download(_ media: RemoteMedia) async throws -> URL {
+        url
+    }
+}
+
+private struct FakeMediaVerifier: MediaHashVerifying {
+    func verify(file: URL, expectedSHA256: String) async throws {}
 }
 #endif

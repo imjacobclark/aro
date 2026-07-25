@@ -7,15 +7,19 @@ endif
 ifneq ($(filter common,$(MAKECMDGOALS)),)
 SCOPE := common
 endif
+ifneq ($(filter server,$(MAKECMDGOALS)),)
+SCOPE := server
+endif
 ifneq ($(filter all,$(MAKECMDGOALS)),)
 SCOPE := all
 endif
 
 .DEFAULT_GOAL := help
 
-.PHONY: help macos common all build test run app install check \
+.PHONY: help macos common server all build test run app install package doctor check \
 	common-build common-test common-run common-app common-install \
 	macos-build macos-test macos-run macos-app macos-install \
+	server-build server-test server-run server-package server-doctor \
 	all-build all-test all-run all-app all-install
 
 help:
@@ -28,6 +32,11 @@ help:
 	@echo "  make macos install   Install the app in ~/Applications"
 	@echo "  make common build    Build the shared library"
 	@echo "  make common test     Test the shared library"
+	@echo "  make server build    Build the LAN sync hub"
+	@echo "  make server test     Test protocol, core, store, and daemon"
+	@echo "  make server run      Run the configured hub"
+	@echo "  make server package  Package standalone distribution assets"
+	@echo "  make server doctor   Report toolchain, targets, and signing tools"
 	@echo "  make all build       Build every package"
 	@echo "  make all test        Test every package"
 	@echo "  make all run         Build common and run the macOS app"
@@ -35,7 +44,7 @@ help:
 	@echo ""
 	@echo "Hyphenated aliases such as 'make macos-build' also work."
 
-macos common all:
+macos common server all:
 	@:
 
 build:
@@ -52,6 +61,12 @@ app:
 
 install:
 	@$(MAKE) $(SCOPE)-install
+
+package:
+	@$(MAKE) $(SCOPE)-package
+
+doctor:
+	@$(MAKE) $(SCOPE)-doctor
 
 common-build:
 	swift build --package-path common
@@ -83,9 +98,25 @@ macos-app:
 macos-install:
 	./macos/scripts/install-app.sh
 
-all-build: common-build macos-build
+server-build:
+	cargo build --manifest-path server/Cargo.toml --workspace
 
-all-test: common-test macos-test
+server-test:
+	cargo test --manifest-path server/Cargo.toml --workspace
+
+server-run:
+	cargo run --manifest-path server/Cargo.toml -p sonora-server -- serve
+
+server-package:
+	cargo build --manifest-path server/Cargo.toml -p sonora-server --release
+	./server/scripts/package.sh
+
+server-doctor:
+	./server/scripts/doctor.sh
+
+all-build: common-build macos-build server-build
+
+all-test: common-test macos-test server-test
 
 all-run: common-build macos-run
 
@@ -96,3 +127,5 @@ all-install: common-build macos-install
 check: all-test
 	./macos/scripts/check-architecture.sh
 	./macos/scripts/check-library-health-architecture.sh
+	cargo fmt --manifest-path server/Cargo.toml --all -- --check
+	cargo clippy --manifest-path server/Cargo.toml --workspace --all-targets -- -D warnings

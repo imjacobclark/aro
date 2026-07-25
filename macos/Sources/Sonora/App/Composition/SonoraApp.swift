@@ -9,9 +9,13 @@ struct SonoraApp: App {
     @State private var playbackController: PlaybackController
     @State private var playbackPreferences: PlaybackPreferences
     @State private var audioDeviceManager: AudioDeviceManager
+    @State private var hubService = SonoraHubService()
+    @State private var syncPreferences = SyncPreferences()
+    @State private var mediaCacheController: MediaCacheController
     private let reviewLibraryHealth: ReviewLibraryHealth
     private let loadStatsDashboard: LoadStatsDashboard
     private let libraryFileManager: any LibraryFileManaging
+    private let syncOperationStore: SQLiteSyncOperationStore
 
     init() {
         SonoraFont.register()
@@ -21,11 +25,27 @@ struct SonoraApp: App {
         )
         let deviceManager = AudioDeviceManager()
         let database = LibraryDatabase()
+        syncOperationStore = SQLiteSyncOperationStore(database: database)
+        _mediaCacheController = State(
+            initialValue: MediaCacheController(database: database)
+        )
         let loudnessRepository = SQLiteLoudnessAnalysisRepository(
             database: database
         )
         let loudnessService = LoudnessAnalysisService(
             repository: loudnessRepository
+        )
+        let mediaCacheDirectory = FileManager.default.urls(
+            for: .cachesDirectory,
+            in: .userDomainMask
+        )[0].appendingPathComponent("Sonora/Media", isDirectory: true)
+        let prepareSong = PrepareSongForPlayback(
+            downloader: URLSessionMediaDownloader(
+                cacheDirectory: mediaCacheDirectory
+            ),
+            verifier: CachingSHA256MediaVerifier(
+                cache: SQLiteMediaCache(database: database)
+            )
         )
         libraryFileManager = SQLiteLibraryFileManager(
             database: database
@@ -80,6 +100,22 @@ struct SonoraApp: App {
                         device: deviceManager.selectedDevice(for: preferences.outputDeviceUID)
                     )
                 },
+                prepareSong: prepareSong,
+                mediaLocationResolver: { song in
+                    guard !song.url.isFileURL,
+                          let hash = song.fileFingerprint?.contentHash,
+                          let byteCount = song.fileSizeBytes else {
+                        return nil
+                    }
+                    return .remote(
+                        RemoteMedia(
+                            trackID: song.libraryID,
+                            contentHash: hash,
+                            byteCount: byteCount,
+                            downloadURL: song.url
+                        )
+                    )
+                },
                 engineFactory: {
                     HighResolutionPlaybackEngine(
                         preferences: preferences,
@@ -117,12 +153,25 @@ struct SonoraApp: App {
         }
 
         Settings {
-            PlaybackSettingsView(
-                preferences: playbackPreferences,
-                deviceManager: audioDeviceManager,
-                playback: playbackController,
-                libraryFileManager: libraryFileManager
-            )
+            TabView {
+                Tab("Playback", systemImage: "speaker.wave.2") {
+                    PlaybackSettingsView(
+                        preferences: playbackPreferences,
+                        deviceManager: audioDeviceManager,
+                        playback: playbackController,
+                        libraryFileManager: libraryFileManager
+                    )
+                }
+                Tab("Sync", systemImage: "arrow.triangle.2.circlepath") {
+                    SyncSettingsView(
+                        service: hubService,
+                        preferences: syncPreferences,
+                        mediaCache: mediaCacheController,
+                        syncStore: syncOperationStore,
+                        libraryFiles: libraryFileManager
+                    )
+                }
+            }
             .font(SonoraFont.body)
             .tint(SonoraTheme.violet)
         }

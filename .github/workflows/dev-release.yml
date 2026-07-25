@@ -1,0 +1,117 @@
+name: Development Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: development-release-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  build-macos:
+    name: Build macOS ${{ matrix.architecture }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26
+            architecture: arm64
+          - runner: macos-26-intel
+            architecture: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+
+      - name: Confirm runner architecture
+        env:
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+        run: test "$(uname -m)" = "${EXPECTED_ARCHITECTURE}"
+
+      - name: Build and ad-hoc sign development app
+        env:
+          CONFIGURATION: debug
+        run: make macos app
+
+      - name: Verify app and embedded helper
+        run: |
+          test -x macos/dist/Sonora.app/Contents/MacOS/Sonora
+          test -x macos/dist/Sonora.app/Contents/MacOS/sonora-server
+          plutil -lint macos/dist/Sonora.app/Contents/Info.plist
+          plutil -lint macos/dist/Sonora.app/Contents/Library/LaunchAgents/com.sonora.server.plist
+          codesign --verify --deep --strict --verbose=2 macos/dist/Sonora.app
+
+      - name: Package downloadable app
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          short_sha="${GITHUB_SHA:0:7}"
+          asset="Sonora-dev-${short_sha}-macos-${ARCHITECTURE}.zip"
+          ditto -c -k --sequesterRsrc --keepParent \
+            macos/dist/Sonora.app "${asset}"
+          shasum -a 256 "${asset}" > "${asset}.sha256"
+
+      - name: Upload signed app for release job
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonora-dev-${{ matrix.architecture }}
+          path: |
+            Sonora-dev-*-macos-${{ matrix.architecture }}.zip
+            Sonora-dev-*-macos-${{ matrix.architecture }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish development prerelease
+    needs: build-macos
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Download signed apps
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sonora-dev-*
+          merge-multiple: true
+
+      - name: Publish GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          short_sha="${GITHUB_SHA:0:7}"
+          tag="dev-${short_sha}"
+          notes="Automated ad-hoc-signed development builds from commit ${GITHUB_SHA}.
+
+          These builds are not notarized. Follow the README launch commands after downloading the archive for your Mac architecture."
+          if gh release view "${tag}" \
+            --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${tag}" \
+              Sonora-dev-*.zip Sonora-dev-*.zip.sha256 \
+              --clobber \
+              --repo "${GITHUB_REPOSITORY}"
+            gh release edit "${tag}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "Sonora Development ${tag}" \
+              --notes "${notes}" \
+              --prerelease
+          else
+            gh release create "${tag}" \
+              Sonora-dev-*.zip Sonora-dev-*.zip.sha256 \
+              --repo "${GITHUB_REPOSITORY}" \
+              --target "${GITHUB_SHA}" \
+              --title "Sonora Development ${tag}" \
+              --notes "${notes}" \
+              --prerelease
+          fi

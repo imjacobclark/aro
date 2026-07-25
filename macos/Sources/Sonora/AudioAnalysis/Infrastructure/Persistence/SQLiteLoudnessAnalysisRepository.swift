@@ -79,6 +79,52 @@ struct SQLiteLoudnessAnalysisRepository: LoudnessAnalysisRepository {
                 analysis.analyzedAt.timeIntervalSince1970
             )
             sqlite3_step(statement)
+            guard sqlite3_changes(connection) == 1,
+                  let payloadData = try? JSONSerialization.data(
+                    withJSONObject: [
+                        "content_hash": fingerprint,
+                        "algorithm_version": analysis.algorithmVersion,
+                        "integrated_lufs": analysis.integratedLUFS,
+                        "peak_amplitude": analysis.peakAmplitude,
+                        "analyzed_at": analysis.analyzedAt.timeIntervalSince1970,
+                    ]
+                  ),
+                  let payload = String(
+                    data: payloadData,
+                    encoding: .utf8
+                  ),
+                  let outbox = prepare(
+                    """
+                    INSERT INTO sync_outbox
+                        (operation_id, device_id, entity_type, entity_id,
+                         operation, payload, physical_millis,
+                         logical_counter, created_at)
+                    VALUES (?, ?, 'loudness', ?, 'upsert', ?, ?, 0, ?)
+                    """,
+                    connection: connection
+                  ) else {
+                return
+            }
+            defer { sqlite3_finalize(outbox) }
+            bind(UUID().uuidString, to: outbox, at: 1)
+            bind(database.deviceID.uuidString, to: outbox, at: 2)
+            bind(
+                "\(fingerprint):\(analysis.algorithmVersion)",
+                to: outbox,
+                at: 3
+            )
+            bind(payload, to: outbox, at: 4)
+            sqlite3_bind_int64(
+                outbox,
+                5,
+                Int64(analysis.analyzedAt.timeIntervalSince1970 * 1_000)
+            )
+            sqlite3_bind_double(
+                outbox,
+                6,
+                analysis.analyzedAt.timeIntervalSince1970
+            )
+            sqlite3_step(outbox)
         }
     }
 

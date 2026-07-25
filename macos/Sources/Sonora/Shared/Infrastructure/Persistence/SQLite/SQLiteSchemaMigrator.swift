@@ -136,6 +136,89 @@ struct SQLiteSchemaMigrator {
                 VALUES (3, unixepoch());
             """
         )
+
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS hub_memberships (
+                hub_id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                tls_fingerprint TEXT NOT NULL,
+                replica_mode TEXT NOT NULL DEFAULT 'on_demand',
+                server_cursor INTEGER NOT NULL DEFAULT 0,
+                joined_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS hub_track_mappings (
+                hub_id TEXT NOT NULL REFERENCES hub_memberships(hub_id),
+                local_track_id TEXT NOT NULL REFERENCES tracks(id),
+                hub_track_id TEXT NOT NULL,
+                PRIMARY KEY(hub_id, local_track_id),
+                UNIQUE(hub_id, hub_track_id)
+            );
+            CREATE TABLE IF NOT EXISTS sync_outbox (
+                operation_id TEXT PRIMARY KEY,
+                hub_id TEXT,
+                device_id TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                physical_millis INTEGER NOT NULL,
+                logical_counter INTEGER NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL,
+                sent_at REAL
+            );
+            CREATE INDEX IF NOT EXISTS sync_outbox_pending
+                ON sync_outbox(hub_id, sent_at, created_at);
+            CREATE TABLE IF NOT EXISTS applied_sync_operations (
+                operation_id TEXT PRIMARY KEY,
+                hub_id TEXT NOT NULL,
+                server_sequence INTEGER NOT NULL,
+                applied_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS sync_field_versions (
+                hub_id TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                field_name TEXT NOT NULL,
+                physical_millis INTEGER NOT NULL,
+                logical_counter INTEGER NOT NULL,
+                device_id TEXT NOT NULL,
+                PRIMARY KEY(hub_id, entity_type, entity_id, field_name)
+            );
+            CREATE TABLE IF NOT EXISTS blob_availability (
+                content_hash TEXT PRIMARY KEY,
+                local_path TEXT,
+                byte_count INTEGER,
+                verified INTEGER NOT NULL DEFAULT 0,
+                pinned INTEGER NOT NULL DEFAULT 0,
+                last_accessed_at REAL,
+                download_state TEXT NOT NULL DEFAULT 'absent'
+            );
+            CREATE INDEX IF NOT EXISTS blob_cache_lru
+                ON blob_availability(pinned, last_accessed_at);
+            CREATE TABLE IF NOT EXISTS sync_jobs (
+                job_id TEXT PRIMARY KEY,
+                hub_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                state TEXT NOT NULL,
+                progress_completed INTEGER NOT NULL DEFAULT 0,
+                progress_total INTEGER NOT NULL DEFAULT 0,
+                resume_payload TEXT,
+                error TEXT,
+                updated_at REAL NOT NULL
+            );
+            INSERT OR IGNORE INTO sync_outbox
+                (operation_id, device_id, entity_type, entity_id, operation,
+                 payload, physical_millis, logical_counter, created_at)
+            SELECT operation_id, device_id, entity_type, entity_id, operation,
+                   payload, logical_clock, 0, created_at
+            FROM changes
+            WHERE entity_type = 'track_state';
+            INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                VALUES (4, unixepoch());
+            """
+        )
     }
 
     private func execute(_ sql: String) throws {

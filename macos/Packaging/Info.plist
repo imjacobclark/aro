@@ -28,6 +28,12 @@
     <string>26.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Sonora discovers and synchronizes with library hubs on your local network.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_sonora-sync._tcp</string>
+    </array>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
 </dict>

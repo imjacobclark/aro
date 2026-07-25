@@ -1,0 +1,17 @@
+{
+  "operation_id": "00000000-0000-0000-0000-000000000001",
+  "device_id": "00000000-0000-0000-0000-000000000002",
+  "entity_type": "track_state",
+  "entity_id": "00000000-0000-0000-0000-000000000003",
+  "kind": "update",
+  "payload": {
+    "favourite": true
+  },
+  "field_versions": {
+    "favourite": {
+      "physical_millis": 1700000000000,
+      "logical": 0,
+      "device_id": "00000000-0000-0000-0000-000000000002"
+    }
+  }
+}

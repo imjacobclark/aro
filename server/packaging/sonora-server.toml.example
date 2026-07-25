@@ -1,0 +1,9 @@
+hub_id = "00000000-0000-0000-0000-000000000001"
+display_name = "Sonora Hub"
+bind = "0.0.0.0:4848"
+data_dir = "/var/lib/sonora"
+tls_cert = "/var/lib/sonora/tls/cert.pem"
+tls_key = "/var/lib/sonora/tls/key.pem"
+control_socket = "/var/lib/sonora/control.sock"
+admin_token = "replace-with-at-least-16-random-characters"
+advertise_mdns = true

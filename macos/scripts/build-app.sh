@@ -37,11 +37,21 @@ staged_contents="$staged_app/Contents"
 staged_macos="$staged_contents/MacOS"
 staged_resources="$staged_contents/Resources"
 staged_frameworks="$staged_contents/Frameworks"
+staged_launch_agents="$staged_contents/Library/LaunchAgents"
 iconset="$staging_dir/$app_name.iconset"
 
-mkdir -p "$staged_macos" "$staged_resources" "$staged_frameworks" "$iconset"
+mkdir -p "$staged_macos" "$staged_resources" "$staged_frameworks" \
+    "$staged_launch_agents" "$iconset"
 ditto "$executable" "$staged_macos/$app_name"
 ditto "$info_plist" "$staged_contents/Info.plist"
+
+print "Building Sonora sync helper…"
+cargo build --manifest-path "$project_dir/../server/Cargo.toml" \
+    -p sonora-server --release
+helper="$project_dir/../server/target/release/sonora-server"
+ditto "$helper" "$staged_macos/sonora-server"
+ditto "$project_dir/../server/packaging/com.sonora.server.plist" \
+    "$staged_launch_agents/com.sonora.server.plist"
 
 if [[ -d "$resource_bundle" ]]; then
     ditto "$resource_bundle/Montserrat-Variable.ttf" \
@@ -80,6 +90,7 @@ done
 
 iconutil --convert icns "$iconset" --output "$staged_resources/$app_name.icns"
 chmod 755 "$staged_macos/$app_name"
+chmod 755 "$staged_macos/sonora-server"
 
 codesign --force --deep --sign - --timestamp=none "$staged_app"
 codesign --verify --deep --strict "$staged_app"

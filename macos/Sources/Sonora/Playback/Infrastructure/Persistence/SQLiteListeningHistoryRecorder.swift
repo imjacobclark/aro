@@ -81,7 +81,45 @@ struct SQLiteListeningHistoryRecorder: ListeningHistoryRecording {
             sqlite3_bind_int(statement, 5, completed ? 1 : 0)
             bind(sessionID.uuidString, to: statement, at: 6)
             sqlite3_step(statement)
+            if ended, sqlite3_changes(connection) == 1 {
+                appendCompletedSession(
+                    sessionID: sessionID,
+                    now: now,
+                    connection: connection
+                )
+            }
         }
+    }
+
+    private func appendCompletedSession(
+        sessionID: UUID,
+        now: TimeInterval,
+        connection: OpaquePointer
+    ) {
+        guard let statement = prepare(
+            """
+            INSERT OR IGNORE INTO sync_outbox
+                (operation_id, device_id, entity_type, entity_id, operation,
+                 payload, physical_millis, logical_counter, created_at)
+            SELECT ?, device_id, 'listening_session', id, 'upsert',
+                   printf(
+                       '{"track_id":"%s","started_at":%f,"ended_at":%f,"listened_seconds":%f,"completed":%s}',
+                       track_id, started_at, ended_at, listened_seconds,
+                       CASE completed WHEN 1 THEN 'true' ELSE 'false' END
+                   ),
+                   ?, 0, ?
+            FROM listening_sessions WHERE id = ?
+            """,
+            connection: connection
+        ) else {
+            return
+        }
+        defer { sqlite3_finalize(statement) }
+        bind(UUID().uuidString, to: statement, at: 1)
+        sqlite3_bind_int64(statement, 2, Int64(now * 1_000))
+        sqlite3_bind_double(statement, 3, now)
+        bind(sessionID.uuidString, to: statement, at: 4)
+        sqlite3_step(statement)
     }
 
     private func prepare(

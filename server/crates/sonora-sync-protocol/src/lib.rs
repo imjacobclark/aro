@@ -1,0 +1,257 @@
+//! Wire types for the versioned Sonora LAN synchronization protocol.
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::BTreeMap;
+use uuid::Uuid;
+
+pub const PROTOCOL_VERSION: u16 = 1;
+pub const SERVICE_TYPE: &str = "_sonora-sync._tcp.local.";
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HubInfo {
+    pub hub_id: Uuid,
+    pub display_name: String,
+    pub protocol_min: u16,
+    pub protocol_max: u16,
+    pub pairing_available: bool,
+    pub tls_fingerprint: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NegotiateRequest {
+    pub protocol_min: u16,
+    pub protocol_max: u16,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NegotiateResponse {
+    pub selected_protocol: u16,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PairingStartRequest {
+    pub device_id: Uuid,
+    pub device_name: String,
+    pub code: String,
+    pub pinned_tls_fingerprint: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PairingStartResponse {
+    pub request_id: Uuid,
+    pub state: PairingState,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PairingStatusResponse {
+    pub state: PairingState,
+    pub credential: Option<DeviceCredential>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PairingState {
+    Pending,
+    Approved,
+    Rejected,
+    Expired,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PairingApprovalRequest {
+    pub request_id: Uuid,
+    pub approve: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeviceCredential {
+    pub device_id: Uuid,
+    pub credential: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeviceSummary {
+    pub device_id: Uuid,
+    pub name: String,
+    pub paired_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RevokeRequest {
+    pub device_id: Uuid,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ManifestEntry {
+    pub local_track_id: String,
+    pub hub_track_id: Option<Uuid>,
+    pub content_hash: Option<String>,
+    pub fields: BTreeMap<String, VersionedValue>,
+    pub tombstoned: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct JoinPreviewRequest {
+    pub device_id: Uuid,
+    pub manifest: Vec<ManifestEntry>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct JoinPreview {
+    pub preview_id: Uuid,
+    pub deduplicated_tracks: usize,
+    pub local_only_tracks: usize,
+    pub hub_only_tracks: usize,
+    pub conflicts: Vec<FieldConflict>,
+    pub required_bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JoinCommitRequest {
+    pub preview_id: Uuid,
+    pub resolutions: BTreeMap<String, ConflictChoice>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictChoice {
+    Local,
+    Hub,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct FieldConflict {
+    pub track_id: Uuid,
+    pub field: String,
+    pub local: VersionedValue,
+    pub hub: VersionedValue,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct HybridTimestamp {
+    pub physical_millis: i64,
+    pub logical: u32,
+    pub device_id: Uuid,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct VersionedValue {
+    pub value: Value,
+    pub timestamp: HybridTimestamp,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Operation {
+    pub operation_id: Uuid,
+    pub device_id: Uuid,
+    pub entity_type: String,
+    pub entity_id: String,
+    pub kind: String,
+    pub payload: Value,
+    pub field_versions: BTreeMap<String, HybridTimestamp>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SequencedOperation {
+    pub sequence: u64,
+    #[serde(flatten)]
+    pub operation: Operation,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ExchangeRequest {
+    pub after_sequence: u64,
+    pub limit: u32,
+    pub operations: Vec<Operation>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ExchangeResponse {
+    pub accepted: Vec<SequencedOperation>,
+    pub changes: Vec<SequencedOperation>,
+    pub next_cursor: u64,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SnapshotPage {
+    pub tracks: Vec<ManifestEntry>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BlobStatus {
+    pub hash: String,
+    pub exists: bool,
+    pub committed_size: u64,
+    pub uploaded_size: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BlobCommitRequest {
+    pub hash: String,
+    pub size: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SyncJob {
+    pub job_id: Uuid,
+    pub kind: String,
+    pub state: JobState,
+    pub completed_units: u64,
+    pub total_units: u64,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum JobState {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ErrorResponse {
+    pub code: String,
+    pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixture_round_trip_preserves_operation() {
+        let operation = Operation {
+            operation_id: Uuid::nil(),
+            device_id: Uuid::nil(),
+            entity_type: "track_state".into(),
+            entity_id: "track-1".into(),
+            kind: "update".into(),
+            payload: serde_json::json!({"favourite": true}),
+            field_versions: BTreeMap::new(),
+        };
+        let encoded = serde_json::to_string(&operation).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Operation>(&encoded).unwrap(),
+            operation
+        );
+    }
+
+    #[test]
+    fn committed_v1_fixture_matches_wire_contract() {
+        let fixture = include_str!("../../../fixtures/operation-v1.json");
+        let operation: Operation = serde_json::from_str(fixture).unwrap();
+        assert_eq!(operation.entity_type, "track_state");
+        assert_eq!(
+            operation.field_versions["favourite"].physical_millis,
+            1_700_000_000_000
+        );
+    }
+}
