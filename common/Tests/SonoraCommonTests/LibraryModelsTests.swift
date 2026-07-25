@@ -175,7 +175,7 @@ final class LibraryModelsTests: XCTestCase {
         XCTAssertFalse(device.supports(sampleRate: 80_000))
         XCTAssertEqual(
             device.nearestSupportedSampleRate(to: 80_000),
-            64_000
+            88_200
         )
     }
 

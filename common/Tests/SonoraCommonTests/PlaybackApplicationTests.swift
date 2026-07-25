@@ -61,12 +61,20 @@ final class PlaybackApplicationTests: XCTestCase {
     }
 
     private func makeSong(id: String, title: String) -> Song {
-        Song(
-            libraryID: UUID(uuidString: id == "selected"
-                ? "00000000-0000-0000-0000-000000000001"
-                : id == "duplicate"
-                    ? "00000000-0000-0000-0000-000000000002"
-                    : "00000000-0000-0000-0000-000000000003")!,
+        let libraryID: UUID
+        switch id {
+        case "selected":
+            libraryID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        case "duplicate":
+            libraryID = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+        case "current":
+            libraryID = UUID(uuidString: "00000000-0000-0000-0000-000000000003")!
+        default:
+            libraryID = UUID(uuidString: "00000000-0000-0000-0000-000000000004")!
+        }
+
+        return Song(
+            libraryID: libraryID,
             url: URL(fileURLWithPath: "/Music/\(id).mp3"),
             title: title,
             artist: "Artist",
