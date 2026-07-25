@@ -1,5 +1,5 @@
-.build/
-.swiftpm/
-dist/
+**/.build/
+**/.swiftpm/
+**/dist/
 .DS_Store
 *.xcuserstate
