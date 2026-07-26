@@ -20,6 +20,19 @@ final class SyncPersistenceTests: XCTestCase {
         )
         let store = SQLiteSyncOperationStore(database: database)
         XCTAssertFalse(store.hasMemberships)
+        XCTAssertTrue(store.activeWatchedFolderPaths.isEmpty)
+
+        database.save(
+            folder: WatchedFolder(
+                id: UUID(),
+                url: directory,
+                displayName: "Music",
+                bookmarkData: nil,
+                isAccessible: true,
+                didStartSecurityScope: false
+            )
+        )
+        XCTAssertEqual(store.activeWatchedFolderPaths, [directory.path])
 
         store.upsertMembership(
             hub: SonoraHubInfo(

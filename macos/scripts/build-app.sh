@@ -104,7 +104,15 @@ iconutil --convert icns "$iconset" --output "$staged_resources/$app_name.icns"
 chmod 755 "$staged_macos/$app_name"
 chmod 755 "$staged_macos/sonora-server"
 
-codesign --force --deep --sign - --timestamp=none "$staged_app"
+codesign --force --sign - --timestamp=none \
+    --identifier com.imjacobclark.sonora.server \
+    "$staged_macos/sonora-server"
+codesign --force --deep --sign - --timestamp=none \
+    --preserve-metadata=identifier \
+    "$staged_app"
+codesign --verify --strict \
+    --test-requirement '=identifier "com.imjacobclark.sonora.server"' \
+    "$staged_macos/sonora-server"
 codesign --verify --deep --strict "$staged_app"
 plutil -lint "$staged_contents/Info.plist" >/dev/null
 

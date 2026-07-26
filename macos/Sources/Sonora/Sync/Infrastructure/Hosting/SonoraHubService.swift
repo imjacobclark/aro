@@ -58,19 +58,35 @@ final class SonoraHubService {
             socketURL: URL(fileURLWithPath: dataLocation)
                 .appendingPathComponent("control.sock")
         )
+        if await waitForCompatibleHelper(client) {
+            return
+        }
+        await restartForUpgrade()
+        guard errorMessage == nil else { return }
+        guard await waitForCompatibleHelper(client) else {
+            errorMessage = "The Sonora helper is enabled but did not start "
+                + "listening. Use Restart Bundled Helper in Sync settings."
+            return
+        }
+        errorMessage = nil
+    }
+
+    private func waitForCompatibleHelper(
+        _ client: HubControlClient
+    ) async -> Bool {
         for attempt in 0 ..< 25 {
             do {
                 try await client.verifyCompatibility()
-                return
+                return true
             } catch HubControlError.incompatibleHelper {
-                break
+                return false
             } catch {
                 if attempt < 24 {
                     try? await Task.sleep(for: .milliseconds(200))
                 }
             }
         }
-        await restartForUpgrade()
+        return false
     }
 
     var statusLabel: String {
@@ -78,7 +94,7 @@ final class SonoraHubService {
         case .notRegistered:
             "Ready to enable"
         case .enabled:
-            "Running"
+            "Enabled; waiting for listener"
         case .requiresApproval:
             "Approval required in Login Items"
         case .notFound:

@@ -18,7 +18,11 @@ the following commands from the download directory:
 ```sh
 ditto -x -k Sonora-v*-macos-*.zip .
 xattr -dr com.apple.quarantine Sonora.app
-codesign --force --deep --sign - --timestamp=none Sonora.app
+codesign --force --sign - --timestamp=none \
+  --identifier com.imjacobclark.sonora.server \
+  Sonora.app/Contents/MacOS/sonora-server
+codesign --force --deep --sign - --timestamp=none \
+  --preserve-metadata=identifier Sonora.app
 mkdir -p "$HOME/Applications"
 ditto Sonora.app "$HOME/Applications/Sonora.app"
 open "$HOME/Applications/Sonora.app"
@@ -34,6 +38,9 @@ To confirm the downloaded bundle before opening it:
 ```sh
 codesign --verify --deep --strict --verbose=2 \
   "$HOME/Applications/Sonora.app"
+codesign --verify --strict \
+  --test-requirement '=identifier "com.imjacobclark.sonora.server"' \
+  "$HOME/Applications/Sonora.app/Contents/MacOS/sonora-server"
 ```
 
 ### Enable LAN library hosting

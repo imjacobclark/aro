@@ -94,6 +94,9 @@ jobs:
               macos/dist/Sonora.app/Contents/Info.plist
           )" = "${BUILD_NUMBER}"
           plutil -lint macos/dist/Sonora.app/Contents/Library/LaunchAgents/com.sonora.server.plist
+          codesign --verify --strict \
+            --test-requirement '=identifier "com.imjacobclark.sonora.server"' \
+            macos/dist/Sonora.app/Contents/MacOS/sonora-server
           codesign --verify --deep --strict --verbose=2 macos/dist/Sonora.app
         env:
           APP_VERSION: ${{ needs.version.outputs.version }}

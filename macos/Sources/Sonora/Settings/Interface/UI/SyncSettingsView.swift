@@ -10,6 +10,8 @@ struct SyncSettingsView: View {
     let libraryFiles: any LibraryFileManaging
     @State private var requestedHosting = false
     @State private var browser = SonoraHubBrowser()
+    @State private var localServers = LocalSonoraServerMonitor()
+    @State private var hostedImportStatus: String?
     @State private var pairingCode = ""
     @State private var pairingStatus: String?
     @State private var hostingPairingWindow: HubPairingWindow?
@@ -23,6 +25,74 @@ struct SyncSettingsView: View {
 
     var body: some View {
         Form {
+            Section("Active Local Sonora Servers") {
+                if localServers.servers.isEmpty {
+                    Text(
+                        service.isEnabled
+                            ? "The Sonora helper is enabled but is not listening."
+                            : "No Sonora servers are currently listening on this Mac."
+                    )
+                        .foregroundStyle(.secondary)
+                    if service.isEnabled {
+                        Button("Restart Bundled Helper") {
+                            recoverBundledHelper()
+                        }
+                    }
+                } else {
+                    ForEach(localServers.servers) { server in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(server.displayName)
+                                        .font(SonoraFont.headline)
+                                    Text(server.kind.label)
+                                        .font(SonoraFont.footnote)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button("Stop", role: .destructive) {
+                                    stopLocalServer(server)
+                                }
+                            }
+                            LabeledContent("Listener", value: server.listener)
+                            if let dataPath = server.dataPath {
+                                LabeledContent("Library Data") {
+                                    Text(dataPath)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                        .help(dataPath)
+                                }
+                            }
+                            HStack(spacing: 18) {
+                                if let trackCount = server.trackCount {
+                                    Text("\(trackCount) tracks")
+                                }
+                                if let blobCount = server.blobCount {
+                                    Text("\(blobCount) blobs")
+                                }
+                                if let sequence = server.sequence {
+                                    Text("sequence \(sequence)")
+                                }
+                                Text("PID \(server.pid)")
+                            }
+                            .font(SonoraFont.footnote)
+                            .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+                HStack {
+                    Button("Refresh") {
+                        localServers.refresh()
+                    }
+                    if let error = localServers.errorMessage {
+                        Text(error)
+                            .font(SonoraFont.footnote)
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
+
             Section("Host This Library") {
                 LabeledContent("Server Data") {
                     HStack {
@@ -61,10 +131,8 @@ struct SyncSettingsView: View {
 
                 Toggle("Enable Sonora Hub", isOn: Binding(
                     get: { service.isEnabled || requestedHosting },
-                    set: {
-                        requestedHosting = $0
-                        service.setEnabled($0)
-                        requestedHosting = service.isEnabled
+                    set: { enabled in
+                        setHostingEnabled(enabled)
                     }
                 ))
                 .disabled(
@@ -75,7 +143,17 @@ struct SyncSettingsView: View {
                             )
                     ) && !service.isEnabled
                 )
-                LabeledContent("Helper Status", value: service.statusLabel)
+                LabeledContent(
+                    "Helper Status",
+                    value: bundledHelperIsActive
+                        ? "Running"
+                        : service.statusLabel
+                )
+                if let hostedImportStatus {
+                    Text(hostedImportStatus)
+                        .font(SonoraFont.footnote)
+                        .foregroundStyle(.secondary)
+                }
                 Button("Open Pairing Window") {
                     openHostingPairing()
                 }
@@ -128,7 +206,11 @@ struct SyncSettingsView: View {
                 LabeledContent("Discovered Hubs") {
                     HStack {
                         if browser.hubs.isEmpty {
-                            Text("Searching on the local network…")
+                            Text(
+                                browser.isSearching
+                                    ? "Checking the local network…"
+                                    : "No active hubs found"
+                            )
                                 .foregroundStyle(.secondary)
                         } else {
                             Picker(
@@ -138,7 +220,7 @@ struct SyncSettingsView: View {
                                 Text("Choose a hub").tag("")
                                 ForEach(browser.hubs) { hub in
                                     Text(hub.name)
-                                        .tag("https://\(hub.host):4848")
+                                        .tag(hub.address)
                                 }
                             }
                             .labelsHidden()
@@ -245,7 +327,7 @@ struct SyncSettingsView: View {
         }
         .formStyle(.grouped)
         .padding()
-        .frame(width: 600, height: 620)
+        .frame(width: 640, height: 720)
         .alert(
             "Unable to Change Hosting",
             isPresented: Binding(
@@ -259,7 +341,16 @@ struct SyncSettingsView: View {
         }
         .onAppear {
             requestedHosting = service.isEnabled
+            localServers.refresh()
             refreshDiscovery()
+            if service.isEnabled {
+                Task {
+                    await service.ensureCompatibleHelper(
+                        dataLocation: preferences.dataLocation
+                    )
+                    await publishWatchedFolders()
+                }
+            }
         }
         .onDisappear {
             browser.stop()
@@ -269,6 +360,12 @@ struct SyncSettingsView: View {
             while !Task.isCancelled {
                 await refreshPendingPairingRequests()
                 try? await Task.sleep(for: .seconds(1))
+            }
+        }
+        .task {
+            while !Task.isCancelled {
+                localServers.refresh()
+                try? await Task.sleep(for: .seconds(2))
             }
         }
         .sheet(isPresented: $showingFirstJoin) {
@@ -292,6 +389,12 @@ struct SyncSettingsView: View {
         )
     }
 
+    private var bundledHelperIsActive: Bool {
+        localServers.servers.contains {
+            $0.kind == .bundledHelper
+        }
+    }
+
     private func refreshDiscovery() {
         if !syncStore.hasMemberships {
             preferences.manualAddress = ""
@@ -299,6 +402,20 @@ struct SyncSettingsView: View {
             pairingStatus = nil
         }
         browser.restart()
+    }
+
+    private func stopLocalServer(_ server: LocalSonoraServer) {
+        switch server.kind {
+        case .bundledHelper:
+            requestedHosting = false
+            service.setEnabled(false)
+        case .standalone:
+            localServers.stopStandalone(server)
+        }
+        Task {
+            try? await Task.sleep(for: .milliseconds(500))
+            localServers.refresh()
+        }
     }
 
     private var capacityDescription: String? {
@@ -328,6 +445,7 @@ struct SyncSettingsView: View {
         if service.isEnabled {
             Task {
                 await service.restartForUpgrade()
+                await publishWatchedFolders()
             }
         }
     }
@@ -337,7 +455,65 @@ struct SyncSettingsView: View {
         if service.isEnabled {
             Task {
                 await service.restartForUpgrade()
+                await publishWatchedFolders()
             }
+        }
+    }
+
+    private func setHostingEnabled(_ enabled: Bool) {
+        requestedHosting = enabled
+        service.setEnabled(enabled)
+        requestedHosting = service.isEnabled
+        guard enabled, service.errorMessage == nil else {
+            if !enabled {
+                hostedImportStatus = nil
+            }
+            return
+        }
+        Task {
+            await service.ensureCompatibleHelper(
+                dataLocation: preferences.dataLocation
+            )
+            await publishWatchedFolders()
+        }
+    }
+
+    private func recoverBundledHelper() {
+        Task {
+            hostedImportStatus = "Restarting the bundled helper…"
+            await service.restartForUpgrade()
+            await publishWatchedFolders()
+        }
+    }
+
+    private func publishWatchedFolders() async {
+        guard service.errorMessage == nil,
+              let controlClient else {
+            return
+        }
+        let paths = syncStore.activeWatchedFolderPaths
+        guard !paths.isEmpty else {
+            hostedImportStatus = "No active watched folders to publish."
+            localServers.refresh()
+            return
+        }
+        hostedImportStatus = "Publishing \(paths.count) watched folder"
+            + (paths.count == 1 ? "…" : "s…")
+        do {
+            var imported = 0
+            for path in paths {
+                imported += try await controlClient.importFolder(
+                    path: path,
+                    mode: preferences.importMode
+                )
+            }
+            hostedImportStatus = imported == 0
+                ? "Hosted library is up to date."
+                : "Published \(imported) tracks to the hub."
+            localServers.refresh()
+        } catch {
+            service.errorMessage = "Unable to publish the watched library: "
+                + error.localizedDescription
         }
     }
 

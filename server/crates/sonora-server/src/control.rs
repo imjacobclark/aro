@@ -3,7 +3,10 @@ use anyhow::Result;
 use chrono::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{path::Path, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
@@ -19,6 +22,7 @@ enum ControlCommand {
     Approve { request_id: Uuid, approve: bool },
     Devices,
     Revoke { device_id: Uuid },
+    Import { path: PathBuf, mode: String },
     Status,
 }
 
@@ -31,7 +35,7 @@ struct ControlResponse {
     error: Option<String>,
 }
 
-const CONTROL_PROTOCOL_VERSION: u16 = 2;
+const CONTROL_PROTOCOL_VERSION: u16 = 3;
 
 pub async fn start(path: &Path, state: Arc<AppState>) -> Result<JoinHandle<()>> {
     if let Some(parent) = path.parent() {
@@ -124,6 +128,16 @@ async fn handle(stream: &mut UnixStream, state: Arc<AppState>) -> Result<Value> 
             let revoked = state.store.revoke_device(device_id)?;
             state.pairing.revoke(device_id);
             json!({"revoked": revoked})
+        }
+        ControlCommand::Import { path, mode } => {
+            let store = state.store.clone();
+            let hub_id = state.hub_id;
+            let data_dir = state.data_dir.clone();
+            let imported = tokio::task::spawn_blocking(move || {
+                crate::import_into_store(&store, hub_id, &data_dir, &path, &mode)
+            })
+            .await??;
+            json!({"imported_tracks": imported})
         }
         ControlCommand::Status => json!({
             "control_protocol_version": CONTROL_PROTOCOL_VERSION,

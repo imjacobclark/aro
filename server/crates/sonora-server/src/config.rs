@@ -100,8 +100,8 @@ fn default_data_dir() -> PathBuf {
         return PathBuf::from(path);
     }
     #[cfg(target_os = "macos")]
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join("Library/Application Support/Sonora/Server");
+    if let Some(home) = macos_home_dir() {
+        return home.join("Library/Application Support/Sonora/Server");
     }
     #[cfg(target_os = "windows")]
     if let Some(app_data) = std::env::var_os("PROGRAMDATA") {
@@ -111,4 +111,19 @@ fn default_data_dir() -> PathBuf {
         return PathBuf::from(data_home).join("sonora/server");
     }
     PathBuf::from("/var/lib/sonora")
+}
+
+#[cfg(target_os = "macos")]
+fn macos_home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from).or_else(|| {
+        // SMAppService launch agents do not necessarily receive HOME.
+        // Resolve the current user's home from the account database so the
+        // bundled helper finds the same config written by the app.
+        let entry = unsafe { libc::getpwuid(libc::getuid()) };
+        if entry.is_null() {
+            return None;
+        }
+        let directory = unsafe { std::ffi::CStr::from_ptr((*entry).pw_dir) };
+        Some(PathBuf::from(directory.to_string_lossy().into_owned()))
+    })
 }

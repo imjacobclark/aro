@@ -20,6 +20,7 @@ clap.workspace = true
 hex.workspace = true
 fs2.workspace = true
 http.workspace = true
+libc.workspace = true
 mdns-sd.workspace = true
 rcgen.workspace = true
 reqwest.workspace = true
@@ -37,3 +38,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

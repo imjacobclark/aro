@@ -117,6 +117,7 @@ async fn serve(config: Config) -> Result<()> {
     let state = AppState {
         hub_id: config.hub_id,
         display_name: config.display_name.clone(),
+        data_dir: config.data_dir.clone(),
         admin_token: config.admin_token.clone(),
         pairing,
         jobs: JobRegistry::default(),
@@ -197,16 +198,19 @@ fn advertise(
 }
 
 fn service_info(config: &Config, pairing_available: bool) -> Result<ServiceInfo> {
+    let hub_label = config.hub_id.simple().to_string();
+    let hostname = format!("sonora-{}.local.", &hub_label[..8]);
     let properties = [
         ("hub_id", config.hub_id.to_string()),
         ("name", config.display_name.clone()),
         ("protocol", PROTOCOL_VERSION.to_string()),
         ("pairing", pairing_available.to_string()),
+        ("host", hostname.clone()),
     ];
     let info = ServiceInfo::new(
         SERVICE_TYPE,
         &config.display_name,
-        "sonora.local.",
+        &hostname,
         IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         config.bind.port(),
         &properties[..],
@@ -258,19 +262,31 @@ fn purge(path: &Path, hash: &str) -> Result<()> {
 }
 
 fn import(path: &Path, source: PathBuf, mode: String) -> Result<()> {
+    let config = Config::load(path)?;
+    let store = HubStore::open(&config.data_dir)?;
+    let imported = import_into_store(&store, config.hub_id, &config.data_dir, &source, &mode)?;
+    println!("Imported {imported} tracks in {mode} mode");
+    Ok(())
+}
+
+fn import_into_store(
+    store: &HubStore,
+    hub_id: uuid::Uuid,
+    data_dir: &Path,
+    source: &Path,
+    mode: &str,
+) -> Result<usize> {
     if mode != "managed" && mode != "referenced" {
         bail!("mode must be managed or referenced");
     }
-    let config = Config::load(path)?;
-    let store = HubStore::open(&config.data_dir)?;
     if !source.exists() {
         bail!("source does not exist: {}", source.display());
     }
-    let files = media_files(&source)?;
+    let files = media_files(source)?;
     let required_bytes = files.iter().try_fold(0_u64, |total, file| {
         Ok::<_, std::io::Error>(total.saturating_add(file.metadata()?.len()))
     })?;
-    let free_bytes = fs2::available_space(&config.data_dir)?;
+    let free_bytes = fs2::available_space(data_dir)?;
     println!(
         "Importing {} files (required: {} bytes, free: {} bytes)",
         files.len(),
@@ -297,11 +313,11 @@ fn import(path: &Path, source: PathBuf, mode: String) -> Result<()> {
         let timestamp = HybridTimestamp {
             physical_millis: now,
             logical: operations.len() as u32,
-            device_id: config.hub_id,
+            device_id: hub_id,
         };
         operations.push(Operation {
             operation_id: uuid::Uuid::new_v4(),
-            device_id: config.hub_id,
+            device_id: hub_id,
             entity_type: "track".into(),
             entity_id: track_id.to_string(),
             kind: "upsert".into(),
@@ -322,8 +338,7 @@ fn import(path: &Path, source: PathBuf, mode: String) -> Result<()> {
         "last_import",
         &serde_json::json!({"path": source, "mode": mode, "tracks": imported}),
     )?;
-    println!("Imported {imported} tracks in {mode} mode");
-    Ok(())
+    Ok(imported)
 }
 
 fn media_files(source: &Path) -> Result<Vec<PathBuf>> {
@@ -426,4 +441,30 @@ fn local_url(config: &Config) -> String {
         "127.0.0.1"
     };
     format!("https://{host}:{}", config.bind.port())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watched_folder_import_is_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("Music");
+        let data = directory.path().join("Hub");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("Track.mp3"), b"audio").unwrap();
+        let store = HubStore::open(&data).unwrap();
+        let hub_id = uuid::Uuid::new_v4();
+
+        assert_eq!(
+            import_into_store(&store, hub_id, &data, &source, "managed").unwrap(),
+            1
+        );
+        assert_eq!(
+            import_into_store(&store, hub_id, &data, &source, "managed").unwrap(),
+            0
+        );
+        assert_eq!(store.latest_sequence().unwrap(), 1);
+    }
 }

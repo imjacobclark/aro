@@ -262,6 +262,34 @@ struct SQLiteSyncOperationStore {
         } ?? false
     }
 
+    var activeWatchedFolderPaths: [String] {
+        database.withReadConnection { connection in
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                connection,
+                """
+                SELECT path
+                FROM watched_folders
+                WHERE removed_at IS NULL
+                ORDER BY path
+                """,
+                -1,
+                &statement,
+                nil
+            ) == SQLITE_OK,
+                  let statement else {
+                return []
+            }
+            defer { sqlite3_finalize(statement) }
+            var paths: [String] = []
+            while sqlite3_step(statement) == SQLITE_ROW,
+                  let path = text(statement, 0) {
+                paths.append(path)
+            }
+            return paths
+        } ?? []
+    }
+
     func manifest(hubID: UUID) -> [SyncManifestEntry] {
         database.withReadConnection { connection in
             var statement: OpaquePointer?

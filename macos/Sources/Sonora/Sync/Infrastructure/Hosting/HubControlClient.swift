@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import SonoraCommon
 
 enum HubControlError: LocalizedError {
     case emptyResponse
@@ -43,7 +44,7 @@ struct ControlledPairingRequest: Identifiable, Codable, Sendable {
 }
 
 struct HubControlClient: Sendable {
-    static let controlProtocolVersion = 2
+    static let controlProtocolVersion = 3
 
     let socketURL: URL
 
@@ -93,6 +94,18 @@ struct HubControlClient: Sendable {
             "command": "revoke",
             "device_id": deviceID.uuidString,
         ])
+    }
+
+    func importFolder(path: String, mode: HubImportMode) async throws -> Int {
+        let result = try await send([
+            "command": "import",
+            "path": path,
+            "mode": mode.rawValue,
+        ])
+        guard let imported = result["imported_tracks"] as? Int else {
+            throw HubControlError.invalidResponse
+        }
+        return imported
     }
 
     private func send(

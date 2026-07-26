@@ -27,6 +27,7 @@ clap = { version = "4.5", features = ["derive", "env"] }
 hex = "0.4"
 fs2 = "0.4"
 http = "1.3"
+libc = "0.2"
 mdns-sd = "0.15"
 matter-crypto = "0.2"
 parking_lot = "0.12"
