@@ -12,6 +12,7 @@ struct SyncSettingsView: View {
     @State private var browser = SonoraHubBrowser()
     @State private var localServers = LocalSonoraServerMonitor()
     @State private var hostedImportStatus: String?
+    @State private var hostingStartDate: Date?
     @State private var pairingCode = ""
     @State private var pairingStatus: String?
     @State private var hostingPairingWindow: HubPairingWindow?
@@ -88,7 +89,17 @@ struct SyncSettingsView: View {
                     if let error = localServers.errorMessage {
                         Text(error)
                             .font(SonoraFont.footnote)
+                        .foregroundStyle(.orange)
+                    }
+                }
+                if let warning = localServers.networkWarning {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(warning)
+                            .font(SonoraFont.footnote)
                             .foregroundStyle(.orange)
+                        Button("Open Firewall Settings") {
+                            openFirewallSettings()
+                        }
                     }
                 }
             }
@@ -145,9 +156,7 @@ struct SyncSettingsView: View {
                 )
                 LabeledContent(
                     "Background Status",
-                    value: bundledHelperIsActive
-                        ? "Running"
-                        : service.statusLabel
+                    value: backgroundStatusLabel
                 )
                 if let hostedImportStatus {
                     Text(hostedImportStatus)
@@ -344,6 +353,7 @@ struct SyncSettingsView: View {
             localServers.refresh()
             refreshDiscovery()
             if service.isEnabled {
+                hostingStartDate = Date()
                 Task {
                     await service.ensureCompatibleHelper(
                         dataLocation: preferences.dataLocation
@@ -365,6 +375,9 @@ struct SyncSettingsView: View {
         .task {
             while !Task.isCancelled {
                 localServers.refresh()
+                if bundledHelperIsActive {
+                    hostingStartDate = nil
+                }
                 try? await Task.sleep(for: .seconds(2))
             }
         }
@@ -393,6 +406,17 @@ struct SyncSettingsView: View {
         localServers.servers.contains {
             $0.kind == .bundledHelper
         }
+    }
+
+    private var backgroundStatusLabel: String {
+        if bundledHelperIsActive {
+            return "Running"
+        }
+        if service.isEnabled, let hostingStartDate {
+            let elapsed = max(0, Int(Date().timeIntervalSince(hostingStartDate)))
+            return "Starting… \(elapsed)s"
+        }
+        return service.statusLabel
     }
 
     private func refreshDiscovery() {
@@ -483,6 +507,7 @@ struct SyncSettingsView: View {
             guard localServers.errorMessage == nil else { return }
         }
         requestedHosting = enabled
+        hostingStartDate = enabled ? Date() : nil
         service.setEnabled(enabled)
         requestedHosting = service.isEnabled
         guard enabled, service.errorMessage == nil else {
@@ -497,6 +522,13 @@ struct SyncSettingsView: View {
             )
             await publishWatchedFolders()
         }
+    }
+
+    private func openFirewallSettings() {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.Network-Settings.extension"
+        ) else { return }
+        NSWorkspace.shared.open(url)
     }
 
     private func recoverBundledHelper() {

@@ -141,6 +141,22 @@ actor SonoraSyncClient {
         decoder = JSONDecoder.sonoraSyncProtocol()
     }
 
+    init(discoveryBaseURL baseURL: URL) {
+        self.baseURL = baseURL
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.waitsForConnectivity = false
+        configuration.timeoutIntervalForRequest = 3
+        configuration.timeoutIntervalForResource = 3
+        session = URLSession(
+            configuration: configuration,
+            delegate: PairingTLSDelegate(),
+            delegateQueue: nil
+        )
+        encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        decoder = JSONDecoder.sonoraSyncProtocol()
+    }
+
     func hubInfo() async throws -> SonoraHubInfo {
         try await get("v1/hub")
     }

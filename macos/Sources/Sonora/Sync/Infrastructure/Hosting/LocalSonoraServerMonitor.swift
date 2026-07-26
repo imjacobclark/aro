@@ -37,6 +37,7 @@ final class LocalSonoraServerMonitor {
     private let userID = getuid()
     var servers: [LocalSonoraServer] = []
     var errorMessage: String?
+    var networkWarning: String?
 
     func refresh() {
         do {
@@ -51,9 +52,11 @@ final class LocalSonoraServerMonitor {
                 return lhs.pid < rhs.pid
             }
             errorMessage = nil
+            networkWarning = firewallWarning()
         } catch {
             servers = []
             errorMessage = error.localizedDescription
+            networkWarning = nil
         }
     }
 
@@ -308,6 +311,35 @@ final class LocalSonoraServerMonitor {
             "/bin/ps",
             arguments: ["-p", String(pid), "-o", "command="]
         ).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func firewallWarning() -> String? {
+        guard !servers.isEmpty else { return nil }
+        let tool = "/usr/libexec/ApplicationFirewall/socketfilterfw"
+        let blockAll = try? run(
+            tool,
+            arguments: ["--getblockall"],
+            acceptsNonzeroExit: true
+        )
+        if blockAll?.localizedCaseInsensitiveContains(
+            "blocking all"
+        ) == true {
+            return "macOS Firewall is blocking all incoming connections. "
+                + "Other Sonoras cannot connect to this Background Service."
+        }
+        let helper = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/MacOS/sonora-server")
+            .path
+        let appStatus = try? run(
+            tool,
+            arguments: ["--getappblocked", helper],
+            acceptsNonzeroExit: true
+        )
+        if appStatus?.localizedCaseInsensitiveContains("is blocked") == true {
+            return "macOS Firewall is blocking incoming connections to the "
+                + "Sonora Background Service."
+        }
+        return nil
     }
 
     private func run(

@@ -130,7 +130,7 @@ final class SonoraHubBrowser {
                         guard let baseURL = candidate.baseURL else { return nil }
                         do {
                             let client = SonoraSyncClient(
-                                pairingBaseURL: baseURL
+                                discoveryBaseURL: baseURL
                             )
                             let info = try await client.hubInfo()
                             return info.hubID == candidate.hubID
@@ -156,6 +156,11 @@ final class SonoraHubBrowser {
                 $0.name.localizedStandardCompare($1.name)
                     == .orderedAscending
             }
+            self.errorMessage = verified.isEmpty && !candidates.isEmpty
+                ? "Bonjour found a Sonora, but its secure connection could "
+                    + "not be reached. Check macOS Firewall settings on the "
+                    + "hosting Mac."
+                : nil
             self.isSearching = false
         }
     }
