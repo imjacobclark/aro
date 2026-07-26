@@ -117,6 +117,7 @@ async fn serve(config: Config) -> Result<()> {
     let state = AppState {
         hub_id: config.hub_id,
         display_name: config.display_name.clone(),
+        #[cfg(unix)]
         data_dir: config.data_dir.clone(),
         admin_token: config.admin_token.clone(),
         pairing,

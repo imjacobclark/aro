@@ -20,6 +20,7 @@ use uuid::Uuid;
 pub struct AppState {
     pub hub_id: Uuid,
     pub display_name: String,
+    #[cfg(unix)]
     pub data_dir: PathBuf,
     pub admin_token: String,
     pub pairing: PairingManager,
