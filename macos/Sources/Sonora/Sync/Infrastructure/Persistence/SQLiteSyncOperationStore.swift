@@ -244,6 +244,24 @@ struct SQLiteSyncOperationStore {
         } ?? nil
     }
 
+    var hasMemberships: Bool {
+        database.withReadConnection { connection in
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                connection,
+                "SELECT 1 FROM hub_memberships LIMIT 1",
+                -1,
+                &statement,
+                nil
+            ) == SQLITE_OK,
+                  let statement else {
+                return false
+            }
+            defer { sqlite3_finalize(statement) }
+            return sqlite3_step(statement) == SQLITE_ROW
+        } ?? false
+    }
+
     func manifest(hubID: UUID) -> [SyncManifestEntry] {
         database.withReadConnection { connection in
             var statement: OpaquePointer?

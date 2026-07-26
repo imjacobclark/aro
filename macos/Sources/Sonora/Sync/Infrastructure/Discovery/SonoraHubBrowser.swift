@@ -15,6 +15,12 @@ final class SonoraHubBrowser {
     var hubs: [HubEndpointCandidate] = []
     var errorMessage: String?
 
+    func restart() {
+        stop()
+        errorMessage = nil
+        start()
+    }
+
     func start() {
         guard browser == nil else { return }
         let browser = NWBrowser(

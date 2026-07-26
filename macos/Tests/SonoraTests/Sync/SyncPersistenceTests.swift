@@ -6,6 +6,37 @@ import XCTest
 @testable import Sonora
 
 final class SyncPersistenceTests: XCTestCase {
+    func testMembershipPresenceDistinguishesFreshClients() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let database = LibraryDatabase(
+            url: directory.appendingPathComponent("Library.sqlite3")
+        )
+        let store = SQLiteSyncOperationStore(database: database)
+        XCTAssertFalse(store.hasMemberships)
+
+        store.upsertMembership(
+            hub: SonoraHubInfo(
+                hubID: UUID(),
+                displayName: "Fresh Hub",
+                protocolMin: 2,
+                protocolMax: 2,
+                pairingAvailable: true
+            ),
+            baseURL: URL(string: "https://sonora.local:4848")!,
+            tlsFingerprint: String(repeating: "a", count: 64),
+            replicaMode: .onDemand
+        )
+
+        XCTAssertTrue(store.hasMemberships)
+    }
+
     func testCacheEvictionProtectsPinnedQueuedAndPlayingFiles() {
         let now = Date()
         let entries = [

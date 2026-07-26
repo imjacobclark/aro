@@ -126,19 +126,35 @@ struct SyncSettingsView: View {
 
             Section("Connect to a Hub") {
                 LabeledContent("Discovered Hubs") {
-                    if browser.hubs.isEmpty {
-                        Text("Searching on the local network…")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Picker("Discovered Hubs", selection: $preferences.manualAddress) {
-                            Text("Choose a hub").tag("")
-                            ForEach(browser.hubs) { hub in
-                                Text(hub.name)
-                                    .tag("https://\(hub.host):4848")
+                    HStack {
+                        if browser.hubs.isEmpty {
+                            Text("Searching on the local network…")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Picker(
+                                "Discovered Hubs",
+                                selection: $preferences.manualAddress
+                            ) {
+                                Text("Choose a hub").tag("")
+                                ForEach(browser.hubs) { hub in
+                                    Text(hub.name)
+                                        .tag("https://\(hub.host):4848")
+                                }
                             }
+                            .labelsHidden()
+                        }
+                        Button {
+                            refreshDiscovery()
+                        } label: {
+                            Label("Scan Again", systemImage: "arrow.clockwise")
                         }
                         .labelsHidden()
                     }
+                }
+                if let discoveryError = browser.errorMessage {
+                    Text("Local discovery failed: \(discoveryError)")
+                        .font(SonoraFont.footnote)
+                        .foregroundStyle(.orange)
                 }
                 TextField(
                     "Manual hostname or IP",
@@ -243,7 +259,7 @@ struct SyncSettingsView: View {
         }
         .onAppear {
             requestedHosting = service.isEnabled
-            browser.start()
+            refreshDiscovery()
         }
         .onDisappear {
             browser.stop()
@@ -274,6 +290,15 @@ struct SyncSettingsView: View {
                 preferences.cacheLimitBytes = Int64($0) * 1_024 * 1_024 * 1_024
             }
         )
+    }
+
+    private func refreshDiscovery() {
+        if !syncStore.hasMemberships {
+            preferences.manualAddress = ""
+            pairingCode = ""
+            pairingStatus = nil
+        }
+        browser.restart()
     }
 
     private var capacityDescription: String? {
