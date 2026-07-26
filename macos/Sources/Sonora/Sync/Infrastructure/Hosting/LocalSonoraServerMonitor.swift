@@ -73,6 +73,28 @@ final class LocalSonoraServerMonitor {
         errorMessage = nil
     }
 
+    func stopBundledService(_ server: LocalSonoraServer) {
+        guard server.kind == .bundledHelper,
+              (try? bundledHelperPID()) == server.pid else {
+            errorMessage = "That Background Service is no longer running."
+            return
+        }
+        do {
+            _ = try run(
+                "/bin/launchctl",
+                arguments: [
+                    "bootout",
+                    "gui/\(userID)/com.imjacobclark.sonora.server",
+                ]
+            )
+            servers.removeAll { $0.pid == server.pid }
+            errorMessage = nil
+        } catch {
+            errorMessage = "Unable to stop the Background Service: "
+                + error.localizedDescription
+        }
+    }
+
     nonisolated static func parseConfiguration(
         _ contents: String
     ) -> [String: String] {

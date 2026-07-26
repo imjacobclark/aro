@@ -130,7 +130,11 @@ struct SyncSettingsView: View {
                 }
 
                 Toggle("Host This Sonora", isOn: Binding(
-                    get: { service.isEnabled || requestedHosting },
+                    get: {
+                        service.isEnabled
+                            || bundledHelperIsActive
+                            || requestedHosting
+                    },
                     set: { enabled in
                         setHostingEnabled(enabled)
                     }
@@ -157,7 +161,7 @@ struct SyncSettingsView: View {
                 Button("Open Pairing Window") {
                     openHostingPairing()
                 }
-                .disabled(!service.isEnabled)
+                .disabled(!bundledHelperIsActive)
                 if let hostingPairingWindow {
                     LabeledContent("Pairing Code") {
                         Text(hostingPairingWindow.code)
@@ -319,9 +323,9 @@ struct SyncSettingsView: View {
                 }
                 HStack {
                     Button("Refresh", action: refreshDevices)
-                        .disabled(!service.isEnabled)
+                        .disabled(!bundledHelperIsActive)
                     Button("Purge Tombstoned Media…", role: .destructive) {}
-                        .disabled(!service.isEnabled)
+                        .disabled(!bundledHelperIsActive)
                 }
             }
         }
@@ -409,6 +413,12 @@ struct SyncSettingsView: View {
         case .bundledHelper:
             requestedHosting = false
             service.setEnabled(false)
+            if service.errorMessage != nil {
+                localServers.stopBundledService(server)
+                if localServers.errorMessage == nil {
+                    service.errorMessage = nil
+                }
+            }
         case .standalone:
             localServers.stopStandalone(server)
         }
@@ -461,6 +471,13 @@ struct SyncSettingsView: View {
     }
 
     private func setHostingEnabled(_ enabled: Bool) {
+        if !enabled,
+           let running = localServers.servers.first(where: {
+               $0.kind == .bundledHelper
+           }) {
+            stopLocalServer(running)
+            return
+        }
         requestedHosting = enabled
         service.setEnabled(enabled)
         requestedHosting = service.isEnabled
