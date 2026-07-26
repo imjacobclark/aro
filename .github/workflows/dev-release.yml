@@ -9,12 +9,42 @@ permissions:
   contents: write
 
 concurrency:
-  group: development-release-${{ github.sha }}
+  group: development-release
   cancel-in-progress: false
 
 jobs:
+  version:
+    name: Select next semantic version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+
+    steps:
+      - name: Find next unpublished pre-1.0 version
+        id: next
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          max_patch=0
+          while IFS= read -r tag; do
+            if [[ "${tag}" =~ ^v0\.0\.([0-9]+)$ ]]; then
+              patch="${BASH_REMATCH[1]}"
+              if (( patch > max_patch )); then
+                max_patch="${patch}"
+              fi
+            fi
+          done < <(
+            gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/releases" \
+              --jq '.[].tag_name'
+          )
+          version="0.0.$((max_patch + 1))"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "Selected Sonora v${version}"
+
   build-macos:
     name: Build macOS ${{ matrix.architecture }}
+    needs: version
     strategy:
       fail-fast: false
       matrix:
@@ -72,7 +102,7 @@ jobs:
       - name: Package downloadable app
         env:
           ARCHITECTURE: ${{ matrix.architecture }}
-          VERSION: 0.0.${{ github.run_number }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           asset="Sonora-v${VERSION}-macos-${ARCHITECTURE}.zip"
           ditto -c -k --sequesterRsrc --keepParent \
@@ -82,16 +112,18 @@ jobs:
       - name: Upload signed app for release job
         uses: actions/upload-artifact@v4
         with:
-          name: sonora-dev-${{ matrix.architecture }}
+          name: sonora-v${{ needs.version.outputs.version }}-${{ matrix.architecture }}
           path: |
-            Sonora-dev-*-macos-${{ matrix.architecture }}.zip
-            Sonora-dev-*-macos-${{ matrix.architecture }}.zip.sha256
+            Sonora-v${{ needs.version.outputs.version }}-macos-${{ matrix.architecture }}.zip
+            Sonora-v${{ needs.version.outputs.version }}-macos-${{ matrix.architecture }}.zip.sha256
           if-no-files-found: error
           retention-days: 7
 
   publish:
     name: Publish development prerelease
-    needs: build-macos
+    needs:
+      - version
+      - build-macos
     runs-on: ubuntu-24.04
     timeout-minutes: 10
 
@@ -99,22 +131,26 @@ jobs:
       - name: Download signed apps
         uses: actions/download-artifact@v4
         with:
-          pattern: sonora-dev-*
+          pattern: sonora-v${{ needs.version.outputs.version }}-*
           merge-multiple: true
 
       - name: Publish GitHub prerelease
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: 0.0.${{ github.run_number }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           tag="v${VERSION}"
           notes="Automated ad-hoc-signed Sonora ${VERSION} build from commit ${GITHUB_SHA}.
 
           These builds are not notarized. Follow the README launch commands after downloading the archive for your Mac architecture."
+          assets=(
+            Sonora-v"${VERSION}"-macos-*.zip
+            Sonora-v"${VERSION}"-macos-*.zip.sha256
+          )
           if gh release view "${tag}" \
             --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release upload "${tag}" \
-              Sonora-dev-*.zip Sonora-dev-*.zip.sha256 \
+              "${assets[@]}" \
               --clobber \
               --repo "${GITHUB_REPOSITORY}"
             gh release edit "${tag}" \
@@ -124,7 +160,7 @@ jobs:
               --prerelease
           else
             gh release create "${tag}" \
-              Sonora-dev-*.zip Sonora-dev-*.zip.sha256 \
+              "${assets[@]}" \
               --repo "${GITHUB_REPOSITORY}" \
               --target "${GITHUB_SHA}" \
               --title "Sonora v${VERSION}" \
