@@ -43,7 +43,7 @@ final class SonoraHubService {
             try service.register()
             errorMessage = nil
         } catch {
-            errorMessage = "The bundled helper was updated but could not be "
+            errorMessage = "The Background Service was updated but could not be "
                 + "restarted: \(error.localizedDescription)"
         }
     }
@@ -64,8 +64,8 @@ final class SonoraHubService {
         await restartForUpgrade()
         guard errorMessage == nil else { return }
         guard await waitForCompatibleHelper(client) else {
-            errorMessage = "The Sonora helper is enabled but did not start "
-                + "listening. Use Restart Bundled Helper in Sync settings."
+            errorMessage = "The Sonora Background Service is enabled but did not start "
+                + "listening. Use Restart Background Service in Sync settings."
             return
         }
         errorMessage = nil
@@ -100,7 +100,7 @@ final class SonoraHubService {
         case .notFound:
             helperIsBundled
                 ? "Ready to enable"
-                : "Helper is not included in this build"
+                : "Background Service is not included in this build"
         @unknown default:
             "Unknown"
         }
@@ -142,9 +142,9 @@ final class SyncPreferences {
     }
 
     static let protectedLocationMessage =
-        "The background helper cannot use a server-data folder inside "
+        "The Background Service cannot use a library-data folder inside "
         + "Desktop, Documents, or Downloads. Choose the recommended Sonora "
-        + "Hub Data location instead. Your music files can remain where they are."
+        + "Library Data location instead. Your music files can remain where they are."
 
     static func isSupportedHelperLocation(_ path: String) -> Bool {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -227,7 +227,7 @@ private struct MacHubConfigurationWriter {
             .replacingOccurrences(of: "\"", with: "\\\"")
         let content = """
         hub_id = "\(hubID)"
-        display_name = "\(Host.current().localizedName ?? "Sonora Hub")"
+        display_name = "\(Host.current().localizedName ?? "Sonora")"
         bind = "0.0.0.0:4848"
         data_dir = "\(escapedDataLocation)"
         tls_cert = "\(escapedDataLocation)/tls/cert.pem"

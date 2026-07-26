@@ -25,16 +25,16 @@ struct SyncSettingsView: View {
 
     var body: some View {
         Form {
-            Section("Active Local Sonora Servers") {
+            Section("Active Sonora Servers") {
                 if localServers.servers.isEmpty {
                     Text(
                         service.isEnabled
-                            ? "The Sonora helper is enabled but is not listening."
+                            ? "The Sonora Background Service is enabled but is not listening."
                             : "No Sonora servers are currently listening on this Mac."
                     )
                         .foregroundStyle(.secondary)
                     if service.isEnabled {
-                        Button("Restart Bundled Helper") {
+                        Button("Restart Background Service") {
                             recoverBundledHelper()
                         }
                     }
@@ -93,8 +93,8 @@ struct SyncSettingsView: View {
                 }
             }
 
-            Section("Host This Library") {
-                LabeledContent("Server Data") {
+            Section("Host This Sonora") {
+                LabeledContent("Library Data") {
                     HStack {
                         Text(
                             preferences.dataLocation.isEmpty
@@ -109,7 +109,7 @@ struct SyncSettingsView: View {
                 if preferences.dataLocation.isEmpty {
                     Text(
                         "Sonora needs a server-data location before it can "
-                            + "create the hub configuration and start the helper."
+                            + "prepare this Sonora and start its Background Service."
                     )
                     .font(SonoraFont.footnote)
                     .foregroundStyle(.secondary)
@@ -129,7 +129,7 @@ struct SyncSettingsView: View {
                     )
                 }
 
-                Toggle("Enable Sonora Hub", isOn: Binding(
+                Toggle("Host This Sonora", isOn: Binding(
                     get: { service.isEnabled || requestedHosting },
                     set: { enabled in
                         setHostingEnabled(enabled)
@@ -144,7 +144,7 @@ struct SyncSettingsView: View {
                     ) && !service.isEnabled
                 )
                 LabeledContent(
-                    "Helper Status",
+                    "Background Status",
                     value: bundledHelperIsActive
                         ? "Running"
                         : service.statusLabel
@@ -202,22 +202,22 @@ struct SyncSettingsView: View {
                 }
             }
 
-            Section("Connect to a Hub") {
-                LabeledContent("Discovered Hubs") {
+            Section("Connect to a Sonora") {
+                LabeledContent("Available Sonoras") {
                     HStack {
                         if browser.hubs.isEmpty {
                             Text(
                                 browser.isSearching
                                     ? "Checking the local network…"
-                                    : "No active hubs found"
+                                    : "No active Sonoras found"
                             )
                                 .foregroundStyle(.secondary)
                         } else {
                             Picker(
-                                "Discovered Hubs",
+                                "Available Sonoras",
                                 selection: $preferences.manualAddress
                             ) {
-                                Text("Choose a hub").tag("")
+                                Text("Choose a Sonora").tag("")
                                 ForEach(browser.hubs) { hub in
                                     Text(hub.name)
                                         .tag(hub.address)
@@ -337,7 +337,7 @@ struct SyncSettingsView: View {
         ) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text(service.errorMessage ?? "Unknown helper error.")
+            Text(service.errorMessage ?? "Unknown Background Service error.")
         }
         .onAppear {
             requestedHosting = service.isEnabled
@@ -431,7 +431,7 @@ struct SyncSettingsView: View {
 
     private func chooseDataLocation() {
         let panel = NSOpenPanel()
-        panel.title = "Choose Sonora Server Data Location"
+        panel.title = "Choose Sonora Library Data Location"
         panel.prompt = "Choose"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -480,7 +480,7 @@ struct SyncSettingsView: View {
 
     private func recoverBundledHelper() {
         Task {
-            hostedImportStatus = "Restarting the bundled helper…"
+            hostedImportStatus = "Restarting the Background Service…"
             await service.restartForUpgrade()
             await publishWatchedFolders()
         }
@@ -509,7 +509,7 @@ struct SyncSettingsView: View {
             }
             hostedImportStatus = imported == 0
                 ? "Hosted library is up to date."
-                : "Published \(imported) tracks to the hub."
+                : "Published \(imported) tracks to this Sonora."
             localServers.refresh()
         } catch {
             service.errorMessage = "Unable to publish the watched library: "
@@ -519,7 +519,7 @@ struct SyncSettingsView: View {
 
     private func pair() {
         guard let url = URL(string: preferences.manualAddress) else {
-            pairingStatus = "Enter a valid HTTPS hub address."
+            pairingStatus = "Enter a valid HTTPS Sonora address."
             return
         }
         pairingStatus = "Submitting pairing request…"
@@ -544,7 +544,7 @@ struct SyncSettingsView: View {
                     deviceName: Host.current().localizedName ?? "Mac",
                     code: pairingCode
                 )
-                pairingStatus = "Request \(pairing.requestID) is waiting for approval on the hub."
+                pairingStatus = "Request \(pairing.requestID) is waiting for approval on the hosting Sonora."
                 for _ in 0 ..< 150 {
                     try await Task.sleep(for: .seconds(2))
                     let result = try await pairingClient.pollPairing(
@@ -572,14 +572,14 @@ struct SyncSettingsView: View {
                         pairingStatus = "Paired with \(info.displayName)."
                         return
                     case .rejected:
-                        pairingStatus = "The hub rejected this pairing request."
+                        pairingStatus = "The hosting Sonora rejected this pairing request."
                         return
                     case .expired:
-                        pairingStatus = "Pairing expired. Open a new code on the hub."
+                        pairingStatus = "Pairing expired. Open a new code on the hosting Sonora."
                         return
                     }
                 }
-                pairingStatus = "Pairing expired. Open a new code on the hub."
+                pairingStatus = "Pairing expired. Open a new code on the hosting Sonora."
             } catch {
                 pairingStatus = error.localizedDescription
             }
@@ -662,7 +662,7 @@ struct SyncSettingsView: View {
 
     private func reviewFirstJoin() {
         guard let url = URL(string: preferences.manualAddress) else {
-            pairingStatus = "Enter a valid HTTPS hub address."
+            pairingStatus = "Enter a valid HTTPS Sonora address."
             return
         }
         firstJoinPreview = nil
@@ -721,7 +721,7 @@ struct SyncSettingsView: View {
             Text(
                 "\(preview.deduplicatedTracks) identical, "
                     + "\(preview.localOnlyTracks) local-only, "
-                    + "\(preview.hubOnlyTracks) hub-only"
+                    + "\(preview.hubOnlyTracks) hosting-Sonora-only"
             )
             Text("Media required: \(requiredMedia)")
             .foregroundStyle(.secondary)
@@ -751,7 +751,7 @@ struct SyncSettingsView: View {
                             )
                             .tag(Optional(SyncConflictChoice.local))
                             Text(
-                                "Hub: \(display(conflict.hub.value))"
+                                "Hosting Sonora: \(display(conflict.hub.value))"
                             )
                             .tag(Optional(SyncConflictChoice.hub))
                         }
@@ -830,7 +830,7 @@ struct SyncSettingsView: View {
 
     private func synchronizeNow() {
         guard let url = URL(string: preferences.manualAddress) else {
-            pairingStatus = "Enter a valid HTTPS hub address."
+            pairingStatus = "Enter a valid HTTPS Sonora address."
             return
         }
         isSyncing = true
@@ -905,9 +905,9 @@ private enum FirstJoinUIError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notPaired:
-            "Pair with this hub before reviewing the first join."
+            "Pair with this Sonora before reviewing the first join."
         case .hubIdentityChanged:
-            "The hub identity at this address has changed. Pair again before continuing."
+            "The Sonora identity at this address has changed. Pair again before continuing."
         }
     }
 }

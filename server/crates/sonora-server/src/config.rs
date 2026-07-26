@@ -25,7 +25,7 @@ impl Default for Config {
         let data_dir = default_data_dir();
         Self {
             hub_id: Uuid::new_v4(),
-            display_name: "Sonora Hub".into(),
+            display_name: "Sonora".into(),
             bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 4848),
             tls_cert: data_dir.join("tls/cert.pem"),
             tls_key: data_dir.join("tls/key.pem"),

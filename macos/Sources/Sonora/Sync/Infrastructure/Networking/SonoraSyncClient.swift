@@ -14,15 +14,15 @@ enum SonoraSyncClientError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidResponse:
-            "The Sonora hub returned an invalid response."
+            "The hosting Sonora returned an invalid response."
         case .invalidPairingCode:
-            "Enter the six-digit pairing code shown by the hub."
+            "Enter the six-digit pairing code shown by the hosting Sonora."
         case .pairingAuthenticationFailed:
-            "The pairing code could not authenticate this hub."
+            "The pairing code could not authenticate this Sonora."
         case .tlsFingerprintMismatch:
-            "The hub certificate does not match the identity saved during pairing."
+            "The certificate does not match the Sonora saved during pairing."
         case .httpError(let status, let message):
-            "The Sonora hub returned HTTP \(status): \(message)"
+            "The hosting Sonora returned HTTP \(status): \(message)"
         }
     }
 }

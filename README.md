@@ -1,7 +1,7 @@
 # Sonora
 
 Sonora is a native macOS music library and high-resolution audio player with
-an optional authoritative LAN library hub. The macOS app discovers Sonora hubs
+optional authoritative LAN library sharing. The macOS app discovers other Sonoras
 with Bonjour, pairs using a six-digit authenticated code, automatically pins
 TLS, and synchronizes logical library records and verified media without
 sharing live SQLite files.
@@ -45,31 +45,31 @@ codesign --verify --strict \
 
 ### Enable LAN library hosting
 
-The hub helper is managed by macOS and needs a persistent server-data
+The Background Service is managed by macOS and needs a persistent Library Data
 directory before it can start:
 
 1. Open **Sonora → Settings → Sync**.
-2. Under **Host This Library**, click **Use Recommended Location**. This stores
-   the hub database and cache in
+2. Under **Host This Sonora**, click **Use Recommended Location**. This stores
+   the shared library database and cache in
    `~/Library/Application Support/Sonora/Hub Data`.
-3. Turn on **Enable Sonora Hub**.
+3. Turn on **Host This Sonora**.
 4. If Sonora reports **Approval required in Login Items**, open **System
    Settings → General → Login Items & Extensions** and allow Sonora.
 
-The helper is embedded in `Sonora.app`; don’t move or delete the app after
+The Background Service is embedded in `Sonora.app`; don’t move or delete the app after
 enabling hosting. Installing it in `~/Applications` with the commands above
-gives the helper a stable path across logins.
+gives the Background Service a stable path across logins.
 
 The server-data location cannot be inside `~/Desktop`, `~/Documents`, or
 `~/Downloads`: macOS blocks background LaunchAgents from opening those
 privacy-protected folders. This does not require moving your music library.
-Server data is the hub’s private database/cache location; watched music sources
+Library Data is Sonora’s private shared database/cache location; watched music sources
 remain separate.
 
 To pair another Mac, click **Open Pairing Window** on the host. On the other
-Mac, choose the discovered hub, enter the displayed six-digit code, then click
+Mac, choose the discovered Sonora, enter the displayed six-digit code, then click
 **Pair…**. The request appears on the host; click **Approve** there to issue
-that Mac its revocable credential. The code authenticates the hub with
+that Mac its revocable credential. The code authenticates the hosting Sonora with
 SPAKE2+, and Sonora saves the TLS certificate pin automatically.
 
 ## Build and launch from source
@@ -103,7 +103,7 @@ make server package
 ```
 
 See [the macOS guide](macos/README.md) for playback and architecture details,
-and [the server guide](server/README.md) for standalone hub configuration,
+and [the server guide](server/README.md) for standalone hosting configuration,
 imports, pairing, verification, and Docker deployment.
 
 ## Development release automation
@@ -111,7 +111,7 @@ imports, pairing, verification, and Docker deployment.
 On every push to `main`, the Development Release workflow:
 
 1. Builds Arm64 and Intel Swift apps in debug configuration.
-2. Builds and embeds the optimized Rust sync helper.
+2. Builds and embeds the optimized Rust Background Service.
 3. Ad-hoc signs and verifies the complete app bundle.
 4. Archives it with resource forks preserved.
 5. Publishes a GitHub prerelease and SHA-256 checksum for that commit.

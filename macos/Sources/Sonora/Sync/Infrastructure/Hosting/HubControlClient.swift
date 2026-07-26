@@ -11,13 +11,13 @@ enum HubControlError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .emptyResponse:
-            "The Sonora helper closed its control connection without responding."
+            "The Sonora Background Service closed its control connection without responding."
         case .invalidResponse:
-            "The Sonora helper returned an invalid control response."
+            "The Sonora Background Service returned an invalid control response."
         case .rejected(let message):
-            "The Sonora helper rejected the request: \(message)"
+            "The Sonora Background Service rejected the request: \(message)"
         case .incompatibleHelper:
-            "The running Sonora helper is from an older app build."
+            "The running Sonora Background Service is from an older app build."
         }
     }
 }
