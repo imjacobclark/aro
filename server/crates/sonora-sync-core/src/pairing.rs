@@ -4,7 +4,7 @@ use rand::{Rng, distr::Alphanumeric};
 use sha2::{Digest, Sha256};
 use sonora_sync_protocol::{
     DeviceCredential, DeviceSummary, PairingStartRequest, PairingStartResponse, PairingState,
-    PairingStatusResponse,
+    PairingStatusResponse, PendingPairingRequest,
 };
 use std::{collections::HashMap, sync::Arc};
 use subtle::ConstantTimeEq;
@@ -198,6 +198,29 @@ impl PairingManager {
             .collect()
     }
 
+    pub fn pending_requests(&self) -> Vec<PendingPairingRequest> {
+        let now = Utc::now();
+        let mut state = self.state.write();
+        for pending in state.pending.values_mut() {
+            if pending.state == PairingState::Pending && now >= pending.expires_at {
+                pending.state = PairingState::Expired;
+            }
+        }
+        let mut requests: Vec<_> = state
+            .pending
+            .iter()
+            .filter(|(_, pending)| pending.state == PairingState::Pending)
+            .map(|(request_id, pending)| PendingPairingRequest {
+                request_id: *request_id,
+                device_id: pending.device_id,
+                device_name: pending.device_name.clone(),
+                expires_at: pending.expires_at,
+            })
+            .collect();
+        requests.sort_by_key(|request| request.expires_at);
+        requests
+    }
+
     pub fn revoke(&self, device_id: Uuid) -> bool {
         let mut state = self.state.write();
         let Some(device) = state.devices.get_mut(&device_id) else {
@@ -230,5 +253,29 @@ mod tests {
         assert!(manager.authorize(device_id, &issued.credential));
         assert!(manager.revoke(device_id));
         assert!(!manager.authorize(device_id, &issued.credential));
+    }
+
+    #[test]
+    fn pending_requests_are_visible_to_the_hub_admin() {
+        let manager = PairingManager::new("fingerprint".into());
+        let code = manager.open(Duration::minutes(1));
+        let device_id = Uuid::new_v4();
+        let started = manager
+            .start(PairingStartRequest {
+                device_id,
+                device_name: "Living Room Mac".into(),
+                code,
+                pinned_tls_fingerprint: "fingerprint".into(),
+            })
+            .unwrap();
+
+        let requests = manager.pending_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].request_id, started.request_id);
+        assert_eq!(requests[0].device_id, device_id);
+        assert_eq!(requests[0].device_name, "Living Room Mac");
+
+        manager.approve(started.request_id, true).unwrap();
+        assert!(manager.pending_requests().is_empty());
     }
 }

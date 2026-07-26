@@ -50,6 +50,11 @@ The helper is embedded in `Sonora.app`; don’t move or delete the app after
 enabling hosting. Installing it in `~/Applications` with the commands above
 gives the helper a stable path across logins.
 
+To pair another Mac, click **Open Pairing Window** on the host. On the other
+Mac, choose the discovered hub, enter the displayed code and TLS fingerprint,
+then click **Pair…**. The request appears on the host; click **Approve** there
+to issue that Mac its revocable credential.
+
 ## Build and launch from source
 
 Install the current Xcode Command Line Tools and Rust, then clone and build:

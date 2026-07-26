@@ -45,6 +45,14 @@ pub struct PairingStartResponse {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingPairingRequest {
+    pub request_id: Uuid,
+    pub device_id: Uuid,
+    pub device_name: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PairingStatusResponse {
     pub state: PairingState,
     pub credential: Option<DeviceCredential>,

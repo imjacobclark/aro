@@ -15,6 +15,7 @@ use uuid::Uuid;
 #[serde(tag = "command", rename_all = "snake_case")]
 enum ControlCommand {
     OpenPairing,
+    PendingPairingRequests,
     Approve { request_id: Uuid, approve: bool },
     Devices,
     Revoke { device_id: Uuid },
@@ -73,6 +74,9 @@ async fn handle(mut stream: UnixStream, state: Arc<AppState>) -> Result<()> {
                 "expires_in_seconds": 300,
                 "tls_fingerprint": state.fingerprint
             })
+        }
+        ControlCommand::PendingPairingRequests => {
+            serde_json::to_value(state.pairing.pending_requests())?
         }
         ControlCommand::Approve {
             request_id,

@@ -6,6 +6,7 @@ import SonoraCommon
 enum SonoraSyncClientError: LocalizedError {
     case invalidResponse
     case tlsFingerprintMismatch
+    case httpError(status: Int, message: String)
 
     var errorDescription: String? {
         switch self {
@@ -13,8 +14,17 @@ enum SonoraSyncClientError: LocalizedError {
             "The Sonora hub returned an invalid response."
         case .tlsFingerprintMismatch:
             "The hub certificate does not match the pairing fingerprint."
+        case .httpError(let status, let message):
+            "The Sonora hub returned HTTP \(status): \(message)"
         }
     }
+}
+
+enum HubPairingPollResult: Sendable {
+    case pending
+    case approved(HubDeviceCredential)
+    case rejected
+    case expired
 }
 
 final class PinnedTLSDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
@@ -61,7 +71,9 @@ actor SonoraSyncClient {
     init(baseURL: URL, pinnedTLSFingerprint: String) {
         self.baseURL = baseURL
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.waitsForConnectivity = true
+        configuration.waitsForConnectivity = false
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 30
         session = URLSession(
             configuration: configuration,
             delegate: PinnedTLSDelegate(
@@ -100,11 +112,23 @@ actor SonoraSyncClient {
     func pollPairing(
         requestID: UUID,
         deviceID: UUID
-    ) async throws -> HubDeviceCredential? {
+    ) async throws -> HubPairingPollResult {
         let response: PairingStatus = try await get(
             "v1/pairing/\(requestID.uuidString)?device_id=\(deviceID.uuidString)"
         )
-        return response.credential
+        switch response.state {
+        case .pending:
+            return .pending
+        case .approved:
+            guard let credential = response.credential else {
+                throw SonoraSyncClientError.invalidResponse
+            }
+            return .approved(credential)
+        case .rejected:
+            return .rejected
+        case .expired:
+            return .expired
+        }
     }
 
     func exchange(
@@ -146,7 +170,7 @@ actor SonoraSyncClient {
         let (data, response) = try await session.data(
             from: try url(for: path)
         )
-        try validate(response)
+        try validate(response, data: data)
         return try decoder.decode(Response.self, from: data)
     }
 
@@ -159,7 +183,7 @@ actor SonoraSyncClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(body)
         let (data, response) = try await session.data(for: request)
-        try validate(response)
+        try validate(response, data: data)
         return try decoder.decode(Response.self, from: data)
     }
 
@@ -181,14 +205,25 @@ actor SonoraSyncClient {
         )
         request.httpBody = try encoder.encode(body)
         let (data, response) = try await session.data(for: request)
-        try validate(response)
+        try validate(response, data: data)
         return try decoder.decode(Response.self, from: data)
     }
 
-    private func validate(_ response: URLResponse) throws {
-        guard let http = response as? HTTPURLResponse,
-              (200 ... 299).contains(http.statusCode) else {
+    private func validate(_ response: URLResponse, data: Data) throws {
+        guard let http = response as? HTTPURLResponse else {
             throw SonoraSyncClientError.invalidResponse
+        }
+        guard (200 ... 299).contains(http.statusCode) else {
+            let message = (try? JSONDecoder().decode(
+                HubErrorResponse.self,
+                from: data
+            ).message) ?? HTTPURLResponse.localizedString(
+                forStatusCode: http.statusCode
+            )
+            throw SonoraSyncClientError.httpError(
+                status: http.statusCode,
+                message: message
+            )
         }
     }
 
@@ -212,5 +247,17 @@ private struct PairingStart: Decodable {
 }
 
 private struct PairingStatus: Decodable {
+    let state: HubPairingState
     let credential: HubDeviceCredential?
+}
+
+private enum HubPairingState: String, Decodable {
+    case pending
+    case approved
+    case rejected
+    case expired
+}
+
+private struct HubErrorResponse: Decodable {
+    let message: String
 }

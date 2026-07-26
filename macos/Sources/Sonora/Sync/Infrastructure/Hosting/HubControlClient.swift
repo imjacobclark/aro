@@ -14,6 +14,15 @@ struct ControlledHubDevice: Identifiable, Codable, Sendable {
     var id: UUID { deviceID }
 }
 
+struct ControlledPairingRequest: Identifiable, Codable, Sendable {
+    let requestID: UUID
+    let deviceID: UUID
+    let deviceName: String
+    let expiresAt: String
+
+    var id: UUID { requestID }
+}
+
 struct HubControlClient: Sendable {
     let socketURL: URL
 
@@ -33,6 +42,24 @@ struct HubControlClient: Sendable {
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         decoder.dateDecodingStrategy = .iso8601
         return try decoder.decode([ControlledHubDevice].self, from: data)
+    }
+
+    func pendingPairingRequests() async throws -> [ControlledPairingRequest] {
+        let result = try await sendValue([
+            "command": "pending_pairing_requests"
+        ])
+        let data = try JSONSerialization.data(withJSONObject: result)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode([ControlledPairingRequest].self, from: data)
+    }
+
+    func approvePairing(requestID: UUID, approve: Bool) async throws {
+        _ = try await sendValue([
+            "command": "approve",
+            "request_id": requestID.uuidString,
+            "approve": approve,
+        ])
     }
 
     func revoke(deviceID: UUID) async throws {

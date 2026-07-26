@@ -14,6 +14,7 @@ struct SyncSettingsView: View {
     @State private var pairingFingerprint = ""
     @State private var pairingStatus: String?
     @State private var hostingPairingWindow: HubPairingWindow?
+    @State private var pendingPairingRequests: [ControlledPairingRequest] = []
     @State private var pairedDevices: [ControlledHubDevice] = []
     @State private var firstJoinPreview: FirstJoinPreview?
     @State private var conflictResolutions: [String: SyncConflictChoice] = [:]
@@ -68,6 +69,31 @@ struct SyncSettingsView: View {
                     Text("TLS fingerprint: \(hostingPairingWindow.fingerprint)")
                         .font(SonoraFont.footnote)
                         .textSelection(.enabled)
+
+                    if pendingPairingRequests.isEmpty {
+                        Text("Waiting for a device to submit this code…")
+                            .font(SonoraFont.footnote)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(pendingPairingRequests) { request in
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text(request.deviceName)
+                                    Text(request.deviceID.uuidString)
+                                        .font(SonoraFont.footnote)
+                                        .foregroundStyle(.secondary)
+                                        .textSelection(.enabled)
+                                }
+                                Spacer()
+                                Button("Reject", role: .destructive) {
+                                    approvePairing(request, approve: false)
+                                }
+                                Button("Approve") {
+                                    approvePairing(request, approve: true)
+                                }
+                            }
+                        }
+                    }
                 }
 
                 Picker("Import Mode", selection: $preferences.importMode) {
@@ -215,6 +241,13 @@ struct SyncSettingsView: View {
         .onDisappear {
             browser.stop()
         }
+        .task(id: hostingPairingWindow?.code) {
+            guard hostingPairingWindow != nil else { return }
+            while !Task.isCancelled {
+                await refreshPendingPairingRequests()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
         .sheet(isPresented: $showingFirstJoin) {
             if let firstJoinPreview {
                 firstJoinSheet(firstJoinPreview)
@@ -292,10 +325,14 @@ struct SyncSettingsView: View {
                 pairingStatus = "Request \(requestID) is waiting for approval on the hub."
                 for _ in 0 ..< 150 {
                     try await Task.sleep(for: .seconds(2))
-                    if let credential = try await client.pollPairing(
+                    let result = try await client.pollPairing(
                         requestID: requestID,
                         deviceID: deviceID
-                    ) {
+                    )
+                    switch result {
+                    case .pending:
+                        continue
+                    case .approved(let credential):
                         let info = try await client.hubInfo()
                         try KeychainHubCredentialStore().save(
                             credential,
@@ -308,6 +345,12 @@ struct SyncSettingsView: View {
                             replicaMode: preferences.replicaMode
                         )
                         pairingStatus = "Paired with \(info.displayName)."
+                        return
+                    case .rejected:
+                        pairingStatus = "The hub rejected this pairing request."
+                        return
+                    case .expired:
+                        pairingStatus = "Pairing expired. Open a new code on the hub."
                         return
                     }
                 }
@@ -332,7 +375,37 @@ struct SyncSettingsView: View {
         Task {
             do {
                 hostingPairingWindow = try await controlClient.openPairing()
+                pendingPairingRequests = []
                 refreshDevices()
+            } catch {
+                service.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func refreshPendingPairingRequests() async {
+        guard let controlClient else { return }
+        do {
+            pendingPairingRequests = try await controlClient
+                .pendingPairingRequests()
+        } catch {
+            service.errorMessage = error.localizedDescription
+        }
+    }
+
+    private func approvePairing(
+        _ request: ControlledPairingRequest,
+        approve: Bool
+    ) {
+        guard let controlClient else { return }
+        Task {
+            do {
+                try await controlClient.approvePairing(
+                    requestID: request.requestID,
+                    approve: approve
+                )
+                await refreshPendingPairingRequests()
+                pairedDevices = try await controlClient.devices()
             } catch {
                 service.errorMessage = error.localizedDescription
             }

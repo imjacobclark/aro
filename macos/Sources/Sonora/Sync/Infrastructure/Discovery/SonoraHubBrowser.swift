@@ -41,7 +41,11 @@ final class SonoraHubBrowser {
                 }
                 return HubEndpointCandidate(
                     name: name,
-                    host: "\(name).\(domain)"
+                    // The Bonjour service instance name is a display label, not
+                    // a DNS hostname. The server publishes its SRV record at
+                    // sonora.local.; constructing a hostname from a name such
+                    // as "Jacob's MacBook Pro" produces an unreachable URL.
+                    host: "sonora.\(domain)"
                 )
             }
             Task { @MainActor in
