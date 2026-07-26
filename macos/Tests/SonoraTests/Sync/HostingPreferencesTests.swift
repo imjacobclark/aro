@@ -3,6 +3,7 @@ import Foundation
 import Testing
 @testable import Sonora
 
+@MainActor
 @Suite("Hosting preferences")
 struct HostingPreferencesTests {
     @Test("Protected user folders are rejected for background hosting")
@@ -14,17 +15,19 @@ struct HostingPreferencesTests {
                 .appendingPathComponent(directory)
                 .appendingPathComponent("Sonora Hub")
                 .path
-            #expect(!SyncPreferences.isSupportedHelperLocation(location))
+            let isSupported = SyncPreferences.isSupportedHelperLocation(
+                location
+            )
+            #expect(!isSupported)
         }
     }
 
     @Test("The recommended hub data location is background-accessible")
     func testRecommendedLocationIsAvailableToBackgroundHelper() {
-        #expect(
-            SyncPreferences.isSupportedHelperLocation(
-                SyncPreferences.recommendedDataLocation
-            )
+        let isSupported = SyncPreferences.isSupportedHelperLocation(
+            SyncPreferences.recommendedDataLocation
         )
+        #expect(isSupported)
     }
 }
 #endif
