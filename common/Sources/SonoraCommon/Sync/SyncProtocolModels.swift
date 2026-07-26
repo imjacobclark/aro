@@ -187,7 +187,7 @@ public struct SyncFieldConflict: Hashable, Codable, Sendable {
     public let hub: VersionedJSONValue
 
     public var resolutionKey: String {
-        "\(trackID.uuidString):\(field)"
+        "\(trackID.uuidString.lowercased()):\(field)"
     }
 }
 

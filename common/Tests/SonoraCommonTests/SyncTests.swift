@@ -40,6 +40,31 @@ final class SyncTests: XCTestCase {
         let values = await events.values
         XCTAssertEqual(values, ["download", "verify"])
     }
+
+    func testConflictResolutionKeyUsesWireCanonicalUUIDCasing() {
+        let timestamp = SyncFieldVersion(
+            physicalMilliseconds: 1,
+            logical: 0,
+            deviceID: UUID()
+        )
+        let value = VersionedJSONValue(
+            value: .string("Title"),
+            timestamp: timestamp
+        )
+        let conflict = SyncFieldConflict(
+            trackID: UUID(
+                uuidString: "ABCDEF01-2345-6789-ABCD-EF0123456789"
+            )!,
+            field: "title",
+            local: value,
+            hub: value
+        )
+
+        XCTAssertEqual(
+            conflict.resolutionKey,
+            "abcdef01-2345-6789-abcd-ef0123456789:title"
+        )
+    }
 }
 
 private actor EventLog {
