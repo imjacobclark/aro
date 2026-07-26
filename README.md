@@ -7,15 +7,15 @@ library records and verified media without sharing live SQLite files.
 
 ## Download a development build
 
-Every commit pushed to `main` creates a sequentially numbered Arm64 and Intel
-ad-hoc-signed prerelease on the
+Every commit pushed to `main` creates a sequential pre-1.0 semantic version
+with Arm64 and Intel ad-hoc-signed builds on the
 [GitHub Releases page](https://github.com/imjacobclark/sonora/releases).
-Download the `Sonora-dev-<number>-macos-arm64.zip` file for Apple Silicon or
-the `Sonora-dev-<number>-macos-x86_64.zip` file for an Intel Mac. Then run the
-following commands from the download directory:
+Download the `Sonora-v0.0.<number>-macos-arm64.zip` file for Apple Silicon or
+the `Sonora-v0.0.<number>-macos-x86_64.zip` file for an Intel Mac. Then run
+the following commands from the download directory:
 
 ```sh
-ditto -x -k Sonora-dev-*-macos-*.zip .
+ditto -x -k Sonora-v*-macos-*.zip .
 xattr -dr com.apple.quarantine Sonora.app
 codesign --force --deep --sign - --timestamp=none Sonora.app
 mkdir -p "$HOME/Applications"

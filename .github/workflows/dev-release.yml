@@ -72,9 +72,9 @@ jobs:
       - name: Package downloadable app
         env:
           ARCHITECTURE: ${{ matrix.architecture }}
-          RELEASE_NUMBER: ${{ github.run_number }}
+          VERSION: 0.0.${{ github.run_number }}
         run: |
-          asset="Sonora-dev-${RELEASE_NUMBER}-macos-${ARCHITECTURE}.zip"
+          asset="Sonora-v${VERSION}-macos-${ARCHITECTURE}.zip"
           ditto -c -k --sequesterRsrc --keepParent \
             macos/dist/Sonora.app "${asset}"
           shasum -a 256 "${asset}" > "${asset}.sha256"
@@ -105,10 +105,10 @@ jobs:
       - name: Publish GitHub prerelease
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_NUMBER: ${{ github.run_number }}
+          VERSION: 0.0.${{ github.run_number }}
         run: |
-          tag="dev-${RELEASE_NUMBER}"
-          notes="Automated ad-hoc-signed development build #${RELEASE_NUMBER} from commit ${GITHUB_SHA}.
+          tag="v${VERSION}"
+          notes="Automated ad-hoc-signed Sonora ${VERSION} build from commit ${GITHUB_SHA}.
 
           These builds are not notarized. Follow the README launch commands after downloading the archive for your Mac architecture."
           if gh release view "${tag}" \
@@ -119,7 +119,7 @@ jobs:
               --repo "${GITHUB_REPOSITORY}"
             gh release edit "${tag}" \
               --repo "${GITHUB_REPOSITORY}" \
-              --title "Sonora Development #${RELEASE_NUMBER}" \
+              --title "Sonora v${VERSION}" \
               --notes "${notes}" \
               --prerelease
           else
@@ -127,7 +127,7 @@ jobs:
               Sonora-dev-*.zip Sonora-dev-*.zip.sha256 \
               --repo "${GITHUB_REPOSITORY}" \
               --target "${GITHUB_SHA}" \
-              --title "Sonora Development #${RELEASE_NUMBER}" \
+              --title "Sonora v${VERSION}" \
               --notes "${notes}" \
               --prerelease
           fi
