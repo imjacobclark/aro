@@ -66,8 +66,7 @@ struct HubControlClient: Sendable {
     func devices() async throws -> [ControlledHubDevice] {
         let result = try await sendValue(["command": "devices"])
         let data = try JSONSerialization.data(withJSONObject: result)
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let decoder = JSONDecoder.sonoraSyncProtocol()
         decoder.dateDecodingStrategy = .iso8601
         return try decoder.decode([ControlledHubDevice].self, from: data)
     }
@@ -77,8 +76,7 @@ struct HubControlClient: Sendable {
             "command": "pending_pairing_requests"
         ])
         let data = try JSONSerialization.data(withJSONObject: result)
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let decoder = JSONDecoder.sonoraSyncProtocol()
         return try decoder.decode([ControlledPairingRequest].self, from: data)
     }
 

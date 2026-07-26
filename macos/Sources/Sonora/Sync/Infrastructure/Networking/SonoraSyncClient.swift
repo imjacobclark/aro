@@ -122,8 +122,7 @@ actor SonoraSyncClient {
         )
         encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
-        decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder = JSONDecoder.sonoraSyncProtocol()
     }
 
     init(pairingBaseURL baseURL: URL) {
@@ -139,8 +138,7 @@ actor SonoraSyncClient {
         )
         encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
-        decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder = JSONDecoder.sonoraSyncProtocol()
     }
 
     func hubInfo() async throws -> SonoraHubInfo {
@@ -426,6 +424,51 @@ private enum HubPairingState: String, Decodable {
     case approved
     case rejected
     case expired
+}
+
+private struct SonoraSyncCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+        intValue = nil
+    }
+
+    init?(intValue: Int) {
+        stringValue = String(intValue)
+        self.intValue = intValue
+    }
+}
+
+extension JSONDecoder {
+    static func sonoraSyncProtocol() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .custom { codingPath in
+            let source = codingPath.last?.stringValue ?? ""
+            if source == "physical_millis" {
+                return SonoraSyncCodingKey(stringValue: "physicalMillis")!
+            }
+            let components = source.split(separator: "_")
+            guard components.count > 1 else {
+                return SonoraSyncCodingKey(stringValue: source)!
+            }
+            let converted = components.enumerated().map { index, component in
+                let value = String(component)
+                guard index > 0 else { return value }
+                switch value {
+                case "id":
+                    return "ID"
+                case "url":
+                    return "URL"
+                default:
+                    return value.prefix(1).uppercased() + value.dropFirst()
+                }
+            }.joined()
+            return SonoraSyncCodingKey(stringValue: converted)!
+        }
+        return decoder
+    }
 }
 
 private struct HubErrorResponse: Decodable {

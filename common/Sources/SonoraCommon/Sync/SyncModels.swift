@@ -160,9 +160,9 @@ public struct SyncFieldVersion: Hashable, Codable, Sendable {
 
 extension SyncFieldVersion {
     enum CodingKeys: String, CodingKey {
-        case physicalMilliseconds = "physical_millis"
+        case physicalMilliseconds = "physicalMillis"
         case logical
-        case deviceID = "device_id"
+        case deviceID
     }
 }
 
