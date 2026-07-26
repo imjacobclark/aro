@@ -51,6 +51,51 @@ struct SQLiteMediaCache: Sendable {
         } ?? []
     }
 
+    func removedEntries() -> [CachedBlob] {
+        database.withReadConnection { connection in
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                connection,
+                """
+                SELECT DISTINCT b.content_hash, b.byte_count,
+                       b.last_accessed_at, b.pinned
+                FROM blob_availability AS b
+                JOIN tracks AS t ON t.content_hash = b.content_hash
+                JOIN track_state AS s ON s.track_id = t.id
+                WHERE b.local_path IS NOT NULL
+                  AND b.verified = 1
+                  AND s.deleted_at IS NOT NULL
+                """,
+                -1,
+                &statement,
+                nil
+            ) == SQLITE_OK,
+                  let statement else {
+                return []
+            }
+            defer { sqlite3_finalize(statement) }
+            var entries: [CachedBlob] = []
+            while sqlite3_step(statement) == SQLITE_ROW,
+                  let hash = sqlite3_column_text(statement, 0)
+                    .map(String.init(cString:)) {
+                entries.append(
+                    CachedBlob(
+                        contentHash: hash,
+                        byteCount: sqlite3_column_int64(statement, 1),
+                        lastAccessedAt: Date(
+                            timeIntervalSince1970: sqlite3_column_double(
+                                statement,
+                                2
+                            )
+                        ),
+                        isPinned: sqlite3_column_int(statement, 3) != 0
+                    )
+                )
+            }
+            return entries
+        } ?? []
+    }
+
     func register(
         hash: String,
         localURL: URL,
@@ -92,6 +137,102 @@ struct SQLiteMediaCache: Sendable {
                 Date().timeIntervalSince1970
             )
             _ = sqlite3_step(statement)
+        }
+    }
+
+    func media(for policy: OfflineDownloadPolicy) -> [RemoteMedia] {
+        guard policy != .stream else { return [] }
+        return database.withReadConnection { connection in
+            var statement: OpaquePointer?
+            let predicate: String
+            var albums: [String] = []
+            switch policy {
+            case .stream:
+                return []
+            case .favourites:
+                predicate = "AND s.favourite = 1"
+            case .selectedAlbums(let selected):
+                albums = selected.sorted()
+                guard !albums.isEmpty else { return [] }
+                predicate = "AND m.album IN (\(albums.map { _ in "?" }.joined(separator: ",")))"
+            case .fullLibrary:
+                predicate = ""
+            }
+            guard sqlite3_prepare_v2(
+                connection,
+                """
+                SELECT t.id, t.content_hash, l.file_size, l.path
+                FROM tracks AS t
+                JOIN track_state AS s ON s.track_id = t.id
+                JOIN scan_metadata AS m ON m.track_id = t.id
+                JOIN file_locations AS l ON l.track_id = t.id
+                WHERE t.content_hash IS NOT NULL
+                  AND l.available = 1
+                  AND l.path LIKE 'https://%'
+                  AND s.deleted_at IS NULL
+                  \(predicate)
+                ORDER BY t.id
+                """,
+                -1,
+                &statement,
+                nil
+            ) == SQLITE_OK,
+                  let statement else {
+                return []
+            }
+            defer { sqlite3_finalize(statement) }
+            for (offset, album) in albums.enumerated() {
+                bind(album, statement, Int32(offset + 1))
+            }
+            var media: [RemoteMedia] = []
+            while sqlite3_step(statement) == SQLITE_ROW,
+                  let trackIDText = text(statement, 0),
+                  let trackID = UUID(uuidString: trackIDText),
+                  let hash = text(statement, 1),
+                  let path = text(statement, 3),
+                  let url = URL(string: path) {
+                media.append(
+                    RemoteMedia(
+                        trackID: trackID,
+                        contentHash: hash,
+                        byteCount: sqlite3_column_int64(statement, 2),
+                        downloadURL: url
+                    )
+                )
+            }
+            return media
+        } ?? []
+    }
+
+    func replacePins(with hashes: Set<String>) {
+        database.withConnection { connection in
+            _ = sqlite3_exec(
+                connection,
+                "UPDATE blob_availability SET pinned = 0",
+                nil,
+                nil,
+                nil
+            )
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                connection,
+                """
+                UPDATE blob_availability
+                SET pinned = 1
+                WHERE content_hash = ?
+                """,
+                -1,
+                &statement,
+                nil
+            ) == SQLITE_OK,
+                  let statement else { return }
+            defer { sqlite3_finalize(statement) }
+            for hash in hashes {
+                sqlite3_reset(statement)
+                sqlite3_clear_bindings(statement)
+                bind(hash, statement, 1)
+                _ = sqlite3_step(statement)
+            }
         }
     }
 
@@ -162,6 +303,13 @@ struct SQLiteMediaCache: Sendable {
             )
         }
     }
+
+    private func text(
+        _ statement: OpaquePointer,
+        _ column: Int32
+    ) -> String? {
+        sqlite3_column_text(statement, column).map(String.init(cString:))
+    }
 }
 
 struct CachingSHA256MediaVerifier: MediaHashVerifying {
@@ -188,11 +336,36 @@ struct CachingSHA256MediaVerifier: MediaHashVerifying {
 @Observable
 final class MediaCacheController {
     private let cache: SQLiteMediaCache
+    private let prepare: PrepareSongForPlayback?
     var statusMessage: String?
     var errorMessage: String?
+    private(set) var downloadProgress: (completed: Int, total: Int)?
+    private(set) var usedBytes: Int64 = 0
+    private(set) var downloadedFileCount = 0
+    private(set) var protectedFileCount = 0
 
-    init(database: LibraryDatabase) {
+    init(
+        database: LibraryDatabase,
+        prepare: PrepareSongForPlayback? = nil
+    ) {
         cache = SQLiteMediaCache(database: database)
+        self.prepare = prepare
+        refreshSummary()
+    }
+
+    func refreshSummary(
+        currentHash: String? = nil,
+        queuedHashes: Set<String> = []
+    ) {
+        let entries = cache.entries(
+            currentHash: currentHash,
+            queuedHashes: queuedHashes
+        )
+        usedBytes = entries.reduce(0) { $0 + $1.byteCount }
+        downloadedFileCount = entries.count
+        protectedFileCount = entries.filter {
+            $0.isPinned || $0.isQueued || $0.isCurrent
+        }.count
     }
 
     func clear(
@@ -213,9 +386,68 @@ final class MediaCacheController {
             }
             statusMessage = "Removed \(candidates.count) cached files."
             errorMessage = nil
+            refreshSummary(
+                currentHash: currentHash,
+                queuedHashes: queuedHashes
+            )
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    func deleteRemovedDownloads() {
+        do {
+            let entries = cache.removedEntries()
+            for entry in entries {
+                try cache.remove(hash: entry.contentHash)
+            }
+            let bytes = entries.reduce(0) { $0 + $1.byteCount }
+            statusMessage = entries.isEmpty
+                ? "No removed downloads were found."
+                : "Deleted \(entries.count) removed downloads and freed "
+                    + ByteCountFormatter.string(
+                        fromByteCount: bytes,
+                        countStyle: .file
+                    )
+                    + "."
+            errorMessage = nil
+            refreshSummary()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func apply(_ policy: OfflineDownloadPolicy) async {
+        let media = cache.media(for: policy)
+        cache.replacePins(with: Set(media.map(\.contentHash)))
+        guard let prepare, !media.isEmpty else {
+            refreshSummary()
+            return
+        }
+        downloadProgress = (0, media.count)
+        statusMessage = "Downloading offline music…"
+        do {
+            for (index, item) in media.enumerated() {
+                try Task.checkCancellation()
+                let url = try await prepare.execute(.remote(item))
+                cache.register(
+                    hash: item.contentHash,
+                    localURL: url,
+                    byteCount: item.byteCount,
+                    pinned: true
+                )
+                downloadProgress = (index + 1, media.count)
+            }
+            statusMessage = "Offline music is up to date."
+            errorMessage = nil
+        } catch is CancellationError {
+            statusMessage = "Offline download paused."
+        } catch {
+            errorMessage = error.localizedDescription
+            statusMessage = "Some offline music could not be downloaded."
+        }
+        downloadProgress = nil
+        refreshSummary()
     }
 
     func enforceLimit(
@@ -235,6 +467,10 @@ final class MediaCacheController {
                 try cache.remove(hash: candidate.contentHash)
             }
             errorMessage = nil
+            refreshSummary(
+                currentHash: currentHash,
+                queuedHashes: queuedHashes
+            )
         } catch {
             errorMessage = error.localizedDescription
         }

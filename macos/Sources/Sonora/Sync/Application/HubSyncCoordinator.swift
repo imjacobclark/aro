@@ -12,22 +12,26 @@ actor HubSyncCoordinator {
     private let client: SonoraSyncClient
     private let credential: HubDeviceCredential
     private let operations: SQLiteSyncOperationStore
+    private let offlineTrackCount: UInt64?
 
     init(
         hubID: UUID,
         client: SonoraSyncClient,
         credential: HubDeviceCredential,
-        operations: SQLiteSyncOperationStore
+        operations: SQLiteSyncOperationStore,
+        offlineTrackCount: UInt64? = nil
     ) {
         self.hubID = hubID
         self.client = client
         self.credential = credential
         self.operations = operations
+        self.offlineTrackCount = offlineTrackCount
     }
 
     func synchronize() async throws -> SyncRunResult {
+        _ = try await client.compatibleHubInfo()
         let pending = operations.pending(limit: 200)
-        let outgoing = try pending.compactMap { pending -> SyncOperation? in
+        var outgoing = try pending.compactMap { pending -> SyncOperation? in
             if pending.entityType == "track_state" {
                 guard let hubTrackID = operations.hubTrackID(
                     localTrackID: pending.entityID,
@@ -54,6 +58,22 @@ actor HubSyncCoordinator {
             }
             return try pending.wireOperation()
         }
+        let access = try await client.deviceAccess(credential: credential)
+        var sources: [SourceHealthReport] = []
+        if access.canContribute {
+            let contributions = operations.musicContributions(hubID: hubID)
+            for contribution in contributions {
+                try Task.checkCancellation()
+                try await client.uploadBlob(
+                    fileURL: contribution.fileURL,
+                    expectedHash: contribution.contentHash,
+                    expectedSize: contribution.byteCount,
+                    credential: credential
+                )
+                outgoing.append(contribution.operation)
+            }
+            sources = operations.sourceHealthReports(mode: "stored")
+        }
         var cursor = operations.serverCursor(hubID: hubID)
         var uploaded = 0
         var applied = 0
@@ -64,7 +84,13 @@ actor HubSyncCoordinator {
             let response = try await client.exchange(
                 SyncExchangeRequest(
                     afterSequence: cursor,
-                    operations: firstPage ? outgoing : []
+                    operations: firstPage ? outgoing : [],
+                    deviceReport: firstPage
+                        ? DeviceSyncReport(
+                            offlineTrackCount: offlineTrackCount ?? 0,
+                            sources: sources
+                        )
+                        : nil
                 ),
                 credential: credential
             )

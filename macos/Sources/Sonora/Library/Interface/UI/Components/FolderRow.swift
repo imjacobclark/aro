@@ -17,13 +17,15 @@ struct FolderRow: View {
             case .scanning:
                 ProgressView()
                     .controlSize(.small)
-                    .accessibilityLabel("Scanning")
+                    .accessibilityLabel("Syncing")
             case .warning:
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.yellow)
-                    .accessibilityLabel("Folder warning")
+                    .accessibilityLabel("Sync needs attention")
             case .idle:
-                EmptyView()
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .accessibilityLabel("In sync")
             }
         }
     }

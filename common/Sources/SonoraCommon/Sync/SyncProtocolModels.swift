@@ -119,16 +119,100 @@ public struct SyncExchangeRequest: Codable, Sendable {
     public let afterSequence: UInt64
     public let limit: UInt32
     public let operations: [SyncOperation]
+    public let deviceReport: DeviceSyncReport?
 
     public init(
         afterSequence: UInt64,
         limit: UInt32 = 200,
-        operations: [SyncOperation]
+        operations: [SyncOperation],
+        deviceReport: DeviceSyncReport? = nil
     ) {
         self.afterSequence = afterSequence
         self.limit = limit
         self.operations = operations
+        self.deviceReport = deviceReport
     }
+}
+
+public struct DeviceSyncReport: Codable, Sendable {
+    public let offlineTrackCount: UInt64
+    public let sources: [SourceHealthReport]
+
+    public init(
+        offlineTrackCount: UInt64,
+        sources: [SourceHealthReport] = []
+    ) {
+        self.offlineTrackCount = offlineTrackCount
+        self.sources = sources
+    }
+}
+
+public struct SourceHealthReport: Hashable, Codable, Sendable {
+    public let sourceID: UUID
+    public let name: String
+    public let mode: String
+    public let available: Bool
+    public let warning: String?
+
+    public init(
+        sourceID: UUID,
+        name: String,
+        mode: String,
+        available: Bool,
+        warning: String? = nil
+    ) {
+        self.sourceID = sourceID
+        self.name = name
+        self.mode = mode
+        self.available = available
+        self.warning = warning
+    }
+}
+
+public struct SonoraDeviceAccess: Codable, Sendable {
+    public let deviceID: UUID
+    public let name: String
+    public let canContribute: Bool
+}
+
+public struct SonoraBlobStatus: Codable, Sendable {
+    public let hash: String
+    public let exists: Bool
+    public let committedSize: UInt64
+    public let uploadedSize: UInt64
+}
+
+public struct SonoraBlobCommitRequest: Codable, Sendable {
+    public let hash: String
+    public let size: UInt64
+
+    public init(hash: String, size: UInt64) {
+        self.hash = hash
+        self.size = size
+    }
+}
+
+public struct SonoraExportManifest: Codable, Sendable {
+    public let schemaVersion: UInt16
+    public let libraryName: String
+    public let generatedAt: Date
+    public let tracks: [SonoraExportTrack]
+}
+
+public struct SonoraExportTrack: Identifiable, Codable, Sendable {
+    public let trackID: UUID
+    public let contentHash: String
+    public let byteCount: UInt64
+    public let title: String
+    public let artist: String
+    public let album: String?
+    public let trackNumber: UInt32?
+    public let discNumber: UInt32?
+    public let originalFilename: String
+    public let originalExtension: String
+    public let removedAt: Date?
+
+    public var id: UUID { trackID }
 }
 
 public struct SyncExchangeResponse: Codable, Sendable {

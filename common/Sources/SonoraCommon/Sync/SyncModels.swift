@@ -1,8 +1,29 @@
 import Foundation
 
+public enum SonoraSyncProtocol {
+    public static let currentVersion: UInt16 = 4
+}
+
 public enum SyncReplicaMode: String, Codable, CaseIterable, Sendable {
     case onDemand
     case fullMirror
+}
+
+/// The user-facing policy for music that should remain available without the
+/// library host. `SyncReplicaMode` remains on the wire for protocol v2
+/// compatibility; new UI should use this type.
+public enum OfflineDownloadPolicy: Hashable, Codable, Sendable {
+    case stream
+    case favourites
+    case selectedAlbums(Set<String>)
+    case fullLibrary
+
+    public var keepsTemporaryDownloads: Bool {
+        if case .stream = self {
+            return true
+        }
+        return false
+    }
 }
 
 public enum HubImportMode: String, Codable, CaseIterable, Sendable {
@@ -118,6 +139,15 @@ public struct CachedBlob: Hashable, Sendable {
 
 public struct CacheEvictionPolicy: Sendable {
     public static let defaultLimitBytes: Int64 = 20 * 1_024 * 1_024 * 1_024
+
+    public static func automaticLimitBytes(
+        availableCapacity: Int64
+    ) -> Int64 {
+        min(
+            defaultLimitBytes,
+            max(1 * 1_024 * 1_024 * 1_024, availableCapacity / 10)
+        )
+    }
 
     public init() {}
 

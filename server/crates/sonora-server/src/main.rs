@@ -299,6 +299,20 @@ fn import_into_store(
     }
 
     let now = chrono::Utc::now().timestamp_millis();
+    let mut source_identity = Sha256::new();
+    source_identity.update(hub_id.as_bytes());
+    source_identity.update(source.to_string_lossy().as_bytes());
+    let source_digest = source_identity.finalize();
+    let source_id = uuid::Uuid::from_slice(&source_digest[..16])?;
+    store.register_host_source(
+        source_id,
+        source
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("Music Folder"),
+        mode,
+        source,
+    )?;
     let mut operations = Vec::with_capacity(files.len());
     let mut known_hashes = store.content_hashes()?;
     for file in files {
@@ -325,12 +339,18 @@ fn import_into_store(
             payload: serde_json::json!({
                 "content_hash": hash,
                 "byte_count": size,
-                "title": file.file_stem().and_then(|value| value.to_str()).unwrap_or("Unknown")
+                "title": file.file_stem().and_then(|value| value.to_str()).unwrap_or("Unknown"),
+                "original_filename": file.file_name().and_then(|value| value.to_str()).unwrap_or("Unknown"),
+                "original_extension": file.extension().and_then(|value| value.to_str()).unwrap_or("audio"),
+                "source_id": source_id
             }),
             field_versions: BTreeMap::from([
                 ("content_hash".into(), timestamp.clone()),
                 ("byte_count".into(), timestamp.clone()),
-                ("title".into(), timestamp),
+                ("title".into(), timestamp.clone()),
+                ("original_filename".into(), timestamp.clone()),
+                ("original_extension".into(), timestamp.clone()),
+                ("source_id".into(), timestamp),
             ]),
         });
     }

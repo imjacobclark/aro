@@ -7,8 +7,24 @@ struct ContentView: View {
     @Bindable var playback: PlaybackController
     @Bindable var preferences: PlaybackPreferences
     @Bindable var deviceManager: AudioDeviceManager
+    @Bindable var profileRegistry: LibraryProfileRegistry
+    @Bindable var hubService: SonoraHubService
+    @Bindable var syncPreferences: SyncPreferences
+    @Bindable var mediaCache: MediaCacheController
     let reviewLibraryHealth: ReviewLibraryHealth
     let loadStatsDashboard: LoadStatsDashboard
+    let syncStore: SQLiteSyncOperationStore
+    let libraryFiles: any LibraryFileManaging
+    let removeSong: (Song) async throws -> Void
+    let activateProfile: (LibraryProfile) -> Void
+    let completeRemoteConnection: (
+        SonoraHubInfo,
+        URL,
+        String,
+        OfflineDownloadPolicy
+    ) -> Void
+    @State private var importStatus: String?
+    @State private var importError: String?
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -25,6 +41,8 @@ struct ContentView: View {
                             .tag(Destination.stats)
                         Label("Library Health", systemImage: "checkmark.shield")
                             .tag(Destination.libraryHealth)
+                        Label("Devices", systemImage: "macbook.and.iphone")
+                            .tag(Destination.devices)
                     }
 
                     Section {
@@ -42,11 +60,11 @@ struct ContentView: View {
                         }
                     } header: {
                         HStack {
-                            Text("Watched Folders")
+                            Text("Syncs")
                             Spacer()
                             Button(action: chooseFolder) {
                                 Image(systemName: "plus")
-                                    .accessibilityLabel("Add Watched Folder")
+                                    .accessibilityLabel("Add Sync")
                             }
                             .buttonStyle(.plain)
                         }
@@ -76,13 +94,42 @@ struct ContentView: View {
                     LibraryHealthView(
                         reviewLibraryHealth: reviewLibraryHealth
                     )
+                } else if store.selection == .devices {
+                    DevicesView(
+                        library: store,
+                        registry: profileRegistry,
+                        service: hubService,
+                        preferences: syncPreferences,
+                        mediaCache: mediaCache,
+                        syncStore: syncStore,
+                        libraryFiles: libraryFiles,
+                        activateProfile: activateProfile,
+                        completeRemoteConnection: completeRemoteConnection
+                    )
+                } else if case .folder(let folderID) = store.selection,
+                          let folder = store.folders.first(where: {
+                              $0.id == folderID
+                          }),
+                          !folder.isAccessible {
+                    MissingSyncView(
+                        folder: folder,
+                        onLocate: {
+                            locateFolder(id: folder.id)
+                        },
+                        onStopWatching: {
+                            removeFolder(id: folder.id)
+                        }
+                    )
                 } else {
                     SongTableView(
                         title: store.selectedTitle,
                         songs: store.visibleSongs,
                         scanState: store.selectedScanState,
                         hasWatchedFolders: !store.folders.isEmpty,
-                        playback: playback
+                        playback: playback,
+                        storesLibraryCopy:
+                            profileRegistry.activeProfile?.managedMusicPath != nil,
+                        removeSong: removeSong
                     )
                 }
                 }
@@ -120,12 +167,32 @@ struct ContentView: View {
         .onChange(of: store.allSongs.map(\.id)) {
             playback.reconcileAvailableSongs(store.allSongs)
         }
+        .overlay(alignment: .top) {
+            if let importStatus {
+                Label(importStatus, systemImage: "square.and.arrow.down")
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(.top, 12)
+            }
+        }
+        .alert(
+            "Unable to Import Music",
+            isPresented: Binding(
+                get: { importError != nil },
+                set: { if !$0 { importError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(importError ?? "Unknown error")
+        }
     }
 
     private func chooseFolder() {
         let panel = NSOpenPanel()
-        panel.title = "Choose a Folder to Watch"
-        panel.prompt = "Watch Folder"
+        panel.title = "Choose a Folder to Sync"
+        panel.prompt = "Sync Folder"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
@@ -135,7 +202,44 @@ struct ContentView: View {
             return
         }
 
-        store.addFolder(url)
+        if let managedPath = profileRegistry.activeProfile?.managedMusicPath {
+            importStatus = "Importing music…"
+            Task {
+                do {
+                    let destination = URL(fileURLWithPath: managedPath)
+                    let result = try await ManagedMusicImporter().importFolder(
+                        url,
+                        into: destination
+                    )
+                    store.addFolder(destination)
+                    importStatus = "Imported \(result.importedFiles) files"
+                    try? await Task.sleep(for: .seconds(3))
+                    importStatus = nil
+                } catch {
+                    importStatus = nil
+                    importError = error.localizedDescription
+                }
+            }
+        } else {
+            store.addFolder(url)
+        }
+    }
+
+    private func locateFolder(id: UUID) {
+        let panel = NSOpenPanel()
+        panel.title = "Locate Sync Folder"
+        panel.message = "Choose the folder’s new location."
+        panel.prompt = "Locate"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+
+        store.relocateFolder(id: id, to: url)
     }
 
     private func removeFolder(id: UUID) {
@@ -143,5 +247,66 @@ struct ContentView: View {
             store.songsExcludingFolder(id: id)
         )
         store.removeFolder(id: id)
+    }
+}
+
+private struct MissingSyncView: View {
+    let folder: WatchedFolder
+    let onLocate: () -> Void
+    let onStopWatching: () -> Void
+    @State private var confirmsStopWatching = false
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "folder.badge.questionmark")
+                .font(.system(size: 44))
+                .foregroundStyle(.yellow)
+                .accessibilityHidden(true)
+
+            Text("Sync Folder Not Found")
+                .font(.title2.weight(.semibold))
+
+            Text(
+                "This folder no longer exists locally. If you moved it, "
+                    + "select Locate below to find its new location. "
+                    + "Otherwise, stop watching it. Music already synced "
+                    + "into Sonora will remain in Sonora."
+            )
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: 520)
+
+            Text(folder.url.path)
+                .font(.callout.monospaced())
+                .foregroundStyle(.tertiary)
+                .textSelection(.enabled)
+                .lineLimit(2)
+
+            HStack(spacing: 10) {
+                Button("Locate…", action: onLocate)
+                    .buttonStyle(.borderedProminent)
+
+                Button("Stop Watching", role: .destructive) {
+                    confirmsStopWatching = true
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(40)
+        .alert(
+            "Stop Watching “\(folder.displayName)”?",
+            isPresented: $confirmsStopWatching
+        ) {
+            Button("Cancel", role: .cancel) {}
+            Button("Stop Watching", role: .destructive) {
+                onStopWatching()
+            }
+        } message: {
+            Text(
+                "Sonora will stop checking this folder. Music already "
+                    + "synced into Sonora will remain in Sonora."
+            )
+        }
     }
 }

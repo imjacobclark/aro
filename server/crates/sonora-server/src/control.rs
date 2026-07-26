@@ -19,10 +19,27 @@ use uuid::Uuid;
 enum ControlCommand {
     OpenPairing,
     PendingPairingRequests,
-    Approve { request_id: Uuid, approve: bool },
+    Approve {
+        request_id: Uuid,
+        approve: bool,
+        #[serde(default)]
+        can_contribute: bool,
+    },
     Devices,
-    Revoke { device_id: Uuid },
-    Import { path: PathBuf, mode: String },
+    SetContribution {
+        device_id: Uuid,
+        allowed: bool,
+    },
+    RemoveTrack {
+        content_hash: String,
+    },
+    Revoke {
+        device_id: Uuid,
+    },
+    Import {
+        path: PathBuf,
+        mode: String,
+    },
     Status,
 }
 
@@ -35,7 +52,7 @@ struct ControlResponse {
     error: Option<String>,
 }
 
-const CONTROL_PROTOCOL_VERSION: u16 = 3;
+const CONTROL_PROTOCOL_VERSION: u16 = 4;
 
 pub async fn start(path: &Path, state: Arc<AppState>) -> Result<JoinHandle<()>> {
     if let Some(parent) = path.parent() {
@@ -110,8 +127,9 @@ async fn handle(stream: &mut UnixStream, state: Arc<AppState>) -> Result<Value> 
         ControlCommand::Approve {
             request_id,
             approve,
+            can_contribute,
         } => {
-            let credential = state.pairing.approve(request_id, approve)?;
+            let credential = state.pairing.approve(request_id, approve, can_contribute)?;
             if let Some(credential) = &credential {
                 let summary = state
                     .pairing
@@ -124,6 +142,14 @@ async fn handle(stream: &mut UnixStream, state: Arc<AppState>) -> Result<Value> 
             serde_json::to_value(credential)?
         }
         ControlCommand::Devices => serde_json::to_value(state.store.devices()?)?,
+        ControlCommand::SetContribution { device_id, allowed } => {
+            let updated = state.store.set_device_contribution(device_id, allowed)?;
+            json!({"updated": updated})
+        }
+        ControlCommand::RemoveTrack { content_hash } => {
+            let removed = state.store.tombstone_by_hash(&content_hash, state.hub_id)?;
+            json!({"removed": removed})
+        }
         ControlCommand::Revoke { device_id } => {
             let revoked = state.store.revoke_device(device_id)?;
             state.pairing.revoke(device_id);

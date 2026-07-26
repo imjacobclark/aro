@@ -3,32 +3,36 @@ import SonoraCommon
 
 @MainActor
 struct ContentView_Previews: PreviewProvider {
+    private static let preferences = PlaybackPreferences()
+    private static let deviceManager = AudioDeviceManager()
+    private static let runtime = LibraryRuntime(
+        databaseURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("SonoraPreview.sqlite3"),
+        playbackPreferences: preferences,
+        audioDeviceManager: deviceManager
+    )
+
     static var previews: some View {
         ContentView(
-            store: LibraryStore(
-                scanFolder: ScanWatchedFolder(
-                    scanner: PreviewAudioScanner(),
-                    catalog: PreviewLibraryCatalog()
-                ),
-                analyzeSongLoudness: AnalyzeSongLoudness(
-                    analyzer: PreviewLoudnessAnalyzer()
-                ),
-                manageFolders: ManageWatchedFolders(
-                    catalog: PreviewLibraryCatalog()
-                ),
-                monitorFactory: PreviewFolderMonitorFactory(),
-                folderAccess: PreviewFolderAccess(),
-                legacyFolders: InMemoryLegacyWatchedFolderStore()
+            store: runtime.libraryStore,
+            playback: runtime.playbackController,
+            preferences: preferences,
+            deviceManager: deviceManager,
+            profileRegistry: LibraryProfileRegistry(
+                defaults: UserDefaults(suiteName: "SonoraPreview")!
             ),
-            playback: PlaybackController(),
-            preferences: PlaybackPreferences(),
-            deviceManager: AudioDeviceManager(),
-            reviewLibraryHealth: ReviewLibraryHealth(
-                tracks: PreviewLibraryHealthTracks()
+            hubService: SonoraHubService(),
+            syncPreferences: SyncPreferences(
+                defaults: UserDefaults(suiteName: "SonoraPreview")!
             ),
-            loadStatsDashboard: LoadStatsDashboard(
-                stats: PreviewStatsQuery()
-            )
+            mediaCache: runtime.mediaCacheController,
+            reviewLibraryHealth: runtime.reviewLibraryHealth,
+            loadStatsDashboard: runtime.loadStatsDashboard,
+            syncStore: runtime.syncOperationStore,
+            libraryFiles: runtime.libraryFileManager,
+            removeSong: { _ in },
+            activateProfile: { _ in },
+            completeRemoteConnection: { _, _, _, _ in }
         )
         .frame(width: 900, height: 600)
     }

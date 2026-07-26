@@ -62,6 +62,16 @@ actor LoudnessAnalysisService: LoudnessAnalyzing {
         }
 
         let url = song.url
+        guard url.isFileURL,
+              (try? url.resourceValues(
+                forKeys: [.isRegularFileKey, .isReadableKey]
+              ))?.isRegularFile == true,
+              FileManager.default.isReadableFile(atPath: url.path) else {
+            // SFBAudioEngine's replay-gain analyzer accepts local files only.
+            // Passing a remote URL raises an Objective-C exception, which
+            // cannot be caught by Swift and terminates the process.
+            return nil
+        }
         let task: Task<LoudnessAnalysis?, Never> = Task.detached(
             priority: .utility
         ) {

@@ -7,8 +7,12 @@ struct SongTableView: View {
     let scanState: FolderScanState
     let hasWatchedFolders: Bool
     @Bindable var playback: PlaybackController
+    let storesLibraryCopy: Bool
+    let removeSong: (Song) async throws -> Void
 
     @State private var selectedSongID: Song.ID?
+    @State private var songPendingRemoval: Song?
+    @State private var removalError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -69,6 +73,13 @@ struct SongTableView: View {
                         playFirstSong(in: selectedIDs)
                     }
                     .disabled(selectedIDs.isEmpty)
+                    Divider()
+                    Button("Remove from Sonora…", role: .destructive) {
+                        songPendingRemoval = songs.first {
+                            selectedIDs.contains($0.id)
+                        }
+                    }
+                    .disabled(selectedIDs.isEmpty)
                 } primaryAction: { selectedIDs in
                     playFirstSong(in: selectedIDs)
                 }
@@ -84,6 +95,44 @@ struct SongTableView: View {
                 return
             }
             self.selectedSongID = nil
+        }
+        .confirmationDialog(
+            "Remove \(songPendingRemoval?.title ?? "this track") from Sonora?",
+            isPresented: Binding(
+                get: { songPendingRemoval != nil },
+                set: { if !$0 { songPendingRemoval = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Remove from Sonora", role: .destructive) {
+                guard let song = songPendingRemoval else { return }
+                Task {
+                    do {
+                        try await removeSong(song)
+                    } catch {
+                        removalError = error.localizedDescription
+                    }
+                    songPendingRemoval = nil
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                storesLibraryCopy
+                    ? "Sonora never deletes the original file. Its stored copy remains recoverable for 30 days."
+                    : "Sonora removes the track from its library but never deletes the linked file."
+            )
+        }
+        .alert(
+            "Couldn’t Remove Track",
+            isPresented: Binding(
+                get: { removalError != nil },
+                set: { if !$0 { removalError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(removalError ?? "Unknown error")
         }
     }
 
@@ -115,9 +164,9 @@ struct SongTableView: View {
             )
         case .idle where !hasWatchedFolders:
             ContentUnavailableView(
-                "No Watched Folders",
+                "No Syncs",
                 systemImage: "folder.badge.plus",
-                description: Text("Use the + button beside Watched Folders to add your music.")
+                description: Text("Use the + button beside Syncs to add your music.")
             )
         case .idle:
             ContentUnavailableView(

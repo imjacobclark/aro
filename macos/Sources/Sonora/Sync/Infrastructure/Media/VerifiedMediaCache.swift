@@ -10,6 +10,14 @@ enum MediaVerificationError: LocalizedError {
     }
 }
 
+enum MediaDownloadError: LocalizedError {
+    case savedCertificateMismatch
+
+    var errorDescription: String? {
+        "The library’s certificate no longer matches the certificate saved during pairing. Reconnect to the library before downloading music."
+    }
+}
+
 struct SHA256MediaVerifier: MediaHashVerifying {
     func verify(file: URL, expectedSHA256: String) async throws {
         let digest = try await Task.detached {
@@ -33,13 +41,30 @@ struct SHA256MediaVerifier: MediaHashVerifying {
 actor URLSessionMediaDownloader: RemoteMediaDownloading {
     private let cacheDirectory: URL
     private let session: URLSession
+    private let credential: HubDeviceCredential?
 
     init(
         cacheDirectory: URL,
-        session: URLSession = URLSession(configuration: .default)
+        session: URLSession? = nil,
+        credential: HubDeviceCredential? = nil,
+        pinnedTLSFingerprint: String? = nil
     ) {
         self.cacheDirectory = cacheDirectory
-        self.session = session
+        if let session {
+            self.session = session
+        } else if let pinnedTLSFingerprint,
+                  !pinnedTLSFingerprint.isEmpty {
+            self.session = URLSession(
+                configuration: .default,
+                delegate: PinnedTLSDelegate(
+                    fingerprint: pinnedTLSFingerprint
+                ),
+                delegateQueue: nil
+            )
+        } else {
+            self.session = URLSession(configuration: .default)
+        }
+        self.credential = credential
     }
 
     func download(_ media: RemoteMedia) async throws -> URL {
@@ -56,12 +81,30 @@ actor URLSessionMediaDownloader: RemoteMediaDownloading {
 
         let partial = destination.appendingPathExtension("partial")
         var request = URLRequest(url: media.downloadURL)
+        if let credential {
+            request.setValue(
+                "Bearer \(credential.credential)",
+                forHTTPHeaderField: "Authorization"
+            )
+            request.setValue(
+                credential.deviceID.uuidString,
+                forHTTPHeaderField: "X-Sonora-Device"
+            )
+        }
         let offset = (try? partial.resourceValues(forKeys: [.fileSizeKey]))
             .flatMap(\.fileSize) ?? 0
         if offset > 0 {
             request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range")
         }
-        let (temporaryURL, response) = try await session.download(for: request)
+        let temporaryURL: URL
+        let response: URLResponse
+        do {
+            (temporaryURL, response) = try await session.download(for: request)
+        } catch let error as URLError
+            where error.code == .serverCertificateUntrusted
+                || error.code == .secureConnectionFailed {
+            throw MediaDownloadError.savedCertificateMismatch
+        }
         guard let http = response as? HTTPURLResponse,
               (200 ... 299).contains(http.statusCode) else {
             throw URLError(.badServerResponse)

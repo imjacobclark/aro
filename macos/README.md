@@ -1,6 +1,6 @@
 # Sonora
 
-A native macOS SwiftUI audio library. Add watched folders from the sidebar and
+A native macOS SwiftUI audio library. Add music folders from the sidebar and
 Sonora recursively discovers playable audio, reads song metadata, and keeps the
 library updated as files change.
 
@@ -18,6 +18,9 @@ library updated as files change.
 - Queueing, seeking, output-device selection, and playback status
 - Safe folder removal that never deletes media from disk
 - Local-first SQLite library with stable song identities and device locations
+- Task-oriented Devices dashboard with secure QR/code pairing
+- Isolated local and remote library profiles with one active library at a time
+- Streaming, favourites, selected-album, and full-library offline policies
 
 ## Repository layout
 
@@ -106,7 +109,11 @@ dependency graph is stored at `macos/Package.resolved`.
 
 ## Library database
 
-Sonora stores its library index in `Application Support/Sonora/Sonora.sqlite3`.
+Legacy local libraries are migrated from
+`Application Support/Sonora/Sonora.sqlite3` to
+`Application Support/Sonora/Hub Data/Sonora.sqlite3`. Remote library
+subscriptions use isolated databases under
+`Application Support/Sonora/Libraries/<profile>/Library.sqlite3`.
 The filesystem remains the source of audio data, while SQLite stores stable
 song IDs, scanned metadata, device-specific file locations, hidden/deleted
 state, loudness results, and a future synchronization change log.

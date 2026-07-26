@@ -39,7 +39,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/pairing/{id}", get(pairing_status))
         .route("/v1/pairing/approve", post(approve_pairing))
         .route("/v1/devices", get(devices))
+        .route("/v1/device", get(current_device))
         .route("/v1/devices/revoke", post(revoke))
+        .route("/v1/devices/permissions", post(update_device_permissions))
         .route("/v1/join/preview", post(join_preview))
         .route("/v1/join/commit", post(join_commit))
         .route("/v1/snapshot", get(snapshot))
@@ -47,15 +49,18 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/blobs/{hash}", get(download_blob).put(upload_blob))
         .route("/v1/blobs/{hash}/status", get(blob_status))
         .route("/v1/blobs/commit", post(commit_blob))
+        .route("/v1/library/export-manifest", get(export_manifest))
+        .route("/v1/library/sources", get(source_health))
         .route("/v1/jobs/{id}", get(job_status).delete(cancel_job))
         .with_state(Arc::new(state))
 }
 
 async fn hub_info(State(state): State<Arc<AppState>>) -> Json<HubInfo> {
+    let _ = state.store.refresh_host_source_health();
     Json(HubInfo {
         hub_id: state.hub_id,
         display_name: state.display_name.clone(),
-        protocol_min: PROTOCOL_VERSION,
+        protocol_min: MIN_PROTOCOL_VERSION,
         protocol_max: PROTOCOL_VERSION,
         pairing_available: state.pairing.is_open(),
     })
@@ -64,7 +69,7 @@ async fn hub_info(State(state): State<Arc<AppState>>) -> Json<HubInfo> {
 async fn negotiate(
     Json(request): Json<NegotiateRequest>,
 ) -> Result<Json<NegotiateResponse>, ApiError> {
-    if request.protocol_min > PROTOCOL_VERSION || request.protocol_max < PROTOCOL_VERSION {
+    if request.protocol_min > PROTOCOL_VERSION || request.protocol_max < MIN_PROTOCOL_VERSION {
         return Err(ApiError::new(
             StatusCode::UPGRADE_REQUIRED,
             "incompatible_protocol",
@@ -72,7 +77,7 @@ async fn negotiate(
         ));
     }
     Ok(Json(NegotiateResponse {
-        selected_protocol: PROTOCOL_VERSION,
+        selected_protocol: request.protocol_max.min(PROTOCOL_VERSION),
     }))
 }
 
@@ -148,7 +153,7 @@ async fn approve_pairing(
     require_admin(&state, &headers)?;
     let credential = state
         .pairing
-        .approve(request.request_id, request.approve)
+        .approve(request.request_id, request.approve, request.can_contribute)
         .map_err(pairing_error)?;
     if let Some(credential) = &credential {
         let summary = state
@@ -170,6 +175,20 @@ async fn devices(
     Ok(Json(state.store.devices()?))
 }
 
+async fn current_device(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<DeviceSummary>, ApiError> {
+    let device_id = require_device(&state, &headers)?;
+    state
+        .store
+        .devices()?
+        .into_iter()
+        .find(|device| device.device_id == device_id)
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("device_not_found"))
+}
+
 async fn revoke(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -178,6 +197,22 @@ async fn revoke(
     require_admin(&state, &headers)?;
     if state.store.revoke_device(request.device_id)? {
         state.pairing.revoke(request.device_id);
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found("device_not_found"))
+    }
+}
+
+async fn update_device_permissions(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<DevicePermissionRequest>,
+) -> Result<StatusCode, ApiError> {
+    require_admin(&state, &headers)?;
+    if state
+        .store
+        .set_device_contribution(request.device_id, request.can_contribute)?
+    {
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found("device_not_found"))
@@ -224,7 +259,7 @@ async fn snapshot(
     headers: HeaderMap,
     Query(query): Query<SnapshotQuery>,
 ) -> Result<Json<SnapshotPage>, ApiError> {
-    require_device(&state, &headers)?;
+    require_device_or_admin(&state, &headers)?;
     let offset = query
         .cursor
         .as_deref()
@@ -245,7 +280,31 @@ async fn exchange(
     headers: HeaderMap,
     Json(request): Json<ExchangeRequest>,
 ) -> Result<Json<ExchangeResponse>, ApiError> {
-    require_device(&state, &headers)?;
+    let device_id = require_device(&state, &headers)?;
+    let contributes = request
+        .operations
+        .iter()
+        .any(|operation| matches!(operation.entity_type.as_str(), "track" | "source"))
+        || request
+            .device_report
+            .as_ref()
+            .is_some_and(|report| !report.sources.is_empty());
+    if contributes {
+        require_contributor(&state, device_id)?;
+    }
+    state.store.record_device_seen(
+        device_id,
+        true,
+        request
+            .device_report
+            .as_ref()
+            .map(|report| report.offline_track_count),
+    )?;
+    if let Some(report) = &request.device_report {
+        state
+            .store
+            .update_source_health(device_id, &report.sources)?;
+    }
     let accepted = state.store.append_operations(&request.operations)?;
     let changes = state
         .store
@@ -268,7 +327,8 @@ async fn blob_status(
     headers: HeaderMap,
     Path(hash): Path<String>,
 ) -> Result<Json<BlobStatus>, ApiError> {
-    require_device(&state, &headers)?;
+    let device_id = require_device(&state, &headers)?;
+    require_contributor(&state, device_id)?;
     let (exists, committed_size, uploaded_size) = state.store.blob_status(&hash)?;
     Ok(Json(BlobStatus {
         hash,
@@ -284,7 +344,8 @@ async fn upload_blob(
     Path(hash): Path<String>,
     bytes: Bytes,
 ) -> Result<Json<BlobStatus>, ApiError> {
-    require_device(&state, &headers)?;
+    let device_id = require_device(&state, &headers)?;
+    require_contributor(&state, device_id)?;
     let offset = headers
         .get("x-sonora-offset")
         .and_then(|value| value.to_str().ok())
@@ -305,7 +366,8 @@ async fn commit_blob(
     headers: HeaderMap,
     Json(request): Json<BlobCommitRequest>,
 ) -> Result<Json<BlobStatus>, ApiError> {
-    require_device(&state, &headers)?;
+    let device_id = require_device(&state, &headers)?;
+    require_contributor(&state, device_id)?;
     let committed_size = state.store.commit_blob(&request.hash, request.size)?;
     Ok(Json(BlobStatus {
         hash: request.hash,
@@ -320,7 +382,7 @@ async fn download_blob(
     headers: HeaderMap,
     Path(hash): Path<String>,
 ) -> Result<Response, ApiError> {
-    require_device(&state, &headers)?;
+    require_device_or_admin(&state, &headers)?;
     let path = state
         .store
         .blob_path_for_download(&hash)?
@@ -330,6 +392,25 @@ async fn download_blob(
         headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
     )
     .await
+}
+
+async fn export_manifest(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<ExportManifest>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    state.store.refresh_host_source_health()?;
+    state.store.garbage_collect_expired_blobs()?;
+    Ok(Json(state.store.export_manifest(&state.display_name)?))
+}
+
+async fn source_health(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<SourceHealthReport>>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    state.store.refresh_host_source_health()?;
+    Ok(Json(state.store.source_health()?))
 }
 
 async fn download_range(path: PathBuf, range: Option<&str>) -> Result<Response, ApiError> {
@@ -421,10 +502,34 @@ fn require_device(state: &AppState, headers: &HeaderMap) -> Result<Uuid, ApiErro
         .store
         .authorize_device(device_id, bearer(headers).unwrap_or_default())?
     {
+        state.store.record_device_seen(device_id, false, None)?;
         Ok(device_id)
     } else {
         Err(ApiError::unauthorized())
     }
+}
+
+fn require_contributor(state: &AppState, device_id: Uuid) -> Result<(), ApiError> {
+    if !state.store.device_can_contribute(device_id)? {
+        Err(ApiError::forbidden(
+            "contribution_not_allowed",
+            "This device is not allowed to add music.",
+        ))
+    } else if !state.store.library_accepts_contributions()? {
+        Err(ApiError::forbidden(
+            "linked_library_is_read_only",
+            "This is a linked library. It reads files in place and cannot accept uploads.",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn require_device_or_admin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    if bearer(headers).is_some_and(|token| token == state.admin_token) {
+        return Ok(());
+    }
+    require_device(state, headers).map(|_| ())
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {
@@ -475,6 +580,10 @@ impl ApiError {
             "unauthorized",
             "A valid device credential is required",
         )
+    }
+
+    fn forbidden(code: &str, message: &str) -> Self {
+        Self::new(StatusCode::FORBIDDEN, code, message)
     }
 
     fn not_found(code: &str) -> Self {

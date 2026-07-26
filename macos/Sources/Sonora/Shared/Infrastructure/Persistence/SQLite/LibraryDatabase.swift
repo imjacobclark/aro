@@ -246,10 +246,15 @@ final class LibraryDatabase: @unchecked Sendable {
                 }
 
                 let contentHash = text(statement, 12)
+                let isRemotePath = URL(string: path).map {
+                    ["http", "https"].contains(
+                        $0.scheme?.lowercased() ?? ""
+                    )
+                } ?? false
                 let fileSize = optionalInt64(statement, 5)
                 let modificationDate = optionalDouble(statement, 11).map {
                     Date(timeIntervalSince1970: $0)
-                }
+                } ?? (isRemotePath ? .distantPast : nil)
                 let fingerprint = fileSize.flatMap { size in
                     modificationDate.map {
                         AudioFileFingerprint(
@@ -285,10 +290,15 @@ final class LibraryDatabase: @unchecked Sendable {
                     loudness = nil
                 }
 
+                let url = URL(string: path).flatMap {
+                    ["http", "https"].contains($0.scheme?.lowercased() ?? "")
+                        ? $0
+                        : nil
+                } ?? URL(fileURLWithPath: path)
                 songs.append(
                     Song(
                         libraryID: id,
-                        url: URL(fileURLWithPath: path),
+                        url: url,
                         title: text(statement, 2) ?? "Unknown",
                         artist: text(statement, 3) ?? "—",
                         album: text(statement, 16),
@@ -754,7 +764,18 @@ final class LibraryDatabase: @unchecked Sendable {
         to: sqlite3_destructor_type.self
     )
 
-    private static func defaultURL() -> URL {
+    static func defaultURL() -> URL {
+        let base = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? FileManager.default.temporaryDirectory
+        return base
+            .appendingPathComponent("Sonora", isDirectory: true)
+            .appendingPathComponent("Hub Data", isDirectory: true)
+            .appendingPathComponent("Sonora.sqlite3")
+    }
+
+    static func legacyDefaultURL() -> URL {
         let base = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
@@ -762,6 +783,41 @@ final class LibraryDatabase: @unchecked Sendable {
         return base
             .appendingPathComponent("Sonora", isDirectory: true)
             .appendingPathComponent("Sonora.sqlite3")
+    }
+
+    static func prepareDefaultStore() {
+        copyStoreIfNeeded(from: legacyDefaultURL(), to: defaultURL())
+    }
+
+    static func copyStoreIfNeeded(from source: URL, to destination: URL) {
+        let files = FileManager.default
+        guard source.standardizedFileURL != destination.standardizedFileURL,
+              files.fileExists(atPath: source.path),
+              !files.fileExists(atPath: destination.path) else {
+            return
+        }
+        do {
+            try files.createDirectory(
+                at: destination.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try files.copyItem(at: source, to: destination)
+            for suffix in ["-wal", "-shm"] {
+                let sourceSidecar = URL(fileURLWithPath: source.path + suffix)
+                let destinationSidecar = URL(
+                    fileURLWithPath: destination.path + suffix
+                )
+                if files.fileExists(atPath: sourceSidecar.path) {
+                    try files.copyItem(
+                        at: sourceSidecar,
+                        to: destinationSidecar
+                    )
+                }
+            }
+        } catch {
+            // The original database remains untouched and will be retried on
+            // the next launch.
+        }
     }
 }
 

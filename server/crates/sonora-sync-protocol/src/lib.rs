@@ -6,7 +6,8 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const MIN_PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 4;
 pub const SERVICE_TYPE: &str = "_sonora-sync._tcp.local.";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -33,6 +34,8 @@ pub struct NegotiateResponse {
 pub struct PairingStartRequest {
     pub device_id: Uuid,
     pub device_name: String,
+    #[serde(default)]
+    pub device_type: Option<String>,
     /// Base64-encoded Matter PASE PBKDFParamRequest.
     pub pbkdf_request: String,
 }
@@ -72,6 +75,8 @@ pub struct PendingPairingRequest {
     pub request_id: Uuid,
     pub device_id: Uuid,
     pub device_name: String,
+    #[serde(default = "default_device_type")]
+    pub device_type: String,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -108,6 +113,8 @@ pub enum PairingState {
 pub struct PairingApprovalRequest {
     pub request_id: Uuid,
     pub approve: bool,
+    #[serde(default)]
+    pub can_contribute: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -120,8 +127,22 @@ pub struct DeviceCredential {
 pub struct DeviceSummary {
     pub device_id: Uuid,
     pub name: String,
+    #[serde(default = "default_device_type")]
+    pub device_type: String,
     pub paired_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_seen_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_synced_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub offline_track_count: Option<u64>,
+    #[serde(default)]
+    pub can_contribute: bool,
+}
+
+fn default_device_type() -> String {
+    "Device".into()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -211,6 +232,24 @@ pub struct ExchangeRequest {
     pub after_sequence: u64,
     pub limit: u32,
     pub operations: Vec<Operation>,
+    #[serde(default)]
+    pub device_report: Option<DeviceSyncReport>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeviceSyncReport {
+    pub offline_track_count: u64,
+    #[serde(default)]
+    pub sources: Vec<SourceHealthReport>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceHealthReport {
+    pub source_id: Uuid,
+    pub name: String,
+    pub mode: String,
+    pub available: bool,
+    pub warning: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -239,6 +278,35 @@ pub struct BlobStatus {
 pub struct BlobCommitRequest {
     pub hash: String,
     pub size: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExportManifest {
+    pub schema_version: u16,
+    pub library_name: String,
+    pub generated_at: DateTime<Utc>,
+    pub tracks: Vec<ExportTrack>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExportTrack {
+    pub track_id: Uuid,
+    pub content_hash: String,
+    pub byte_count: u64,
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+    pub track_number: Option<u32>,
+    pub disc_number: Option<u32>,
+    pub original_filename: String,
+    pub original_extension: String,
+    pub removed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DevicePermissionRequest {
+    pub device_id: Uuid,
+    pub can_contribute: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

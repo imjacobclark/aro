@@ -43,16 +43,13 @@ codesign --verify --strict \
   "$HOME/Applications/Sonora.app/Contents/MacOS/sonora-server"
 ```
 
-### Enable LAN library hosting
+### Share a library with other devices
 
-The Background Service is managed by macOS and needs a persistent Library Data
-directory before it can start:
-
-1. Open **Sonora → Settings → Sync**.
-2. Under **Host This Sonora**, click **Use Recommended Location**. This stores
-   the shared library database and cache in
-   `~/Library/Application Support/Sonora/Hub Data`.
-3. Turn on **Host This Sonora**.
+1. Open **Devices** in Sonora’s main sidebar.
+2. Choose **Create a Library** if this is a new installation, or select
+   **Enable Sharing** for a library already stored on this Mac.
+3. Select **Add Device**. Scan the QR code from the other device or enter the
+   six-digit connection code, then approve the named device.
 4. If Sonora reports **Approval required in Login Items**, open **System
    Settings → General → Login Items & Extensions** and allow Sonora.
 
@@ -60,17 +57,36 @@ The Background Service is embedded in `Sonora.app`; don’t move or delete the a
 enabling hosting. Installing it in `~/Applications` with the commands above
 gives the Background Service a stable path across logins.
 
-The server-data location cannot be inside `~/Desktop`, `~/Documents`, or
+Sonora’s private sharing-data location cannot be inside `~/Desktop`, `~/Documents`, or
 `~/Downloads`: macOS blocks background LaunchAgents from opening those
 privacy-protected folders. This does not require moving your music library.
-Library Data is Sonora’s private shared database/cache location; watched music sources
-remain separate.
+Network addresses, ports, process state, logs, and storage maintenance remain
+available under **Settings → Devices** for diagnostics.
 
-To pair another Mac, click **Open Pairing Window** on the host. On the other
-Mac, choose the discovered Sonora, enter the displayed six-digit code, then click
-**Pair…**. The request appears on the host; click **Approve** there to issue
-that Mac its revocable credential. The code authenticates the hosting Sonora with
-SPAKE2+, and Sonora saves the TLS certificate pin automatically.
+### Library and file lifecycle
+
+Sonora presents two library behaviours:
+
+- **Stored by Sonora** keeps a byte-identical Sonora copy of every imported or
+  contributed audio file. Original watched folders remain the user’s files:
+  Sonora never edits or deletes them. If one goes offline, Sonora reports the
+  missing source but continues serving its stored copy.
+- **Linked files** indexes audio in place without duplicating it. It is
+  read-only for device contributions and requires the linked storage to remain
+  online.
+
+Newly paired devices can play by default. A library owner must explicitly grant
+**Can add music** before that device may upload tracks. Every upload and
+download preserves the original bytes and SHA-256 identity; Sonora does not
+transcode, retag, recompress, or change the file extension.
+
+**Remove from Sonora** removes the logical track but never deletes an original
+file. A stored Sonora copy remains recoverable for 30 days, after which
+unreferenced storage can be reclaimed. **Export Entire Library** writes active
+tracks to `sonora-library/<Artist>/<Album>/…`, recoverable removed tracks to
+`_Recently Removed`, and includes a JSON manifest. Interrupted exports resume,
+matching files are skipped by SHA-256, and conflicting files are not
+overwritten.
 
 ## Build and launch from source
 

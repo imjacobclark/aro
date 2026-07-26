@@ -4,8 +4,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sonora_sync_core::{BlobError, hash_file, validate_hash, verify_file};
 use sonora_sync_protocol::{
-    ConflictChoice, DeviceSummary, FieldConflict, HybridTimestamp, JoinCommitRequest, JoinPreview,
-    JoinPreviewRequest, ManifestEntry, Operation, SequencedOperation, VersionedValue,
+    ConflictChoice, DeviceSummary, ExportManifest, ExportTrack, FieldConflict, HybridTimestamp,
+    JoinCommitRequest, JoinPreview, JoinPreviewRequest, ManifestEntry, Operation,
+    SequencedOperation, SourceHealthReport, VersionedValue,
 };
 use std::collections::{BTreeMap, HashSet};
 use std::{
@@ -193,6 +194,124 @@ impl HubStore {
             })
         })?;
         rows.collect::<Result<_, _>>().map_err(Into::into)
+    }
+
+    pub fn export_manifest(&self, library_name: &str) -> Result<ExportManifest, StoreError> {
+        let connection = self.connection.lock();
+        let recovery_cutoff = chrono::Utc::now().timestamp() - 30 * 24 * 60 * 60;
+        let mut statement = connection.prepare(
+            r#"
+            SELECT t.hub_track_id, t.content_hash, t.metadata, t.tombstoned_at,
+                   COALESCE(b.size, rb.size)
+            FROM tracks AS t
+            LEFT JOIN blobs AS b ON b.hash = t.content_hash
+            LEFT JOIN referenced_blobs AS rb ON rb.hash = t.content_hash
+            WHERE t.purged_at IS NULL
+              AND t.content_hash IS NOT NULL
+              AND (t.tombstoned_at IS NULL OR t.tombstoned_at >= ?1)
+            ORDER BY t.hub_track_id
+            "#,
+        )?;
+        let rows = statement.query_map([recovery_cutoff], |row| {
+            let track_id: String = row.get(0)?;
+            let hash: String = row.get(1)?;
+            let metadata_json: String = row.get(2)?;
+            let metadata: serde_json::Map<String, Value> =
+                serde_json::from_str(&metadata_json).unwrap_or_default();
+            let text = |key: &str| metadata.get(key).and_then(Value::as_str).map(str::to_owned);
+            let integer = |key: &str| {
+                metadata
+                    .get(key)
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+            };
+            let title = text("title").unwrap_or_else(|| "Unknown Track".into());
+            let original_filename = text("original_filename").unwrap_or_else(|| {
+                format!(
+                    "{title}.{}",
+                    text("original_extension").unwrap_or_else(|| "audio".into())
+                )
+            });
+            Ok(ExportTrack {
+                track_id: Uuid::parse_str(&track_id).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        track_id.len(),
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
+                content_hash: hash,
+                byte_count: row.get::<_, Option<u64>>(4)?.unwrap_or_else(|| {
+                    metadata
+                        .get("byte_count")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0)
+                }),
+                title,
+                artist: text("artist").unwrap_or_else(|| "Unknown Artist".into()),
+                album: text("album"),
+                track_number: integer("track_number"),
+                disc_number: integer("disc_number"),
+                original_extension: text("original_extension").unwrap_or_else(|| {
+                    Path::new(&original_filename)
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("audio")
+                        .to_owned()
+                }),
+                original_filename,
+                removed_at: row
+                    .get::<_, Option<i64>>(3)?
+                    .and_then(|timestamp| chrono::DateTime::from_timestamp(timestamp, 0)),
+            })
+        })?;
+        Ok(ExportManifest {
+            schema_version: 1,
+            library_name: library_name.to_owned(),
+            generated_at: chrono::Utc::now(),
+            tracks: rows.collect::<Result<_, _>>()?,
+        })
+    }
+
+    pub fn garbage_collect_expired_blobs(&self) -> Result<usize, StoreError> {
+        let cutoff = chrono::Utc::now().timestamp() - 30 * 24 * 60 * 60;
+        let hashes: Vec<String> = {
+            let connection = self.connection.lock();
+            let mut statement = connection.prepare(
+                r#"
+                SELECT DISTINCT content_hash
+                FROM tracks
+                WHERE tombstoned_at IS NOT NULL
+                  AND tombstoned_at < ?1
+                  AND purged_at IS NULL
+                  AND content_hash IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM tracks AS live
+                      WHERE live.content_hash = tracks.content_hash
+                        AND live.tombstoned_at IS NULL
+                        AND live.purged_at IS NULL
+                  )
+                "#,
+            )?;
+            statement
+                .query_map([cutoff], |row| row.get(0))?
+                .collect::<Result<_, _>>()?
+        };
+        let mut removed = 0;
+        for hash in hashes {
+            {
+                let connection = self.connection.lock();
+                connection.execute(
+                    "UPDATE tracks SET purged_at = unixepoch() \
+                     WHERE content_hash = ?1 AND tombstoned_at < ?2",
+                    params![hash, cutoff],
+                )?;
+            }
+            if self.purge_blob(&hash)? {
+                removed += 1;
+            }
+        }
+        Ok(removed)
     }
 
     pub fn create_join_preview(
@@ -398,19 +517,24 @@ impl HubStore {
         self.connection.lock().execute(
             r#"
             INSERT INTO device_credentials
-                (device_id, name, credential_hash, paired_at, revoked_at)
-            VALUES (?1, ?2, ?3, ?4, NULL)
+                (device_id, name, device_type, credential_hash, paired_at,
+                 revoked_at, can_contribute)
+            VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)
             ON CONFLICT(device_id) DO UPDATE SET
                 name = excluded.name,
+                device_type = excluded.device_type,
                 credential_hash = excluded.credential_hash,
                 paired_at = excluded.paired_at,
-                revoked_at = NULL
+                revoked_at = NULL,
+                can_contribute = excluded.can_contribute
             "#,
             params![
                 summary.device_id.to_string(),
                 summary.name,
+                summary.device_type,
                 hash,
                 summary.paired_at.to_rfc3339(),
+                summary.can_contribute,
             ],
         )?;
         Ok(())
@@ -433,15 +557,94 @@ impl HubStore {
         Ok(stored.as_bytes().ct_eq(candidate.as_bytes()).into())
     }
 
+    pub fn device_can_contribute(&self, device_id: Uuid) -> Result<bool, StoreError> {
+        Ok(self
+            .connection
+            .lock()
+            .query_row(
+                "SELECT can_contribute FROM device_credentials \
+                 WHERE device_id = ?1 AND revoked_at IS NULL",
+                [device_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    pub fn library_accepts_contributions(&self) -> Result<bool, StoreError> {
+        let connection = self.connection.lock();
+        let source_count: i64 =
+            connection.query_row("SELECT COUNT(*) FROM sources", [], |row| row.get(0))?;
+        let stored_count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM sources WHERE mode = 'managed'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(source_count == 0 || stored_count > 0)
+    }
+
+    pub fn tombstone_by_hash(
+        &self,
+        content_hash: &str,
+        device_id: Uuid,
+    ) -> Result<bool, StoreError> {
+        let track_id: Option<String> = self
+            .connection
+            .lock()
+            .query_row(
+                r#"
+                SELECT hub_track_id
+                FROM tracks
+                WHERE content_hash = ?1 AND tombstoned_at IS NULL
+                LIMIT 1
+                "#,
+                [content_hash],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(track_id) = track_id else {
+            return Ok(false);
+        };
+        self.append_operations(&[Operation {
+            operation_id: Uuid::new_v4(),
+            device_id,
+            entity_type: "track_state".into(),
+            entity_id: track_id,
+            kind: "delete".into(),
+            payload: serde_json::json!({
+                "deleted_at": chrono::Utc::now().timestamp_millis()
+            }),
+            field_versions: BTreeMap::new(),
+        }])?;
+        Ok(true)
+    }
+
+    pub fn set_device_contribution(
+        &self,
+        device_id: Uuid,
+        can_contribute: bool,
+    ) -> Result<bool, StoreError> {
+        Ok(self.connection.lock().execute(
+            "UPDATE device_credentials SET can_contribute = ?1 \
+             WHERE device_id = ?2 AND revoked_at IS NULL",
+            params![can_contribute, device_id.to_string()],
+        )? == 1)
+    }
+
     pub fn devices(&self) -> Result<Vec<DeviceSummary>, StoreError> {
         let connection = self.connection.lock();
         let mut statement = connection.prepare(
-            "SELECT device_id, name, paired_at, revoked_at FROM device_credentials ORDER BY paired_at",
+            r#"
+            SELECT device_id, name, device_type, paired_at, revoked_at,
+                   last_seen_at, last_synced_at, offline_track_count,
+                   can_contribute
+            FROM device_credentials ORDER BY paired_at
+            "#,
         )?;
         let devices = statement.query_map([], |row| {
             let id: String = row.get(0)?;
-            let paired_at: String = row.get(2)?;
-            let revoked_at: Option<String> = row.get(3)?;
+            let paired_at: String = row.get(3)?;
+            let revoked_at: Option<String> = row.get(4)?;
             Ok(DeviceSummary {
                 device_id: Uuid::parse_str(&id).map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(
@@ -451,6 +654,7 @@ impl HubStore {
                     )
                 })?,
                 name: row.get(1)?,
+                device_type: row.get(2)?,
                 paired_at: chrono::DateTime::parse_from_rfc3339(&paired_at)
                     .map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(
@@ -472,9 +676,158 @@ impl HubStore {
                             Box::new(error),
                         )
                     })?,
+                last_seen_at: optional_timestamp(row.get(5)?)?,
+                last_synced_at: optional_timestamp(row.get(6)?)?,
+                offline_track_count: row.get(7)?,
+                can_contribute: row.get(8)?,
             })
         })?;
         devices.collect::<Result<_, _>>().map_err(Into::into)
+    }
+
+    pub fn record_device_seen(
+        &self,
+        device_id: Uuid,
+        synced: bool,
+        offline_track_count: Option<u64>,
+    ) -> Result<(), StoreError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.connection.lock().execute(
+            r#"
+            UPDATE device_credentials
+            SET last_seen_at = ?1,
+                last_synced_at = CASE WHEN ?2 THEN ?1 ELSE last_synced_at END,
+                offline_track_count = COALESCE(?3, offline_track_count)
+            WHERE device_id = ?4 AND revoked_at IS NULL
+            "#,
+            params![now, synced, offline_track_count, device_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_source_health(
+        &self,
+        device_id: Uuid,
+        sources: &[SourceHealthReport],
+    ) -> Result<(), StoreError> {
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction()?;
+        for source in sources {
+            transaction.execute(
+                r#"
+                INSERT INTO sources
+                    (source_id, mode, path, available, warning,
+                     owner_device_id, name, last_seen_at)
+                VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7)
+                ON CONFLICT(source_id) DO UPDATE SET
+                    mode = excluded.mode,
+                    available = excluded.available,
+                    warning = excluded.warning,
+                    owner_device_id = excluded.owner_device_id,
+                    name = excluded.name,
+                    last_seen_at = excluded.last_seen_at
+                "#,
+                params![
+                    source.source_id.to_string(),
+                    source.mode,
+                    source.available,
+                    source.warning,
+                    device_id.to_string(),
+                    source.name,
+                    chrono::Utc::now().to_rfc3339(),
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn refresh_host_source_health(&self) -> Result<(), StoreError> {
+        let sources: Vec<(String, String, String)> = {
+            let connection = self.connection.lock();
+            let mut statement = connection
+                .prepare("SELECT source_id, path, mode FROM sources WHERE path IS NOT NULL")?;
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<Result<_, _>>()?
+        };
+        let connection = self.connection.lock();
+        for (source_id, path, mode) in sources {
+            let available = Path::new(&path).is_dir();
+            let warning = (!available).then_some(if mode == "managed" {
+                "The original folder is unavailable. Sonora’s stored copy remains available."
+            } else {
+                "This linked folder is unavailable. Its tracks cannot be served until the folder is online."
+            });
+            connection.execute(
+                r#"
+                UPDATE sources
+                SET available = ?1, warning = ?2, last_seen_at = ?3
+                WHERE source_id = ?4
+                "#,
+                params![
+                    available,
+                    warning,
+                    chrono::Utc::now().to_rfc3339(),
+                    source_id
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn source_health(&self) -> Result<Vec<SourceHealthReport>, StoreError> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            r#"
+            SELECT source_id, name, mode, available, warning
+            FROM sources
+            ORDER BY name, source_id
+            "#,
+        )?;
+        Ok(statement
+            .query_map([], |row| {
+                let source_id: String = row.get(0)?;
+                Ok(SourceHealthReport {
+                    source_id: Uuid::parse_str(&source_id).unwrap_or_default(),
+                    name: row.get(1)?,
+                    mode: row.get(2)?,
+                    available: row.get(3)?,
+                    warning: row.get(4)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?)
+    }
+
+    pub fn register_host_source(
+        &self,
+        source_id: Uuid,
+        name: &str,
+        mode: &str,
+        path: &Path,
+    ) -> Result<(), StoreError> {
+        self.connection.lock().execute(
+            r#"
+            INSERT INTO sources
+                (source_id, mode, path, available, warning, name, last_seen_at)
+            VALUES (?1, ?2, ?3, 1, NULL, ?4, ?5)
+            ON CONFLICT(source_id) DO UPDATE SET
+                mode = excluded.mode,
+                path = excluded.path,
+                available = 1,
+                warning = NULL,
+                name = excluded.name,
+                last_seen_at = excluded.last_seen_at
+            "#,
+            params![
+                source_id.to_string(),
+                mode,
+                path.to_string_lossy(),
+                name,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
     }
 
     pub fn revoke_device(&self, device_id: Uuid) -> Result<bool, StoreError> {
@@ -748,9 +1101,14 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
         CREATE TABLE IF NOT EXISTS device_credentials (
             device_id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
+            device_type TEXT NOT NULL DEFAULT 'Device',
             credential_hash TEXT NOT NULL,
             paired_at TEXT NOT NULL,
-            revoked_at TEXT
+            revoked_at TEXT,
+            last_seen_at TEXT,
+            last_synced_at TEXT,
+            offline_track_count INTEGER,
+            can_contribute INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS join_previews (
             preview_id TEXT PRIMARY KEY,
@@ -798,7 +1156,10 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
             mode TEXT NOT NULL CHECK(mode IN ('managed', 'referenced')),
             path TEXT,
             available INTEGER NOT NULL DEFAULT 1,
-            warning TEXT
+            warning TEXT,
+            owner_device_id TEXT,
+            name TEXT NOT NULL DEFAULT 'Music Folder',
+            last_seen_at TEXT
         );
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
@@ -806,7 +1167,56 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
         );
         INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, unixepoch());
         "#,
-    )
+    )?;
+    let _ = connection.execute(
+        "ALTER TABLE device_credentials ADD COLUMN device_type TEXT NOT NULL DEFAULT 'Device'",
+        [],
+    );
+    let _ = connection.execute(
+        "ALTER TABLE device_credentials ADD COLUMN last_seen_at TEXT",
+        [],
+    );
+    let _ = connection.execute(
+        "ALTER TABLE device_credentials ADD COLUMN last_synced_at TEXT",
+        [],
+    );
+    let _ = connection.execute(
+        "ALTER TABLE device_credentials ADD COLUMN offline_track_count INTEGER",
+        [],
+    );
+    let _ = connection.execute(
+        "ALTER TABLE device_credentials ADD COLUMN can_contribute INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = connection.execute("ALTER TABLE sources ADD COLUMN owner_device_id TEXT", []);
+    let _ = connection.execute(
+        "ALTER TABLE sources ADD COLUMN name TEXT NOT NULL DEFAULT 'Music Folder'",
+        [],
+    );
+    let _ = connection.execute("ALTER TABLE sources ADD COLUMN last_seen_at TEXT", []);
+    connection.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (3, unixepoch())",
+        [],
+    )?;
+    Ok(())
+}
+
+fn optional_timestamp(
+    value: Option<String>,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, rusqlite::Error> {
+    value
+        .map(|value| {
+            chrono::DateTime::parse_from_rfc3339(&value)
+                .map(|date| date.to_utc())
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        value.len(),
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+        })
+        .transpose()
 }
 
 fn materialize_operation(
@@ -996,8 +1406,13 @@ mod tests {
         let device = DeviceSummary {
             device_id: Uuid::new_v4(),
             name: "Mac".into(),
+            device_type: "Mac".into(),
             paired_at: chrono::Utc::now(),
             revoked_at: None,
+            last_seen_at: None,
+            last_synced_at: None,
+            offline_track_count: None,
+            can_contribute: false,
         };
         HubStore::open(directory.path())
             .unwrap()
@@ -1020,6 +1435,103 @@ mod tests {
             !reopened
                 .authorize_device(device.device_id, "credential")
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn contribution_permissions_and_library_mode_are_independent() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let device_id = Uuid::new_v4();
+        let device = DeviceSummary {
+            device_id,
+            name: "Contributor".into(),
+            device_type: "Mac".into(),
+            paired_at: chrono::Utc::now(),
+            revoked_at: None,
+            last_seen_at: None,
+            last_synced_at: None,
+            offline_track_count: None,
+            can_contribute: false,
+        };
+        store.save_device(&device, "credential").unwrap();
+        assert!(!store.device_can_contribute(device_id).unwrap());
+        assert!(store.set_device_contribution(device_id, true).unwrap());
+        assert!(store.device_can_contribute(device_id).unwrap());
+
+        let linked = directory.path().join("linked");
+        std::fs::create_dir_all(&linked).unwrap();
+        store
+            .register_host_source(Uuid::new_v4(), "Linked", "referenced", &linked)
+            .unwrap();
+        assert!(!store.library_accepts_contributions().unwrap());
+
+        let stored = directory.path().join("stored");
+        std::fs::create_dir_all(&stored).unwrap();
+        store
+            .register_host_source(Uuid::new_v4(), "Stored", "managed", &stored)
+            .unwrap();
+        assert!(store.library_accepts_contributions().unwrap());
+    }
+
+    #[test]
+    fn export_manifest_keeps_recently_removed_bit_exact_tracks() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("original.flac");
+        std::fs::write(&source, b"exact original bytes").unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let (hash, size) = store.import_managed(&source).unwrap();
+        let track_id = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+        let version = HybridTimestamp {
+            physical_millis: chrono::Utc::now().timestamp_millis(),
+            logical: 0,
+            device_id,
+        };
+        let fields = [
+            "content_hash",
+            "byte_count",
+            "title",
+            "artist",
+            "album",
+            "original_filename",
+            "original_extension",
+        ]
+        .into_iter()
+        .map(|field| (field.to_owned(), version.clone()))
+        .collect();
+        store
+            .append_operations(&[Operation {
+                operation_id: Uuid::new_v4(),
+                device_id,
+                entity_type: "track".into(),
+                entity_id: track_id.to_string(),
+                kind: "upsert".into(),
+                payload: serde_json::json!({
+                    "content_hash": hash,
+                    "byte_count": size,
+                    "title": "Exact",
+                    "artist": "Artist",
+                    "album": "Album",
+                    "original_filename": "original.flac",
+                    "original_extension": "flac"
+                }),
+                field_versions: fields,
+            }])
+            .unwrap();
+        let active = store.export_manifest("Library").unwrap();
+        assert_eq!(active.tracks.len(), 1);
+        assert_eq!(active.tracks[0].byte_count, size);
+        assert_eq!(active.tracks[0].original_extension, "flac");
+        assert!(active.tracks[0].removed_at.is_none());
+
+        assert!(store.tombstone_by_hash(&hash, device_id).unwrap());
+        let removed = store.export_manifest("Library").unwrap();
+        assert_eq!(removed.tracks.len(), 1);
+        assert!(removed.tracks[0].removed_at.is_some());
+        assert_eq!(
+            std::fs::read(store.blob_path_for_download(&hash).unwrap().unwrap()).unwrap(),
+            b"exact original bytes"
         );
     }
 

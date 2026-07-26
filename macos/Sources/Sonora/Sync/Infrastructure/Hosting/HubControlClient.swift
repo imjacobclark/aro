@@ -24,27 +24,42 @@ enum HubControlError: LocalizedError {
 
 struct HubPairingWindow: Sendable {
     let code: String
+    let expiresAt: Date
+}
+
+struct HubControlStatus: Sendable {
+    let hubID: UUID
+    let displayName: String
+    let pairingAvailable: Bool
 }
 
 struct ControlledHubDevice: Identifiable, Codable, Sendable {
     let deviceID: UUID
     let name: String
+    let deviceType: String?
+    let pairedAt: Date?
     let revokedAt: Date?
+    let lastSeenAt: Date?
+    let lastSyncedAt: Date?
+    let offlineTrackCount: UInt64?
+    let canContribute: Bool?
 
     var id: UUID { deviceID }
+    var allowsContributions: Bool { canContribute ?? false }
 }
 
 struct ControlledPairingRequest: Identifiable, Codable, Sendable {
     let requestID: UUID
     let deviceID: UUID
     let deviceName: String
+    let deviceType: String?
     let expiresAt: String
 
     var id: UUID { requestID }
 }
 
 struct HubControlClient: Sendable {
-    static let controlProtocolVersion = 3
+    static let controlProtocolVersion = 4
 
     let socketURL: URL
 
@@ -56,12 +71,33 @@ struct HubControlClient: Sendable {
         }
     }
 
-    func openPairing() async throws -> HubPairingWindow {
-        let result = try await send(["command": "open_pairing"])
-        guard let code = result["code"] as? String else {
+    func status() async throws -> HubControlStatus {
+        let result = try await send(["command": "status"])
+        guard let hubIDText = result["hub_id"] as? String,
+              let hubID = UUID(uuidString: hubIDText),
+              let displayName = result["display_name"] as? String,
+              let pairingAvailable = result["pairing_available"] as? Bool else {
             throw HubControlError.invalidResponse
         }
-        return HubPairingWindow(code: code)
+        return HubControlStatus(
+            hubID: hubID,
+            displayName: displayName,
+            pairingAvailable: pairingAvailable
+        )
+    }
+
+    func openPairing() async throws -> HubPairingWindow {
+        let result = try await send(["command": "open_pairing"])
+        guard let code = result["code"] as? String,
+              let expiresInSeconds = result["expires_in_seconds"] as? Int else {
+            throw HubControlError.invalidResponse
+        }
+        return HubPairingWindow(
+            code: code,
+            expiresAt: Date().addingTimeInterval(
+                TimeInterval(expiresInSeconds)
+            )
+        )
     }
 
     func devices() async throws -> [ControlledHubDevice] {
@@ -81,11 +117,31 @@ struct HubControlClient: Sendable {
         return try decoder.decode([ControlledPairingRequest].self, from: data)
     }
 
-    func approvePairing(requestID: UUID, approve: Bool) async throws {
+    func approvePairing(
+        requestID: UUID,
+        approve: Bool,
+        canContribute: Bool = false
+    ) async throws {
         _ = try await sendValue([
             "command": "approve",
             "request_id": requestID.uuidString,
             "approve": approve,
+            "can_contribute": canContribute,
+        ])
+    }
+
+    func setContribution(deviceID: UUID, allowed: Bool) async throws {
+        _ = try await send([
+            "command": "set_contribution",
+            "device_id": deviceID.uuidString,
+            "allowed": allowed,
+        ])
+    }
+
+    func removeTrack(contentHash: String) async throws {
+        _ = try await send([
+            "command": "remove_track",
+            "content_hash": contentHash,
         ])
     }
 

@@ -97,7 +97,7 @@ fi
 
 if grep -R -n --include='*.swift' \
     'LibraryDatabase(' "$macos_root" \
-    | grep -v '/App/Composition/SonoraApp.swift:'
+    | grep -v '/App/Composition/'
 then
     fail "The SQLite database is constructed outside the composition root."
 fi

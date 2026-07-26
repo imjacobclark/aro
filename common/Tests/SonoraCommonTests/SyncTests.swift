@@ -19,6 +19,22 @@ final class SyncTests: XCTestCase {
         XCTAssertEqual(candidates.map(\.contentHash), ["old", "new"])
     }
 
+    func testAutomaticCacheLimitUsesTenPercentUpToTwentyGiB() {
+        let gib: Int64 = 1_024 * 1_024 * 1_024
+        XCTAssertEqual(
+            CacheEvictionPolicy.automaticLimitBytes(
+                availableCapacity: 50 * gib
+            ),
+            5 * gib
+        )
+        XCTAssertEqual(
+            CacheEvictionPolicy.automaticLimitBytes(
+                availableCapacity: 500 * gib
+            ),
+            20 * gib
+        )
+    }
+
     func testRemotePlaybackDownloadsAndVerifiesBeforeReturning() async throws {
         let destination = URL(fileURLWithPath: "/cache/blob")
         let events = EventLog()

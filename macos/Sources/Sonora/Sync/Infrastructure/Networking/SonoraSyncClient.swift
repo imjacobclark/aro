@@ -9,6 +9,10 @@ enum SonoraSyncClientError: LocalizedError {
     case invalidPairingCode
     case pairingAuthenticationFailed
     case tlsFingerprintMismatch
+    case incompatibleProtocol(
+        library: String,
+        available: ClosedRange<UInt16>
+    )
     case httpError(status: Int, message: String)
 
     var errorDescription: String? {
@@ -21,6 +25,12 @@ enum SonoraSyncClientError: LocalizedError {
             "The pairing code could not authenticate this Sonora."
         case .tlsFingerprintMismatch:
             "The certificate does not match the Sonora saved during pairing."
+        case .incompatibleProtocol(let library, let available):
+            "\(library) is running an incompatible Sonora server "
+                + "(sync protocol \(available.lowerBound)–"
+                + "\(available.upperBound)). This version requires protocol "
+                + "\(SonoraSyncProtocol.currentVersion). Upgrade the hosting "
+                + "Sonora, then try again."
         case .httpError(let status, let message):
             "The hosting Sonora returned HTTP \(status): \(message)"
         }
@@ -106,6 +116,7 @@ actor SonoraSyncClient {
     private let session: URLSession
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
+    private let adminToken: String?
 
     init(baseURL: URL, pinnedTLSFingerprint: String) {
         self.baseURL = baseURL
@@ -123,6 +134,7 @@ actor SonoraSyncClient {
         encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
         decoder = JSONDecoder.sonoraSyncProtocol()
+        adminToken = nil
     }
 
     init(pairingBaseURL baseURL: URL) {
@@ -139,6 +151,7 @@ actor SonoraSyncClient {
         encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
         decoder = JSONDecoder.sonoraSyncProtocol()
+        adminToken = nil
     }
 
     init(discoveryBaseURL baseURL: URL) {
@@ -155,10 +168,40 @@ actor SonoraSyncClient {
         encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
         decoder = JSONDecoder.sonoraSyncProtocol()
+        adminToken = nil
+    }
+
+    init(localAdminBaseURL baseURL: URL, adminToken: String) {
+        self.baseURL = baseURL
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.waitsForConnectivity = false
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 120
+        session = URLSession(
+            configuration: configuration,
+            delegate: PairingTLSDelegate(),
+            delegateQueue: nil
+        )
+        encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        decoder = JSONDecoder.sonoraSyncProtocol()
+        self.adminToken = adminToken
     }
 
     func hubInfo() async throws -> SonoraHubInfo {
         try await get("v1/hub")
+    }
+
+    func compatibleHubInfo() async throws -> SonoraHubInfo {
+        let info = try await hubInfo()
+        let current = SonoraSyncProtocol.currentVersion
+        guard info.protocolMin <= current, info.protocolMax >= current else {
+            throw SonoraSyncClientError.incompatibleProtocol(
+                library: info.displayName,
+                available: info.protocolMin ... info.protocolMax
+            )
+        }
+        return info
     }
 
     func startPairing(
@@ -180,6 +223,7 @@ actor SonoraSyncClient {
             body: PairingRequest(
                 deviceID: deviceID,
                 deviceName: deviceName,
+                deviceType: "Mac",
                 pbkdfRequest: pbkdfRequest.base64EncodedString()
             )
         )
@@ -300,6 +344,99 @@ actor SonoraSyncClient {
         )
     }
 
+    func deviceAccess(
+        credential: HubDeviceCredential
+    ) async throws -> SonoraDeviceAccess {
+        try await getAuthenticated("v1/device", credential: credential)
+    }
+
+    func exportManifest(
+        credential: HubDeviceCredential? = nil
+    ) async throws -> SonoraExportManifest {
+        try await getAuthenticated(
+            "v1/library/export-manifest",
+            credential: credential
+        )
+    }
+
+    func sourceHealth(
+        credential: HubDeviceCredential? = nil
+    ) async throws -> [SourceHealthReport] {
+        try await getAuthenticated(
+            "v1/library/sources",
+            credential: credential
+        )
+    }
+
+    func downloadBlob(
+        hash: String,
+        from offset: UInt64,
+        credential: HubDeviceCredential? = nil
+    ) async throws -> Data {
+        var request = URLRequest(url: try url(for: "v1/blobs/\(hash)"))
+        request.httpMethod = "GET"
+        request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range")
+        authenticate(&request, credential: credential)
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        return data
+    }
+
+    func uploadBlob(
+        fileURL: URL,
+        expectedHash: String,
+        expectedSize: UInt64,
+        credential: HubDeviceCredential
+    ) async throws {
+        let status: SonoraBlobStatus = try await getAuthenticated(
+            "v1/blobs/\(expectedHash)/status",
+            credential: credential
+        )
+        if status.exists {
+            guard status.committedSize == expectedSize else {
+                throw SonoraSyncClientError.invalidResponse
+            }
+            return
+        }
+
+        let handle = try FileHandle(forReadingFrom: fileURL)
+        defer { try? handle.close() }
+        try handle.seek(toOffset: status.uploadedSize)
+        var offset = status.uploadedSize
+        while offset < expectedSize {
+            let remaining = min(UInt64(1_048_576), expectedSize - offset)
+            guard let chunk = try handle.read(upToCount: Int(remaining)),
+                  !chunk.isEmpty else {
+                throw SonoraSyncClientError.invalidResponse
+            }
+            var request = URLRequest(
+                url: try url(for: "v1/blobs/\(expectedHash)")
+            )
+            request.httpMethod = "PUT"
+            request.setValue(
+                "application/octet-stream",
+                forHTTPHeaderField: "Content-Type"
+            )
+            request.setValue("identity", forHTTPHeaderField: "Content-Encoding")
+            request.setValue(String(offset), forHTTPHeaderField: "X-Sonora-Offset")
+            authenticate(&request, credential: credential)
+            let (data, response) = try await session.upload(
+                for: request,
+                from: chunk
+            )
+            try validate(response, data: data)
+            offset += UInt64(chunk.count)
+        }
+        let _: SonoraBlobStatus = try await postAuthenticated(
+            "v1/blobs/commit",
+            body: SonoraBlobCommitRequest(
+                hash: expectedHash,
+                size: expectedSize
+            ),
+            credential: credential
+        )
+    }
+
     func previewJoin(
         _ request: JoinPreviewRequest,
         credential: HubDeviceCredential
@@ -367,6 +504,39 @@ actor SonoraSyncClient {
         return try decoder.decode(Response.self, from: data)
     }
 
+    private func getAuthenticated<Response: Decodable>(
+        _ path: String,
+        credential: HubDeviceCredential? = nil
+    ) async throws -> Response {
+        var request = URLRequest(url: try url(for: path))
+        request.httpMethod = "GET"
+        authenticate(&request, credential: credential)
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        return try decoder.decode(Response.self, from: data)
+    }
+
+    private func authenticate(
+        _ request: inout URLRequest,
+        credential: HubDeviceCredential?
+    ) {
+        if let credential {
+            request.setValue(
+                "Bearer \(credential.credential)",
+                forHTTPHeaderField: "Authorization"
+            )
+            request.setValue(
+                credential.deviceID.uuidString,
+                forHTTPHeaderField: "X-Sonora-Device"
+            )
+        } else if let adminToken {
+            request.setValue(
+                "Bearer \(adminToken)",
+                forHTTPHeaderField: "Authorization"
+            )
+        }
+    }
+
     private func validate(_ response: URLResponse, data: Data) throws {
         guard let http = response as? HTTPURLResponse else {
             throw SonoraSyncClientError.invalidResponse
@@ -396,6 +566,7 @@ actor SonoraSyncClient {
 private struct PairingRequest: Encodable {
     let deviceID: UUID
     let deviceName: String
+    let deviceType: String
     let pbkdfRequest: String
 }
 

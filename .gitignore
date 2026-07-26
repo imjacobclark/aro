@@ -4,3 +4,4 @@
 **/target/
 .DS_Store
 *.xcuserstate
+ssh-scan-*.log

@@ -219,6 +219,36 @@ struct SQLiteSchemaMigrator {
                 VALUES (4, unixepoch());
             """
         )
+
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS sync_status (
+                hub_id TEXT PRIMARY KEY,
+                last_attempt_at REAL,
+                last_success_at REAL,
+                last_error TEXT,
+                uploaded_operations INTEGER NOT NULL DEFAULT 0,
+                applied_operations INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS sync_activity (
+                id TEXT PRIMARY KEY,
+                hub_id TEXT,
+                kind TEXT NOT NULL,
+                message TEXT NOT NULL,
+                state TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS sync_activity_created
+                ON sync_activity(created_at DESC);
+            CREATE TABLE IF NOT EXISTS offline_album_pins (
+                hub_id TEXT NOT NULL,
+                album TEXT NOT NULL,
+                PRIMARY KEY(hub_id, album)
+            );
+            INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                VALUES (5, unixepoch());
+            """
+        )
     }
 
     private func execute(_ sql: String) throws {

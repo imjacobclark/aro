@@ -65,7 +65,7 @@ final class SonoraHubService {
         guard errorMessage == nil else { return }
         guard await waitForCompatibleHelper(client) else {
             errorMessage = "The Sonora Background Service is enabled but did not start "
-                + "listening. Use Restart Background Service in Sync settings."
+                + "listening. Use Restart Background Service in Advanced Devices settings."
             return
         }
         errorMessage = nil
@@ -179,10 +179,21 @@ final class SyncPreferences {
     var manualAddress: String {
         didSet { defaults.set(manualAddress, forKey: Key.manualAddress) }
     }
+    var localAdminToken: String? {
+        defaults.string(forKey: "sync.host.adminToken")
+    }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        dataLocation = defaults.string(forKey: Key.dataLocation) ?? ""
+        let storedDataLocation = defaults.string(forKey: Key.dataLocation) ?? ""
+        if ProcessInfo.processInfo.environment["SONORA_UI_TEST_ROOT"] == nil,
+           storedDataLocation.contains("sonora-redesign-ui-profile") {
+            let repairedDataLocation = Self.recommendedDataLocation
+            dataLocation = repairedDataLocation
+            defaults.set(repairedDataLocation, forKey: Key.dataLocation)
+        } else {
+            dataLocation = storedDataLocation
+        }
         importMode = defaults.string(forKey: Key.importMode)
             .flatMap(HubImportMode.init(rawValue:)) ?? .managed
         replicaMode = defaults.string(forKey: Key.replicaMode)

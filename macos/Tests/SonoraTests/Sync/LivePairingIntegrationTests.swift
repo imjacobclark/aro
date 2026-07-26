@@ -49,7 +49,7 @@ final class LivePairingIntegrationTests: XCTestCase {
         )
         let info = try await pinnedClient.hubInfo()
         XCTAssertEqual(info.protocolMin, 2)
-        XCTAssertEqual(info.protocolMax, 2)
+        XCTAssertEqual(info.protocolMax, 4)
     }
 }
 #endif

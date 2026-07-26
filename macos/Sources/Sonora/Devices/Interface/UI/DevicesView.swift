@@ -1,0 +1,910 @@
+import SonoraCommon
+import SwiftUI
+
+struct DevicesView: View {
+    @Bindable var library: LibraryStore
+    @Bindable var registry: LibraryProfileRegistry
+    @Bindable var service: SonoraHubService
+    @Bindable var preferences: SyncPreferences
+    @Bindable var mediaCache: MediaCacheController
+    let syncStore: SQLiteSyncOperationStore
+    let libraryFiles: any LibraryFileManaging
+    let activateProfile: (LibraryProfile) -> Void
+    let completeRemoteConnection: (
+        SonoraHubInfo,
+        URL,
+        String,
+        OfflineDownloadPolicy
+    ) -> Void
+
+    @State private var localServers = LocalSonoraServerMonitor()
+    @State private var pairedDevices: [ControlledHubDevice] = []
+    @State private var pairingSession: PairingSession?
+    @State private var addDeviceError: String?
+    @State private var showingConnect = false
+    @State private var showingOfflineSettings = false
+    @State private var deviceToRemove: ControlledHubDevice?
+    @State private var statusMessage: String?
+    @State private var recentActivity: [StoredSyncActivity] = []
+    @State private var isSyncing = false
+    @State private var exportSession: LibraryExportSession?
+    @State private var exportStartedService = false
+    @State private var sourceWarnings: [String] = []
+    @State private var showingLibrarySettings = false
+
+    var body: some View {
+        Group {
+            if !registry.isConfigured && !registry.setupDismissed {
+                LibrarySetupView(
+                    registry: registry,
+                    activateProfile: activateProfile,
+                    completeRemoteConnection: completeRemoteConnection
+                )
+            } else {
+                dashboard
+            }
+        }
+        .sheet(item: $pairingSession) { session in
+            AddDeviceSheet(
+                controlClient: session.client,
+                onDevicesChanged: { pairedDevices = $0 }
+            )
+        }
+        .sheet(isPresented: $showingConnect) {
+            ConnectLibrarySheet(
+                completeConnection: completeRemoteConnection,
+                willPauseSharing: registry.activeProfile?.kind == .local
+                    && sharingIsAvailable
+            )
+        }
+        .sheet(isPresented: $showingOfflineSettings) {
+            if let profile = registry.activeProfile {
+                OfflineMusicSettingsSheet(
+                    profile: profile,
+                    albums: Array(
+                        Set(library.allSongs.compactMap(\.album))
+                    ).sorted(),
+                    registry: registry,
+                    mediaCache: mediaCache
+                )
+            }
+        }
+        .sheet(item: $exportSession, onDismiss: finishExportSession) { session in
+            ExportLibrarySheet(session: session)
+        }
+        .sheet(isPresented: $showingLibrarySettings) {
+            SyncSettingsView(
+                service: service,
+                preferences: preferences,
+                mediaCache: mediaCache,
+                syncStore: syncStore,
+                libraryFiles: libraryFiles,
+                activeProfile: registry.activeProfile
+            )
+        }
+        .confirmationDialog(
+            "Remove \(deviceToRemove?.name ?? "this device")?",
+            isPresented: Binding(
+                get: { deviceToRemove != nil },
+                set: { if !$0 { deviceToRemove = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Remove Device", role: .destructive) {
+                if let deviceToRemove {
+                    revoke(deviceToRemove)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "It will lose access to this library. Downloaded music will be removed the next time Sonora opens on that device."
+            )
+        }
+        .alert(
+            "Unable to Add a Device",
+            isPresented: Binding(
+                get: { addDeviceError != nil },
+                set: { if !$0 { addDeviceError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+            SettingsLink {
+                Text("Open Advanced Settings")
+            }
+        } message: {
+            Text(
+                addDeviceError
+                    ?? "Sonora could not contact the library service."
+            )
+        }
+        .task {
+            await refresh()
+            if let profile = registry.activeProfile,
+               profile.kind == .remote {
+                await performSync(profile)
+            }
+        }
+        .task {
+            var retrySeconds = 30
+            while !Task.isCancelled {
+                localServers.refresh()
+                if registry.activeProfile?.kind == .local {
+                    await refreshDevices()
+                } else if let profile = registry.activeProfile {
+                    await performSync(profile)
+                    retrySeconds = statusMessage == nil
+                        ? 30
+                        : min(retrySeconds * 2, 300)
+                }
+                try? await Task.sleep(for: .seconds(retrySeconds))
+            }
+        }
+    }
+
+    private var dashboard: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                header
+                if let profile = registry.activeProfile {
+                    libraryCard(profile)
+                    if profile.kind == .local {
+                        connectedDevicesCard(profile)
+                    } else {
+                        remoteLibraryCard(profile)
+                    }
+                    offlineMusicCard(profile)
+                    activityCard(profile)
+                    advancedCard
+                } else {
+                    unconfiguredState
+                }
+            }
+            .padding(28)
+            .frame(maxWidth: 920, alignment: .leading)
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    private var header: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Devices")
+                    .font(.largeTitle.weight(.semibold))
+                Text("Your libraries, connected devices, and offline music")
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button {
+                showingConnect = true
+            } label: {
+                Label(
+                    registry.activeProfile?.kind == .remote
+                        ? "Connect to Different Library"
+                        : "Connect to Another Library",
+                    systemImage: "network"
+                )
+            }
+            if registry.profiles.count > 1 {
+                Menu {
+                    ForEach(registry.profiles) { profile in
+                        Button {
+                            activateProfile(profile)
+                        } label: {
+                            if profile.id == registry.activeProfileID {
+                                Label(profile.name, systemImage: "checkmark")
+                            } else {
+                                Text(profile.name)
+                            }
+                        }
+                    }
+                } label: {
+                    Label("Switch Library", systemImage: "arrow.left.arrow.right")
+                }
+            }
+        }
+    }
+
+    private func libraryCard(_ profile: LibraryProfile) -> some View {
+        DevicesCard {
+            HStack(alignment: .top, spacing: 16) {
+                Image(systemName: profile.kind == .local ? "desktopcomputer" : "music.note.house")
+                    .font(.system(size: 30))
+                    .foregroundStyle(.tint)
+                    .frame(width: 48, height: 48)
+                    .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack {
+                        Text(profile.name)
+                            .font(.title2.weight(.semibold))
+                        roleBadge(
+                            profile.kind == .local
+                                ? "Library stored here"
+                                : "Connected library"
+                        )
+                        if profile.kind == .local, sharingIsAvailable {
+                            roleBadge("Sharing enabled")
+                        }
+                    }
+                    Label(
+                        primaryStatus(profile),
+                        systemImage: primaryStatusIcon(profile)
+                    )
+                    .foregroundStyle(primaryStatusColor(profile))
+                    Text(
+                        "\(library.allSongs.count) tracks · Last updated just now"
+                    )
+                    .foregroundStyle(.secondary)
+                    Text(libraryDescription(profile))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 10) {
+                    Button("Export Entire Library") {
+                        beginExport(profile)
+                    }
+                    if profile.kind == .local {
+                        if sharingIsAvailable {
+                            Button("Add Device") {
+                                beginAddingDevice()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            Button("Stop Sharing", role: .destructive) {
+                                stopSharing(profile)
+                            }
+                        } else {
+                            Button("Enable Sharing") {
+                                enableSharing()
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                    } else {
+                        Button("Check for Updates") {
+                            Task { await performSync(profile) }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(isSyncing)
+                    }
+                    Button("Library Settings") {
+                        showingLibrarySettings = true
+                    }
+                }
+            }
+        }
+    }
+
+    private func connectedDevicesCard(_ profile: LibraryProfile) -> some View {
+        DevicesCard(title: "Connected Devices") {
+            if pairedDevices.isEmpty {
+                ContentUnavailableView {
+                    Label(
+                        "Use your library on another device",
+                        systemImage: "macbook.and.iphone"
+                    )
+                } description: {
+                    Text(
+                        "Add your phone or another computer to access this library and keep music available offline."
+                    )
+                } actions: {
+                    Button("Add a Device") {
+                        if sharingIsAvailable {
+                            beginAddingDevice()
+                        } else {
+                            enableSharing(openPairingAfterStart: true)
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .frame(maxWidth: .infinity)
+            } else {
+                ForEach(pairedDevices) { device in
+                    HStack(spacing: 14) {
+                        Image(systemName: "laptopcomputer")
+                            .font(.title2)
+                            .frame(width: 42, height: 42)
+                            .background(Color.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(device.name).font(.headline)
+                            Text(deviceDescription(device))
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Menu {
+                            Button(
+                                device.allowsContributions
+                                    ? "Stop Allowing Music Contributions"
+                                    : "Allow Music Contributions"
+                            ) {
+                                setContribution(
+                                    for: device,
+                                    allowed: !device.allowsContributions
+                                )
+                            }
+                            Button("Remove Device", role: .destructive) {
+                                deviceToRemove = device
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                        }
+                        .menuStyle(.borderlessButton)
+                    }
+                    if device.id != pairedDevices.last?.id {
+                        Divider()
+                    }
+                }
+            }
+        }
+    }
+
+    private func remoteLibraryCard(_ profile: LibraryProfile) -> some View {
+        DevicesCard(title: "Library Host") {
+            HStack(spacing: 14) {
+                Image(systemName: "desktopcomputer")
+                    .font(.title2)
+                    .frame(width: 42, height: 42)
+                    .background(Color.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(profile.name)
+                        .font(.headline)
+                    Text(statusMessage ?? "Connected · Library is up to date")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Connect to a Different Library") {
+                    showingConnect = true
+                }
+            }
+        }
+    }
+
+    private func offlineMusicCard(_ profile: LibraryProfile) -> some View {
+        DevicesCard(title: "Offline Music") {
+            if profile.kind == .local {
+                HStack(spacing: 14) {
+                    Image(systemName: "internaldrive")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                    Text(
+                        "This Mac stores the original library, so no additional offline copy is required."
+                    )
+                    .foregroundStyle(.secondary)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(policyTitle(profile.offlinePolicy))
+                                .font(.headline)
+                            Text(
+                                "\(formattedBytes(mediaCache.usedBytes)) used of \(formattedBytes(storageLimit(profile)))"
+                            )
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Manage Offline Music") {
+                            showingOfflineSettings = true
+                        }
+                        Button("Change Limit") {
+                            showingOfflineSettings = true
+                        }
+                    }
+                    ProgressView(
+                        value: min(
+                            Double(mediaCache.usedBytes),
+                            Double(storageLimit(profile))
+                        ),
+                        total: Double(max(1, storageLimit(profile)))
+                    )
+                    if let progress = mediaCache.downloadProgress {
+                        ProgressView(
+                            value: Double(progress.completed),
+                            total: Double(max(1, progress.total))
+                        ) {
+                            Text(
+                                "Downloading \(progress.completed) of \(progress.total) tracks"
+                            )
+                        }
+                    }
+                    Text(
+                        "\(mediaCache.downloadedFileCount) downloaded files. Protected music is never removed automatically."
+                    )
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func activityCard(_ profile: LibraryProfile) -> some View {
+        DevicesCard(title: "Activity") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 14) {
+                    Image(systemName: statusMessage == nil ? "checkmark.circle.fill" : "arrow.triangle.2.circlepath")
+                        .font(.title2)
+                        .foregroundStyle(
+                            statusMessage == nil
+                                ? Color.green
+                                : SonoraTheme.violet
+                        )
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(statusMessage ?? "Everything is up to date")
+                            .font(.headline)
+                        Text(
+                            profile.kind == .local
+                                ? (
+                                    sharingIsAvailable
+                                        ? "Your library is ready for approved devices."
+                                        : "Your music remains available on this Mac."
+                                )
+                                : "Sonora checks for changes automatically."
+                        )
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+                ForEach(recentActivity) { activity in
+                    Divider()
+                    HStack {
+                        Image(
+                            systemName: activity.state == "error"
+                                ? "exclamationmark.circle"
+                                : "checkmark.circle"
+                        )
+                        .foregroundStyle(
+                            activity.state == "error" ? .orange : .secondary
+                        )
+                        Text(activity.message)
+                        Spacer()
+                        Text(activity.createdAt, style: .relative)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                ForEach(sourceWarnings, id: \.self) { warning in
+                    Divider()
+                    Label(warning, systemImage: "externaldrive.badge.exclamationmark")
+                        .foregroundStyle(.orange)
+                }
+            }
+        }
+    }
+
+    private var advancedCard: some View {
+        DevicesCard(title: "Advanced") {
+            HStack {
+                Text(
+                    "Network access, manual connections, diagnostics, and storage maintenance."
+                )
+                .foregroundStyle(.secondary)
+                Spacer()
+                SettingsLink {
+                    Text("Show Advanced Settings")
+                }
+            }
+        }
+    }
+
+    private var unconfiguredState: some View {
+        DevicesCard {
+            ContentUnavailableView {
+                Label("Choose a music library", systemImage: "music.note.house")
+            } description: {
+                Text(
+                    "Keep music on this Mac or connect to a Sonora library elsewhere."
+                )
+            } actions: {
+                Button("Create a Library") {
+                    registry.setupDismissed = false
+                }
+                .buttonStyle(.borderedProminent)
+                Button("Connect to a Library") {
+                    showingConnect = true
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    private var sharingIsAvailable: Bool {
+        service.isEnabled
+            && localServers.servers.contains { $0.kind == .bundledHelper }
+    }
+
+    private var controlClient: HubControlClient? {
+        let dataLocation = Self.controlDataLocation(
+            preferred: preferences.dataLocation,
+            servers: localServers.servers
+        )
+        guard let dataLocation, !dataLocation.isEmpty else { return nil }
+        return HubControlClient(
+            socketURL: URL(fileURLWithPath: dataLocation)
+                .appendingPathComponent("control.sock")
+        )
+    }
+
+    static func controlDataLocation(
+        preferred: String,
+        servers: [LocalSonoraServer]
+    ) -> String? {
+        servers.first {
+            $0.kind == .bundledHelper && !($0.dataPath ?? "").isEmpty
+        }?.dataPath ?? (!preferred.isEmpty ? preferred : nil)
+    }
+
+    private func beginAddingDevice() {
+        localServers.refresh()
+        guard let controlClient else {
+            addDeviceError = "Sonora cannot find the connection for this library service. "
+                + "Restart sharing in Advanced Settings, then try again."
+            return
+        }
+        pairingSession = PairingSession(client: controlClient)
+    }
+
+    private func refresh() async {
+        localServers.refresh()
+        mediaCache.refreshSummary()
+        recentActivity = syncStore.recentActivity(
+            hubID: registry.activeProfile?.hubID
+        )
+        if let hubID = registry.activeProfile?.hubID,
+           let syncStatus = syncStore.syncStatus(hubID: hubID) {
+            statusMessage = syncStatus.lastError
+        }
+        if let profile = registry.activeProfile, profile.kind == .local {
+            let mode = profile.managedMusicPath == nil
+                ? "linked"
+                : "stored"
+            sourceWarnings = syncStore.sourceHealthReports(mode: mode)
+                .compactMap(\.warning)
+        }
+        await refreshDevices()
+    }
+
+    private func refreshDevices() async {
+        guard let controlClient, sharingIsAvailable else {
+            pairedDevices = []
+            return
+        }
+        do {
+            pairedDevices = try await controlClient.devices()
+        } catch {
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    private func enableSharing(openPairingAfterStart: Bool = false) {
+        if var profile = registry.activeProfile, profile.kind == .local {
+            profile.sharingEnabled = true
+            registry.update(profile)
+        }
+        if preferences.dataLocation.isEmpty {
+            preferences.dataLocation = SyncPreferences.recommendedDataLocation
+        }
+        service.setEnabled(true)
+        statusMessage = "Preparing your library for sharing…"
+        Task {
+            await service.ensureCompatibleHelper(
+                dataLocation: preferences.dataLocation
+            )
+            let profile = registry.activeProfile
+            let mode: HubImportMode = profile?.managedMusicPath == nil
+                ? .referenced
+                : .managed
+            for path in syncStore.activeWatchedFolderPaths {
+                _ = try? await controlClient?.importFolder(
+                    path: path,
+                    mode: mode
+                )
+            }
+            localServers.refresh()
+            statusMessage = service.errorMessage
+            if openPairingAfterStart, service.errorMessage == nil {
+                beginAddingDevice()
+            }
+        }
+    }
+
+    private func stopSharing(_ profile: LibraryProfile) {
+        guard profile.kind == .local else { return }
+        var updated = profile
+        updated.sharingEnabled = false
+        registry.update(updated)
+        service.setEnabled(false)
+        statusMessage = service.errorMessage ?? "Sharing is off"
+        Task {
+            for _ in 0 ..< 10 {
+                localServers.refresh()
+                if !sharingIsAvailable {
+                    statusMessage = nil
+                    pairedDevices = []
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+        }
+    }
+
+    private func performSync(_ profile: LibraryProfile) async {
+        guard !isSyncing else { return }
+        guard let hubID = profile.hubID,
+              let baseURL = profile.baseURL,
+              let membership = syncStore.membership(baseURL: baseURL) else {
+            statusMessage = "This library connection needs to be repaired."
+            return
+        }
+        isSyncing = true
+        defer { isSyncing = false }
+        statusMessage = "Checking for updates…"
+        syncStore.recordSyncStarted(hubID: hubID)
+        do {
+            guard let credential = try KeychainHubCredentialStore().load(
+                hubID: hubID,
+                deviceID: libraryDeviceID
+            ) else {
+                throw DevicesError.missingCredential
+            }
+            let client = SonoraSyncClient(
+                baseURL: baseURL,
+                pinnedTLSFingerprint: membership.tlsFingerprint
+            )
+            let result = try await HubSyncCoordinator(
+                hubID: hubID,
+                client: client,
+                credential: credential,
+                operations: syncStore,
+                offlineTrackCount: UInt64(
+                    mediaCache.downloadedFileCount
+                )
+            ).synchronize()
+            sourceWarnings = try await client.sourceHealth(
+                credential: credential
+            ).compactMap(\.warning)
+            syncStore.recordSyncSucceeded(hubID: hubID, result: result)
+            library.reloadStoredLibrary()
+            await mediaCache.apply(profile.offlinePolicy)
+            statusMessage = nil
+            recentActivity = syncStore.recentActivity(hubID: hubID)
+        } catch {
+            statusMessage = error.localizedDescription
+            syncStore.recordSyncFailed(
+                hubID: hubID,
+                message: error.localizedDescription
+            )
+            recentActivity = syncStore.recentActivity(hubID: hubID)
+        }
+    }
+
+    private func beginExport(_ profile: LibraryProfile) {
+        Task {
+            do {
+                let exporter: SonoraLibraryExporter
+                if profile.kind == .local {
+                    guard let adminToken = preferences.localAdminToken else {
+                        throw DevicesError.missingCredential
+                    }
+                    if !sharingIsAvailable {
+                        exportStartedService = true
+                        service.setEnabled(true)
+                        for _ in 0 ..< 30 {
+                            localServers.refresh()
+                            if sharingIsAvailable { break }
+                            try await Task.sleep(for: .milliseconds(200))
+                        }
+                    }
+                    exporter = SonoraLibraryExporter(
+                        client: SonoraSyncClient(
+                            localAdminBaseURL: URL(
+                                string: "https://127.0.0.1:4848"
+                            )!,
+                            adminToken: adminToken
+                        ),
+                        credential: nil
+                    )
+                } else {
+                    guard let hubID = profile.hubID,
+                          let baseURL = profile.baseURL,
+                          let membership = syncStore.membership(
+                            baseURL: baseURL
+                          ),
+                          let credential = try KeychainHubCredentialStore()
+                            .load(
+                                hubID: hubID,
+                                deviceID: libraryDeviceID
+                            ) else {
+                        throw DevicesError.missingCredential
+                    }
+                    exporter = SonoraLibraryExporter(
+                        client: SonoraSyncClient(
+                            baseURL: baseURL,
+                            pinnedTLSFingerprint:
+                                membership.tlsFingerprint
+                        ),
+                        credential: credential
+                    )
+                }
+                exportSession = LibraryExportSession(exporter: exporter)
+            } catch {
+                statusMessage = error.localizedDescription
+                if exportStartedService {
+                    service.setEnabled(false)
+                    exportStartedService = false
+                }
+            }
+        }
+    }
+
+    private func finishExportSession() {
+        if exportStartedService {
+            service.setEnabled(false)
+            exportStartedService = false
+        }
+    }
+
+    private func revoke(_ device: ControlledHubDevice) {
+        guard let controlClient else { return }
+        Task {
+            do {
+                try await controlClient.revoke(deviceID: device.deviceID)
+                pairedDevices = try await controlClient.devices()
+            } catch {
+                statusMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func primaryStatus(_ profile: LibraryProfile) -> String {
+        if profile.kind == .local {
+            return sharingIsAvailable ? "Library available" : "Stored on this Mac"
+        }
+        return statusMessage == nil ? "Up to date" : statusMessage!
+    }
+
+    private func primaryStatusIcon(_ profile: LibraryProfile) -> String {
+        if statusMessage != nil { return "exclamationmark.circle" }
+        return profile.kind == .local && !sharingIsAvailable
+            ? "internaldrive"
+            : "checkmark.circle.fill"
+    }
+
+    private func primaryStatusColor(_ profile: LibraryProfile) -> Color {
+        statusMessage == nil ? .green : .orange
+    }
+
+    private func libraryDescription(_ profile: LibraryProfile) -> String {
+        if profile.kind == .remote {
+            return "This Mac uses the library stored on \(profile.name)."
+        }
+        return sharingIsAvailable
+            ? "Approved devices can use this library while this Sonora library is online."
+            : "Turn on sharing when you want to use this library on another device."
+    }
+
+    private func roleBadge(_ title: String) -> some View {
+        Text(title)
+            .font(.caption)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Color.accentColor.opacity(0.13), in: Capsule())
+    }
+
+    private func policyTitle(_ policy: OfflineDownloadPolicy) -> String {
+        switch policy {
+        case .stream: "Stream music as needed"
+        case .favourites: "Favourites stay offline"
+        case .selectedAlbums: "Selected albums stay offline"
+        case .fullLibrary: "Full library stays offline"
+        }
+    }
+
+    private func deviceDescription(
+        _ device: ControlledHubDevice
+    ) -> String {
+        guard device.revokedAt == nil else { return "Access removed" }
+        var parts = [device.deviceType ?? "Device"]
+        if let lastSeen = device.lastSeenAt {
+            parts.append(
+                Date.now.timeIntervalSince(lastSeen) < 90
+                    ? "Online"
+                    : "Last seen \(lastSeen.formatted(.relative(presentation: .named)))"
+            )
+        } else {
+            parts.append("Approved")
+        }
+        if let offline = device.offlineTrackCount {
+            parts.append("\(offline) tracks offline")
+        }
+        if device.allowsContributions {
+            parts.append("Can add music")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func setContribution(
+        for device: ControlledHubDevice,
+        allowed: Bool
+    ) {
+        guard let controlClient else { return }
+        Task {
+            do {
+                try await controlClient.setContribution(
+                    deviceID: device.deviceID,
+                    allowed: allowed
+                )
+                pairedDevices = try await controlClient.devices()
+            } catch {
+                statusMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func storageLimit(_ profile: LibraryProfile) -> Int64 {
+        if let explicit = profile.storageLimitBytes {
+            return explicit
+        }
+        let available = (try? URL(fileURLWithPath: profile.mediaPath)
+            .resourceValues(
+                forKeys: [.volumeAvailableCapacityForImportantUsageKey]
+            ).volumeAvailableCapacityForImportantUsage).flatMap(Int64.init)
+            ?? CacheEvictionPolicy.defaultLimitBytes * 10
+        return CacheEvictionPolicy.automaticLimitBytes(
+            availableCapacity: available
+        )
+    }
+
+    private func formattedBytes(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    private var libraryDeviceID: UUID {
+        UserDefaults.standard.string(forKey: "library.deviceID")
+            .flatMap(UUID.init(uuidString:)) ?? UUID()
+    }
+}
+
+private struct DevicesCard<Content: View>: View {
+    var title: String?
+    @ViewBuilder let content: Content
+
+    init(
+        title: String? = nil,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if let title {
+                Text(title)
+                    .font(.title3.weight(.semibold))
+            }
+            content
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 16))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(Color.secondary.opacity(0.12))
+        }
+    }
+}
+
+private struct PairingSession: Identifiable {
+    let id = UUID()
+    let client: HubControlClient
+}
+
+private enum DevicesError: LocalizedError {
+    case missingCredential
+
+    var errorDescription: String? {
+        "This Mac no longer has the credential for that library. Connect again."
+    }
+}

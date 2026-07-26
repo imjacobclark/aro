@@ -38,6 +38,7 @@ pub enum PairingError {
 struct Pending {
     device_id: Uuid,
     device_name: String,
+    device_type: String,
     expires_at: DateTime<Utc>,
     state: PairingState,
     authenticated: bool,
@@ -140,6 +141,7 @@ impl PairingManager {
             Pending {
                 device_id: request.device_id,
                 device_name: request.device_name,
+                device_type: request.device_type.unwrap_or_else(|| "Mac".into()),
                 expires_at,
                 state: PairingState::Pending,
                 authenticated: false,
@@ -226,6 +228,7 @@ impl PairingManager {
         &self,
         request_id: Uuid,
         approve: bool,
+        can_contribute: bool,
     ) -> Result<Option<DeviceCredential>, PairingError> {
         let mut state = self.state.write();
         let pending = state
@@ -251,6 +254,7 @@ impl PairingManager {
         let credential_hash: [u8; 32] = Sha256::digest(credential.as_bytes()).into();
         let device_id = pending.device_id;
         let device_name = pending.device_name.clone();
+        let device_type = pending.device_type.clone();
         let issued = DeviceCredential {
             device_id,
             credential,
@@ -263,8 +267,13 @@ impl PairingManager {
                 summary: DeviceSummary {
                     device_id,
                     name: device_name,
+                    device_type,
                     paired_at: Utc::now(),
                     revoked_at: None,
+                    last_seen_at: None,
+                    last_synced_at: None,
+                    offline_track_count: None,
+                    can_contribute,
                 },
                 credential_hash,
             },
@@ -359,6 +368,7 @@ impl PairingManager {
                 request_id: *request_id,
                 device_id: pending.device_id,
                 device_name: pending.device_name.clone(),
+                device_type: pending.device_type.clone(),
                 expires_at: pending.expires_at,
             })
             .collect();
@@ -398,6 +408,7 @@ mod tests {
             .start(PairingStartRequest {
                 device_id,
                 device_name: device_name.into(),
+                device_type: Some("Mac".into()),
                 pbkdf_request: BASE64.encode(pbkdf_request),
             })
             .unwrap();
@@ -426,7 +437,7 @@ mod tests {
         let device_id = Uuid::new_v4();
         let (request_id, result_key) = complete_handshake(&manager, &code, device_id, "Mac");
         assert!(!manager.authorize(device_id, "guess"));
-        let issued = manager.approve(request_id, true).unwrap().unwrap();
+        let issued = manager.approve(request_id, true, false).unwrap().unwrap();
         assert!(manager.authorize(device_id, &issued.credential));
 
         let status = manager.status(request_id, device_id).unwrap();
@@ -464,7 +475,7 @@ mod tests {
         assert_eq!(requests[0].device_id, device_id);
         assert_eq!(requests[0].device_name, "Living Room Mac");
 
-        manager.approve(request_id, true).unwrap();
+        manager.approve(request_id, true, false).unwrap();
         assert!(manager.pending_requests().is_empty());
     }
 
@@ -478,6 +489,7 @@ mod tests {
             .start(PairingStartRequest {
                 device_id,
                 device_name: "Attacker".into(),
+                device_type: Some("Mac".into()),
                 pbkdf_request: BASE64.encode(prover.start().unwrap()),
             })
             .unwrap();

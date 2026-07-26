@@ -46,7 +46,7 @@ final class LibraryStore {
         switch selection {
         case .folder(let id):
             return songsByFolder[id] ?? []
-        case .songs, .artists, .albums, .stats, .libraryHealth, .none:
+        case .songs, .artists, .albums, .stats, .libraryHealth, .devices, .none:
             return SongLibrary.aggregate(songsByFolder)
         }
     }
@@ -73,6 +73,8 @@ final class LibraryStore {
             return "Albums"
         case .libraryHealth:
             return "Library Health"
+        case .devices:
+            return "Devices"
         case .songs, .none:
             return "Songs"
         }
@@ -82,7 +84,7 @@ final class LibraryStore {
         switch selection {
         case .folder(let id):
             return scanStates[id] ?? .idle
-        case .songs, .artists, .albums, .stats, .libraryHealth, .none:
+        case .songs, .artists, .albums, .stats, .libraryHealth, .devices, .none:
             if scanStates.values.contains(.scanning) {
                 return .scanning
             }
@@ -107,8 +109,18 @@ final class LibraryStore {
 
         hasStarted = true
         for folder in folders {
-            startMonitoring(folder)
-            scan(folderID: folder.id)
+            if folder.url.isFileURL {
+                startMonitoring(folder)
+                scan(folderID: folder.id)
+            }
+        }
+    }
+
+    func reloadStoredLibrary() {
+        for folder in folders {
+            songsByFolder[folder.id] = manageFolders.storedSongs(
+                folderID: folder.id
+            )
         }
     }
 
@@ -184,7 +196,6 @@ final class LibraryStore {
         guard folderAccess.isAccessibleDirectory(folder.url) else {
             updateAccessibility(for: folderID, isAccessible: false)
             manageFolders.markUnavailable(folderID: folderID)
-            songsByFolder[folderID] = []
             scanStates[folderID] = .warning("This folder is unavailable.")
             return
         }
@@ -217,6 +228,45 @@ final class LibraryStore {
                 folderID: folderID
             )
         }
+    }
+
+    func relocateFolder(id: UUID, to selectedURL: URL) {
+        guard let index = folders.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+
+        let oldFolder = folders[index]
+        let url = folderAccess.normalizedURL(selectedURL)
+        guard folderAccess.isAccessibleDirectory(url) else {
+            scanStates[id] = .warning("The selected folder is unavailable.")
+            return
+        }
+
+        scanTasks[id]?.cancel()
+        analysisTasks[id]?.cancel()
+        rescanTasks[id]?.cancel()
+        monitors[id]?.stop()
+        if oldFolder.didStartSecurityScope {
+            folderAccess.endAccessing(oldFolder.url)
+        }
+
+        let relocated = WatchedFolder(
+            id: id,
+            url: url,
+            displayName: url.lastPathComponent,
+            bookmarkData: folderAccess.bookmarkData(for: url),
+            isAccessible: true,
+            didStartSecurityScope: folderAccess.beginAccessing(url)
+        )
+        folders[index] = relocated
+        folders.sort {
+            $0.displayName.localizedStandardCompare($1.displayName)
+                == .orderedAscending
+        }
+        scanStates[id] = .scanning
+        persistFolders()
+        startMonitoring(relocated)
+        scan(folderID: id)
     }
 
     private func scheduleLoudnessAnalysis(
@@ -281,6 +331,19 @@ final class LibraryStore {
         }
 
         folders = records.map { record in
+            if let remoteURL = URL(string: record.path),
+               ["http", "https"].contains(
+                remoteURL.scheme?.lowercased() ?? ""
+               ) {
+                return WatchedFolder(
+                    id: record.id,
+                    url: remoteURL,
+                    displayName: record.displayName,
+                    bookmarkData: nil,
+                    isAccessible: true,
+                    didStartSecurityScope: false
+                )
+            }
             let access = folderAccess.resolve(
                 path: record.path,
                 bookmarkData: record.bookmarkData
