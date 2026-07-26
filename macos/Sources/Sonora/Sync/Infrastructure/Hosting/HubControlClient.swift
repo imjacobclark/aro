@@ -23,7 +23,6 @@ enum HubControlError: LocalizedError {
 
 struct HubPairingWindow: Sendable {
     let code: String
-    let fingerprint: String
 }
 
 struct ControlledHubDevice: Identifiable, Codable, Sendable {
@@ -44,7 +43,7 @@ struct ControlledPairingRequest: Identifiable, Codable, Sendable {
 }
 
 struct HubControlClient: Sendable {
-    static let controlProtocolVersion = 1
+    static let controlProtocolVersion = 2
 
     let socketURL: URL
 
@@ -58,11 +57,10 @@ struct HubControlClient: Sendable {
 
     func openPairing() async throws -> HubPairingWindow {
         let result = try await send(["command": "open_pairing"])
-        guard let code = result["code"] as? String,
-              let fingerprint = result["tls_fingerprint"] as? String else {
+        guard let code = result["code"] as? String else {
             throw HubControlError.invalidResponse
         }
-        return HubPairingWindow(code: code, fingerprint: fingerprint)
+        return HubPairingWindow(code: code)
     }
 
     func devices() async throws -> [ControlledHubDevice] {

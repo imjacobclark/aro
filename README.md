@@ -2,8 +2,9 @@
 
 Sonora is a native macOS music library and high-resolution audio player with
 an optional authoritative LAN library hub. The macOS app discovers Sonora hubs
-with Bonjour, pairs using a pinned TLS fingerprint, and synchronizes logical
-library records and verified media without sharing live SQLite files.
+with Bonjour, pairs using a six-digit authenticated code, automatically pins
+TLS, and synchronizes logical library records and verified media without
+sharing live SQLite files.
 
 ## Download a development build
 
@@ -59,9 +60,10 @@ Server data is the hub’s private database/cache location; watched music source
 remain separate.
 
 To pair another Mac, click **Open Pairing Window** on the host. On the other
-Mac, choose the discovered hub, enter the displayed code and TLS fingerprint,
-then click **Pair…**. The request appears on the host; click **Approve** there
-to issue that Mac its revocable credential.
+Mac, choose the discovered hub, enter the displayed six-digit code, then click
+**Pair…**. The request appears on the host; click **Approve** there to issue
+that Mac its revocable credential. The code authenticates the hub with
+SPAKE2+, and Sonora saves the TLS certificate pin automatically.
 
 ## Build and launch from source
 

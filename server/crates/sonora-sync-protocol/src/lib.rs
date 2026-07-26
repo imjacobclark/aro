@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const SERVICE_TYPE: &str = "_sonora-sync._tcp.local.";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -16,7 +16,6 @@ pub struct HubInfo {
     pub protocol_min: u16,
     pub protocol_max: u16,
     pub pairing_available: bool,
-    pub tls_fingerprint: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -34,13 +33,37 @@ pub struct NegotiateResponse {
 pub struct PairingStartRequest {
     pub device_id: Uuid,
     pub device_name: String,
-    pub code: String,
-    pub pinned_tls_fingerprint: String,
+    /// Base64-encoded Matter PASE PBKDFParamRequest.
+    pub pbkdf_request: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PairingStartResponse {
     pub request_id: Uuid,
+    /// Base64-encoded Matter PASE PBKDFParamResponse.
+    pub pbkdf_response: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PairingPake1Request {
+    /// Base64-encoded Matter PASE Pake1.
+    pub pake1: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PairingPake1Response {
+    /// Base64-encoded Matter PASE Pake2.
+    pub pake2: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PairingConfirmRequest {
+    /// Base64-encoded Matter PASE Pake3.
+    pub pake3: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PairingConfirmResponse {
     pub state: PairingState,
 }
 
@@ -55,7 +78,21 @@ pub struct PendingPairingRequest {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PairingStatusResponse {
     pub state: PairingState,
-    pub credential: Option<DeviceCredential>,
+    pub encrypted_result: Option<EncryptedPairingResult>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EncryptedPairingResult {
+    /// Base64-encoded 96-bit AES-GCM nonce.
+    pub nonce: String,
+    /// Base64-encoded ciphertext and authentication tag.
+    pub ciphertext: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PairingResult {
+    pub credential: DeviceCredential,
+    pub tls_fingerprint: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

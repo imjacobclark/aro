@@ -117,7 +117,6 @@ async fn serve(config: Config) -> Result<()> {
     let state = AppState {
         hub_id: config.hub_id,
         display_name: config.display_name.clone(),
-        fingerprint: fingerprint.clone(),
         admin_token: config.admin_token.clone(),
         pairing,
         jobs: JobRegistry::default(),
@@ -414,8 +413,8 @@ async fn revoke_device(path: &Path, device_id: uuid::Uuid) -> Result<()> {
 
 fn admin_client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
-        // The admin CLI connects only over loopback and separately reports the
-        // certificate fingerprint used by pairing clients.
+        // The admin CLI connects only over loopback with the admin token.
+        // Pairing clients authenticate the hub through SPAKE2+.
         .danger_accept_invalid_certs(true)
         .build()?)
 }

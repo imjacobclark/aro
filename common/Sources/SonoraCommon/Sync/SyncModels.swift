@@ -41,22 +41,19 @@ public struct SonoraHubInfo: Hashable, Codable, Sendable {
     public let protocolMin: UInt16
     public let protocolMax: UInt16
     public let pairingAvailable: Bool
-    public let tlsFingerprint: String
 
     public init(
         hubID: UUID,
         displayName: String,
         protocolMin: UInt16,
         protocolMax: UInt16,
-        pairingAvailable: Bool,
-        tlsFingerprint: String
+        pairingAvailable: Bool
     ) {
         self.hubID = hubID
         self.displayName = displayName
         self.protocolMin = protocolMin
         self.protocolMax = protocolMax
         self.pairingAvailable = pairingAvailable
-        self.tlsFingerprint = tlsFingerprint
     }
 }
 

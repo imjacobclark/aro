@@ -23,11 +23,12 @@ publishes only after SHA-256 verification. `--mode referenced` records verified
 canonical source paths and serves them in place; changed or missing files are
 marked unavailable rather than silently serving different bytes.
 
-Pairing uses a five-minute code and the TLS SHA-256 fingerprint returned by the
-admin-only pairing endpoint. Device credentials are bearer secrets and should
-be stored in the platform credential vault. Run `sonora-server pair`, submit
-the displayed code and fingerprint on the client, then run
-`sonora-server approve <request-id>` on the hub.
+Pairing uses a five-minute, single-use six-digit code with a SPAKE2+
+password-authenticated exchange. The TLS certificate pin and device credential
+are encrypted under the negotiated key, so clients do not enter or compare a
+fingerprint. Device credentials are bearer secrets and should be stored in the
+platform credential vault. Run `sonora-server pair`, submit the displayed code
+on the client, then run `sonora-server approve <request-id>` on the hub.
 
 `Dockerfile` is architecture-independent and can be built for `linux/amd64` and
 `linux/arm64`. Packaging includes launchd and systemd definitions. Windows

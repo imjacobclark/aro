@@ -1,10 +1,13 @@
 import CryptoKit
 import Foundation
+import MatterController
 import Security
 import SonoraCommon
 
 enum SonoraSyncClientError: LocalizedError {
     case invalidResponse
+    case invalidPairingCode
+    case pairingAuthenticationFailed
     case tlsFingerprintMismatch
     case httpError(status: Int, message: String)
 
@@ -12,8 +15,12 @@ enum SonoraSyncClientError: LocalizedError {
         switch self {
         case .invalidResponse:
             "The Sonora hub returned an invalid response."
+        case .invalidPairingCode:
+            "Enter the six-digit pairing code shown by the hub."
+        case .pairingAuthenticationFailed:
+            "The pairing code could not authenticate this hub."
         case .tlsFingerprintMismatch:
-            "The hub certificate does not match the pairing fingerprint."
+            "The hub certificate does not match the identity saved during pairing."
         case .httpError(let status, let message):
             "The Sonora hub returned HTTP \(status): \(message)"
         }
@@ -22,9 +29,41 @@ enum SonoraSyncClientError: LocalizedError {
 
 enum HubPairingPollResult: Sendable {
     case pending
-    case approved(HubDeviceCredential)
+    case approved(CompletedHubPairing)
     case rejected
     case expired
+}
+
+struct HubPairingSession: Sendable {
+    let requestID: UUID
+    let deviceID: UUID
+    let resultKey: Data
+}
+
+struct CompletedHubPairing: Sendable {
+    let credential: HubDeviceCredential
+    let tlsFingerprint: String
+}
+
+final class PairingTLSDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping @Sendable (
+            URLSession.AuthChallengeDisposition,
+            URLCredential?
+        ) -> Void
+    ) {
+        guard challenge.protectionSpace.authenticationMethod
+                == NSURLAuthenticationMethodServerTrust,
+              let trust = challenge.protectionSpace.serverTrust else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        // Pairing payloads are authenticated by SPAKE2+. The certificate pin
+        // is delivered inside that encrypted exchange and used thereafter.
+        completionHandler(.useCredential, URLCredential(trust: trust))
+    }
 }
 
 final class PinnedTLSDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
@@ -87,6 +126,23 @@ actor SonoraSyncClient {
         decoder.keyDecodingStrategy = .convertFromSnakeCase
     }
 
+    init(pairingBaseURL baseURL: URL) {
+        self.baseURL = baseURL
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.waitsForConnectivity = false
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 30
+        session = URLSession(
+            configuration: configuration,
+            delegate: PairingTLSDelegate(),
+            delegateQueue: nil
+        )
+        encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+    }
+
     func hubInfo() async throws -> SonoraHubInfo {
         try await get("v1/hub")
     }
@@ -94,36 +150,124 @@ actor SonoraSyncClient {
     func startPairing(
         deviceID: UUID,
         deviceName: String,
-        code: String,
-        fingerprint: String
-    ) async throws -> UUID {
+        code: String
+    ) async throws -> HubPairingSession {
+        guard code.count == 6,
+              code.allSatisfy(\.isNumber),
+              let passcode = UInt32(code) else {
+            throw SonoraSyncClientError.invalidPairingCode
+        }
+        let pase = PASESession(passcode: passcode)
+        let (pbkdfRequest, pbkdfContext) = pase.createPBKDFParamRequest(
+            initiatorSessionID: 1
+        )
         let response: PairingStart = try await post(
             "v1/pairing/start",
             body: PairingRequest(
                 deviceID: deviceID,
                 deviceName: deviceName,
-                code: code,
-                pinnedTLSFingerprint: fingerprint
+                pbkdfRequest: pbkdfRequest.base64EncodedString()
             )
         )
-        return response.requestID
+        guard let pbkdfResponse = Data(
+            base64Encoded: response.pbkdfResponse
+        ) else {
+            throw SonoraSyncClientError.invalidResponse
+        }
+        let (pake1, pakeContext) = try pase.handlePBKDFParamResponse(
+            pbkdfParamResponse: pbkdfResponse,
+            context: pbkdfContext
+        )
+        let pake2Response: PairingPake1 = try await post(
+            "v1/pairing/\(response.requestID.uuidString)/pake1",
+            body: PairingPake1Request(
+                pake1: pake1.base64EncodedString()
+            )
+        )
+        guard let pake2 = Data(base64Encoded: pake2Response.pake2) else {
+            throw SonoraSyncClientError.invalidResponse
+        }
+        var pake3 = Data()
+        var resultKey = Data()
+        do {
+            let completion = try pase.handlePake2(
+                pake2Data: pake2,
+                context: pakeContext
+            )
+            pake3 = completion.pake3
+            guard let decryptionKey = completion.session.decryptKey else {
+                throw SonoraSyncClientError.pairingAuthenticationFailed
+            }
+            resultKey = decryptionKey.withUnsafeBytes { Data($0) }
+        } catch {
+            throw SonoraSyncClientError.pairingAuthenticationFailed
+        }
+        let _: PairingConfirm = try await post(
+            "v1/pairing/\(response.requestID.uuidString)/confirm",
+            body: PairingConfirmRequest(
+                pake3: pake3.base64EncodedString()
+            )
+        )
+        return HubPairingSession(
+            requestID: response.requestID,
+            deviceID: deviceID,
+            resultKey: resultKey
+        )
     }
 
     func pollPairing(
-        requestID: UUID,
-        deviceID: UUID
+        pairing: HubPairingSession
     ) async throws -> HubPairingPollResult {
         let response: PairingStatus = try await get(
-            "v1/pairing/\(requestID.uuidString)?device_id=\(deviceID.uuidString)"
+            "v1/pairing/\(pairing.requestID.uuidString)"
+                + "?device_id=\(pairing.deviceID.uuidString)"
         )
         switch response.state {
         case .pending:
             return .pending
         case .approved:
-            guard let credential = response.credential else {
+            guard let encrypted = response.encryptedResult,
+                  let nonceData = Data(base64Encoded: encrypted.nonce),
+                  let combined = Data(base64Encoded: encrypted.ciphertext),
+                  nonceData.count == 12,
+                  combined.count >= 16 else {
                 throw SonoraSyncClientError.invalidResponse
             }
-            return .approved(credential)
+            let ciphertext = combined.dropLast(16)
+            let tag = combined.suffix(16)
+            let sealedBox = try AES.GCM.SealedBox(
+                nonce: AES.GCM.Nonce(data: nonceData),
+                ciphertext: ciphertext,
+                tag: tag
+            )
+            let aad = Data(
+                (
+                    "sonora-pairing-v2:"
+                        + pairing.requestID.uuidString.lowercased()
+                        + ":"
+                        + pairing.deviceID.uuidString.lowercased()
+                ).utf8
+            )
+            let plaintext: Data
+            do {
+                plaintext = try AES.GCM.open(
+                    sealedBox,
+                    using: SymmetricKey(data: pairing.resultKey),
+                    authenticating: aad
+                )
+            } catch {
+                throw SonoraSyncClientError.pairingAuthenticationFailed
+            }
+            let result = try decoder.decode(PairingResult.self, from: plaintext)
+            guard result.tlsFingerprint.count == 64 else {
+                throw SonoraSyncClientError.invalidResponse
+            }
+            return .approved(
+                CompletedHubPairing(
+                    credential: result.credential,
+                    tlsFingerprint: result.tlsFingerprint
+                )
+            )
         case .rejected:
             return .rejected
         case .expired:
@@ -238,17 +382,43 @@ actor SonoraSyncClient {
 private struct PairingRequest: Encodable {
     let deviceID: UUID
     let deviceName: String
-    let code: String
-    let pinnedTLSFingerprint: String
+    let pbkdfRequest: String
 }
 
 private struct PairingStart: Decodable {
     let requestID: UUID
+    let pbkdfResponse: String
+}
+
+private struct PairingPake1Request: Encodable {
+    let pake1: String
+}
+
+private struct PairingPake1: Decodable {
+    let pake2: String
+}
+
+private struct PairingConfirmRequest: Encodable {
+    let pake3: String
+}
+
+private struct PairingConfirm: Decodable {
+    let state: HubPairingState
 }
 
 private struct PairingStatus: Decodable {
     let state: HubPairingState
-    let credential: HubDeviceCredential?
+    let encryptedResult: EncryptedPairingResult?
+}
+
+private struct EncryptedPairingResult: Decodable {
+    let nonce: String
+    let ciphertext: String
+}
+
+private struct PairingResult: Decodable {
+    let credential: HubDeviceCredential
+    let tlsFingerprint: String
 }
 
 private enum HubPairingState: String, Decodable {

@@ -27,7 +27,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: swift test --package-path common
-      - run: swift test --package-path macos
+      - name: Test Swift and Rust pairing interoperability
+        run: |
+          cargo build --manifest-path server/Cargo.toml -p sonora-server
+          pairing_root="${RUNNER_TEMP}/pairing-hub"
+          mkdir -p "${pairing_root}"
+          server/target/debug/sonora-server \
+            --config "${pairing_root}/config.toml" \
+            init \
+            --data-dir "${pairing_root}/data" \
+            --display-name "CI Pairing Hub"
+          SONORA_BIND=127.0.0.1:49488 \
+            server/target/debug/sonora-server \
+            --config "${pairing_root}/config.toml" \
+            serve >"${pairing_root}/server.log" 2>&1 &
+          server_pid=$!
+          cleanup() {
+            kill "${server_pid}" 2>/dev/null || true
+            wait "${server_pid}" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for _ in {1..30}; do
+            test -S "${pairing_root}/data/control.sock" && break
+            sleep 1
+          done
+          test -S "${pairing_root}/data/control.sock" || {
+            cat "${pairing_root}/server.log"
+            exit 1
+          }
+          SONORA_LIVE_PAIRING_URL=https://127.0.0.1:49488 \
+            SONORA_LIVE_PAIRING_DATA_DIR="${pairing_root}/data" \
+            swift test --package-path macos
       - run: make macos app
       - run: test -x macos/dist/Sonora.app/Contents/MacOS/sonora-server
       - run: test -f macos/dist/Sonora.app/Contents/Resources/Montserrat-Variable.ttf

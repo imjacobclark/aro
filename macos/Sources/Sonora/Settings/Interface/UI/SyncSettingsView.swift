@@ -11,7 +11,6 @@ struct SyncSettingsView: View {
     @State private var requestedHosting = false
     @State private var browser = SonoraHubBrowser()
     @State private var pairingCode = ""
-    @State private var pairingFingerprint = ""
     @State private var pairingStatus: String?
     @State private var hostingPairingWindow: HubPairingWindow?
     @State private var pendingPairingRequests: [ControlledPairingRequest] = []
@@ -87,10 +86,6 @@ struct SyncSettingsView: View {
                             .font(.system(.title3, design: .monospaced))
                             .textSelection(.enabled)
                     }
-                    Text("TLS fingerprint: \(hostingPairingWindow.fingerprint)")
-                        .font(SonoraFont.footnote)
-                        .textSelection(.enabled)
-
                     if pendingPairingRequests.isEmpty {
                         Text("Waiting for a device to submit this code…")
                             .font(SonoraFont.footnote)
@@ -151,27 +146,18 @@ struct SyncSettingsView: View {
                     prompt: Text("https://sonora.local:4848")
                 )
                 TextField("Six-digit pairing code", text: $pairingCode)
-                SecureField(
-                    "Hub TLS fingerprint from QR or hub",
-                    text: $pairingFingerprint
-                )
                 HStack {
                     Button("Pair…", action: pair)
                         .disabled(
                             preferences.manualAddress.isEmpty
-                                || pairingCode.isEmpty
-                                || pairingFingerprint.count != 64
+                                || pairingCode.count != 6
                         )
                     Button("Review First Join…", action: reviewFirstJoin)
-                        .disabled(
-                            preferences.manualAddress.isEmpty
-                                || pairingFingerprint.count != 64
-                        )
+                        .disabled(preferences.manualAddress.isEmpty)
                     Button("Sync Now", action: synchronizeNow)
                         .disabled(
                             isSyncing
                                 || preferences.manualAddress.isEmpty
-                                || pairingFingerprint.count != 64
                         )
                 }
                 if let pairingStatus {
@@ -351,36 +337,35 @@ struct SyncSettingsView: View {
                         forKey: "library.deviceID"
                     )
                 }
-                let client = SonoraSyncClient(
-                    baseURL: url,
-                    pinnedTLSFingerprint: pairingFingerprint
-                )
-                let requestID = try await client.startPairing(
+                let pairingClient = SonoraSyncClient(pairingBaseURL: url)
+                let pairing = try await pairingClient.startPairing(
                     deviceID: deviceID,
                     deviceName: Host.current().localizedName ?? "Mac",
-                    code: pairingCode,
-                    fingerprint: pairingFingerprint
+                    code: pairingCode
                 )
-                pairingStatus = "Request \(requestID) is waiting for approval on the hub."
+                pairingStatus = "Request \(pairing.requestID) is waiting for approval on the hub."
                 for _ in 0 ..< 150 {
                     try await Task.sleep(for: .seconds(2))
-                    let result = try await client.pollPairing(
-                        requestID: requestID,
-                        deviceID: deviceID
+                    let result = try await pairingClient.pollPairing(
+                        pairing: pairing
                     )
                     switch result {
                     case .pending:
                         continue
-                    case .approved(let credential):
+                    case .approved(let completed):
+                        let client = SonoraSyncClient(
+                            baseURL: url,
+                            pinnedTLSFingerprint: completed.tlsFingerprint
+                        )
                         let info = try await client.hubInfo()
                         try KeychainHubCredentialStore().save(
-                            credential,
+                            completed.credential,
                             hubID: info.hubID
                         )
                         syncStore.upsertMembership(
                             hub: info,
                             baseURL: url,
-                            tlsFingerprint: pairingFingerprint,
+                            tlsFingerprint: completed.tlsFingerprint,
                             replicaMode: preferences.replicaMode
                         )
                         pairingStatus = "Paired with \(info.displayName)."
@@ -484,14 +469,20 @@ struct SyncSettingsView: View {
         showingFirstJoin = true
         Task {
             do {
+                guard let membership = syncStore.membership(baseURL: url) else {
+                    throw FirstJoinUIError.notPaired
+                }
                 let client = SonoraSyncClient(
                     baseURL: url,
-                    pinnedTLSFingerprint: pairingFingerprint
+                    pinnedTLSFingerprint: membership.tlsFingerprint
                 )
                 let info = try await client.hubInfo()
+                guard info.hubID == membership.hubID else {
+                    throw FirstJoinUIError.hubIdentityChanged
+                }
                 let deviceID = libraryDeviceID
                 guard let credential = try KeychainHubCredentialStore().load(
-                    hubID: info.hubID,
+                    hubID: membership.hubID,
                     deviceID: deviceID
                 ) else {
                     throw FirstJoinUIError.notPaired
@@ -499,7 +490,7 @@ struct SyncSettingsView: View {
                 syncStore.upsertMembership(
                     hub: info,
                     baseURL: url,
-                    tlsFingerprint: pairingFingerprint,
+                    tlsFingerprint: membership.tlsFingerprint,
                     replicaMode: preferences.replicaMode
                 )
                 let coordinator = FirstJoinCoordinator(
@@ -602,13 +593,19 @@ struct SyncSettingsView: View {
         Task {
             defer { isCommittingJoin = false }
             do {
+                guard let membership = syncStore.membership(baseURL: url) else {
+                    throw FirstJoinUIError.notPaired
+                }
                 let client = SonoraSyncClient(
                     baseURL: url,
-                    pinnedTLSFingerprint: pairingFingerprint
+                    pinnedTLSFingerprint: membership.tlsFingerprint
                 )
                 let info = try await client.hubInfo()
+                guard info.hubID == membership.hubID else {
+                    throw FirstJoinUIError.hubIdentityChanged
+                }
                 guard let credential = try KeychainHubCredentialStore().load(
-                    hubID: info.hubID,
+                    hubID: membership.hubID,
                     deviceID: libraryDeviceID
                 ) else {
                     throw FirstJoinUIError.notPaired
@@ -640,13 +637,19 @@ struct SyncSettingsView: View {
         Task {
             defer { isSyncing = false }
             do {
+                guard let membership = syncStore.membership(baseURL: url) else {
+                    throw FirstJoinUIError.notPaired
+                }
                 let client = SonoraSyncClient(
                     baseURL: url,
-                    pinnedTLSFingerprint: pairingFingerprint
+                    pinnedTLSFingerprint: membership.tlsFingerprint
                 )
                 let info = try await client.hubInfo()
+                guard info.hubID == membership.hubID else {
+                    throw FirstJoinUIError.hubIdentityChanged
+                }
                 guard let credential = try KeychainHubCredentialStore().load(
-                    hubID: info.hubID,
+                    hubID: membership.hubID,
                     deviceID: libraryDeviceID
                 ) else {
                     throw FirstJoinUIError.notPaired
@@ -696,8 +699,14 @@ struct SyncSettingsView: View {
 
 private enum FirstJoinUIError: LocalizedError {
     case notPaired
+    case hubIdentityChanged
 
     var errorDescription: String? {
-        "Pair with this hub before reviewing the first join."
+        switch self {
+        case .notPaired:
+            "Pair with this hub before reviewing the first join."
+        case .hubIdentityChanged:
+            "The hub identity at this address has changed. Pair again before continuing."
+        }
     }
 }

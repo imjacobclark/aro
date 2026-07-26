@@ -2,15 +2,17 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Sonora Sync Protocol",
-    "version": "1.0.0"
+    "version": "2.0.0"
   },
   "servers": [{"url": "https://{hub}:4848", "variables": {"hub": {"default": "sonora.local"}}}],
   "paths": {
     "/v1/hub": {"get": {"summary": "Hub information and protocol range", "responses": {"200": {"description": "Hub information"}}}},
     "/v1/negotiate": {"post": {"summary": "Negotiate a protocol version", "responses": {"200": {"description": "Selected version"}, "426": {"description": "Incompatible"}}}},
     "/v1/pairing/open": {"post": {"summary": "Open an admin-authorized pairing window", "responses": {"200": {"description": "Short-lived code"}}}},
-    "/v1/pairing/start": {"post": {"summary": "Submit a pinned pairing request", "responses": {"200": {"description": "Pending approval"}}}},
-    "/v1/pairing/{id}": {"get": {"summary": "Poll a pairing request and receive its per-device credential", "responses": {"200": {"description": "Pairing state"}}}},
+    "/v1/pairing/start": {"post": {"summary": "Start a SPAKE2+ pairing exchange", "responses": {"200": {"description": "PBKDF parameters"}}}},
+    "/v1/pairing/{id}/pake1": {"post": {"summary": "Exchange SPAKE2+ public values and verify the hub", "responses": {"200": {"description": "Hub public value and confirmation"}}}},
+    "/v1/pairing/{id}/confirm": {"post": {"summary": "Confirm code possession and submit for hub approval", "responses": {"200": {"description": "Pending approval"}}}},
+    "/v1/pairing/{id}": {"get": {"summary": "Poll pairing state and receive the encrypted credential and TLS pin", "responses": {"200": {"description": "Pairing state"}}}},
     "/v1/pairing/approve": {"post": {"summary": "Approve or reject pairing", "responses": {"200": {"description": "Per-device credential"}}}},
     "/v1/devices": {"get": {"summary": "List paired devices", "responses": {"200": {"description": "Devices"}}}},
     "/v1/devices/revoke": {"post": {"summary": "Revoke a device immediately", "responses": {"204": {"description": "Revoked"}}}},

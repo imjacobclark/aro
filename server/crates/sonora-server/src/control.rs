@@ -31,7 +31,7 @@ struct ControlResponse {
     error: Option<String>,
 }
 
-const CONTROL_PROTOCOL_VERSION: u16 = 1;
+const CONTROL_PROTOCOL_VERSION: u16 = 2;
 
 pub async fn start(path: &Path, state: Arc<AppState>) -> Result<JoinHandle<()>> {
     if let Some(parent) = path.parent() {
@@ -97,8 +97,7 @@ async fn handle(stream: &mut UnixStream, state: Arc<AppState>) -> Result<Value> 
             let code = state.pairing.open(Duration::minutes(5));
             json!({
                 "code": code,
-                "expires_in_seconds": 300,
-                "tls_fingerprint": state.fingerprint
+                "expires_in_seconds": 300
             })
         }
         ControlCommand::PendingPairingRequests => {

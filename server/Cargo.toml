@@ -16,6 +16,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 anyhow = "1.0"
+aes-gcm = "0.10"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["http2", "json", "macros"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
@@ -27,6 +28,7 @@ hex = "0.4"
 fs2 = "0.4"
 http = "1.3"
 mdns-sd = "0.15"
+matter-crypto = "0.2"
 parking_lot = "0.12"
 rand = "0.9"
 rcgen = "0.14"

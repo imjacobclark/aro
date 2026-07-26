@@ -248,18 +248,24 @@ final class SyncPersistenceTests: XCTestCase {
         let hubID = UUID()
         let hubTrackID = UUID()
         let store = SQLiteSyncOperationStore(database: database)
+        let hubURL = URL(string: "https://hub.local:4848")!
         store.upsertMembership(
             hub: SonoraHubInfo(
                 hubID: hubID,
                 displayName: "Living Room",
-                protocolMin: 1,
-                protocolMax: 1,
-                pairingAvailable: false,
-                tlsFingerprint: String(repeating: "a", count: 64)
+                protocolMin: 2,
+                protocolMax: 2,
+                pairingAvailable: false
             ),
-            baseURL: URL(string: "https://hub.local:4848")!,
+            baseURL: hubURL,
             tlsFingerprint: String(repeating: "a", count: 64),
             replicaMode: .onDemand
+        )
+        let membership = try XCTUnwrap(store.membership(baseURL: hubURL))
+        XCTAssertEqual(membership.hubID, hubID)
+        XCTAssertEqual(
+            membership.tlsFingerprint,
+            String(repeating: "a", count: 64)
         )
         database.withConnection { connection in
             sqlite3_exec(
@@ -303,10 +309,9 @@ final class SyncPersistenceTests: XCTestCase {
             hub: SonoraHubInfo(
                 hubID: hubID,
                 displayName: "Hub",
-                protocolMin: 1,
-                protocolMax: 1,
-                pairingAvailable: false,
-                tlsFingerprint: String(repeating: "b", count: 64)
+                protocolMin: 2,
+                protocolMax: 2,
+                pairingAvailable: false
             ),
             baseURL: URL(string: "https://hub.local:4848")!,
             tlsFingerprint: String(repeating: "b", count: 64),

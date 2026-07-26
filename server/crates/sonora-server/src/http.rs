@@ -20,7 +20,6 @@ use uuid::Uuid;
 pub struct AppState {
     pub hub_id: Uuid,
     pub display_name: String,
-    pub fingerprint: String,
     pub admin_token: String,
     pub pairing: PairingManager,
     pub jobs: JobRegistry,
@@ -33,6 +32,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/negotiate", post(negotiate))
         .route("/v1/pairing/open", post(open_pairing))
         .route("/v1/pairing/start", post(start_pairing))
+        .route("/v1/pairing/{id}/pake1", post(pairing_pake1))
+        .route("/v1/pairing/{id}/confirm", post(confirm_pairing))
         .route("/v1/pairing/{id}", get(pairing_status))
         .route("/v1/pairing/approve", post(approve_pairing))
         .route("/v1/devices", get(devices))
@@ -55,7 +56,6 @@ async fn hub_info(State(state): State<Arc<AppState>>) -> Json<HubInfo> {
         protocol_min: PROTOCOL_VERSION,
         protocol_max: PROTOCOL_VERSION,
         pairing_available: state.pairing.is_open(),
-        tls_fingerprint: state.fingerprint.clone(),
     })
 }
 
@@ -82,8 +82,7 @@ async fn open_pairing(
     let code = state.pairing.open(Duration::minutes(5));
     Ok(Json(json!({
         "code": code,
-        "expires_in_seconds": 300,
-        "tls_fingerprint": state.fingerprint
+        "expires_in_seconds": 300
     })))
 }
 
@@ -94,6 +93,30 @@ async fn start_pairing(
     state
         .pairing
         .start(request)
+        .map(Json)
+        .map_err(pairing_error)
+}
+
+async fn pairing_pake1(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<PairingPake1Request>,
+) -> Result<Json<PairingPake1Response>, ApiError> {
+    state
+        .pairing
+        .pake1(id, &request.pake1)
+        .map(Json)
+        .map_err(pairing_error)
+}
+
+async fn confirm_pairing(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<PairingConfirmRequest>,
+) -> Result<Json<PairingConfirmResponse>, ApiError> {
+    state
+        .pairing
+        .confirm(id, &request.pake3)
         .map(Json)
         .map_err(pairing_error)
 }
@@ -416,6 +439,11 @@ fn pairing_error(error: PairingError) -> ApiError {
             ApiError::new(StatusCode::FORBIDDEN, "pairing_closed", &error.to_string())
         }
         PairingError::RequestNotFound => ApiError::not_found("pairing_request_not_found"),
+        PairingError::TooManyAttempts => ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_pairing_attempts",
+            &error.to_string(),
+        ),
         _ => ApiError::bad_request(&error.to_string()),
     }
 }

@@ -18,6 +18,10 @@ let package = Package(
         .package(
             url: "https://github.com/sbooth/SFBAudioEngine.git",
             exact: "0.13.0"
+        ),
+        .package(
+            url: "https://github.com/acumen-dev/matter-swift.git",
+            exact: "1.0.0-beta.3"
         )
     ],
     targets: [
@@ -31,6 +35,10 @@ let package = Package(
                 .product(
                     name: "SFBAudioEngine",
                     package: "SFBAudioEngine"
+                ),
+                .product(
+                    name: "MatterController",
+                    package: "matter-swift"
                 )
             ],
             resources: [

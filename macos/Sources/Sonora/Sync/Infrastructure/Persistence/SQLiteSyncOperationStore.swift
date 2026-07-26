@@ -2,6 +2,11 @@ import Foundation
 import SQLite3
 import SonoraCommon
 
+struct StoredHubMembership: Sendable {
+    let hubID: UUID
+    let tlsFingerprint: String
+}
+
 struct PendingSyncOperation: Equatable, Sendable {
     let id: UUID
     let deviceID: UUID
@@ -201,6 +206,42 @@ struct SQLiteSyncOperationStore {
             )
             _ = sqlite3_step(statement)
         }
+    }
+
+    func membership(baseURL: URL) -> StoredHubMembership? {
+        database.withReadConnection { connection in
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                connection,
+                """
+                SELECT hub_id, tls_fingerprint
+                FROM hub_memberships
+                WHERE base_url = ?
+                ORDER BY joined_at DESC
+                LIMIT 1
+                """,
+                -1,
+                &statement,
+                nil
+            ) == SQLITE_OK,
+                  let statement else {
+                return nil
+            }
+            defer { sqlite3_finalize(statement) }
+            bind(baseURL.absoluteString, statement, 1)
+            guard sqlite3_step(statement) == SQLITE_ROW,
+                  let hubIDText = sqlite3_column_text(statement, 0),
+                  let fingerprintText = sqlite3_column_text(statement, 1),
+                  let hubID = UUID(
+                      uuidString: String(cString: hubIDText)
+                  ) else {
+                return nil
+            }
+            return StoredHubMembership(
+                hubID: hubID,
+                tlsFingerprint: String(cString: fingerprintText)
+            )
+        } ?? nil
     }
 
     func manifest(hubID: UUID) -> [SyncManifestEntry] {
