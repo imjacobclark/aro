@@ -139,6 +139,11 @@ struct SonoraApp: App {
             .frame(minWidth: 860, minHeight: 480)
             .font(SonoraFont.body)
             .tint(SonoraTheme.violet)
+            .task {
+                await hubService.ensureCompatibleHelper(
+                    dataLocation: syncPreferences.dataLocation
+                )
+            }
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)

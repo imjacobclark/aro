@@ -72,6 +72,8 @@ jobs:
 
       - name: Build and ad-hoc sign development app
         env:
+          APP_VERSION: ${{ needs.version.outputs.version }}
+          BUILD_NUMBER: ${{ github.run_number }}
           CONFIGURATION: debug
         run: make macos app
 
@@ -81,8 +83,21 @@ jobs:
           test -x macos/dist/Sonora.app/Contents/MacOS/sonora-server
           test -f macos/dist/Sonora.app/Contents/Resources/Montserrat-Variable.ttf
           plutil -lint macos/dist/Sonora.app/Contents/Info.plist
+          test "$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :CFBundleShortVersionString' \
+              macos/dist/Sonora.app/Contents/Info.plist
+          )" = "${APP_VERSION}"
+          test "$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :CFBundleVersion' \
+              macos/dist/Sonora.app/Contents/Info.plist
+          )" = "${BUILD_NUMBER}"
           plutil -lint macos/dist/Sonora.app/Contents/Library/LaunchAgents/com.sonora.server.plist
           codesign --verify --deep --strict --verbose=2 macos/dist/Sonora.app
+        env:
+          APP_VERSION: ${{ needs.version.outputs.version }}
+          BUILD_NUMBER: ${{ github.run_number }}
 
       - name: Smoke-test packaged app launch
         run: |

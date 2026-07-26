@@ -44,6 +44,20 @@ struct SyncSettingsView: View {
                     )
                     .font(SonoraFont.footnote)
                     .foregroundStyle(.secondary)
+                    Button(
+                        "Use Recommended Location",
+                        action: useRecommendedDataLocation
+                    )
+                } else if !SyncPreferences.isSupportedHelperLocation(
+                    preferences.dataLocation
+                ) {
+                    Text(SyncPreferences.protectedLocationMessage)
+                        .font(SonoraFont.footnote)
+                        .foregroundStyle(.orange)
+                    Button(
+                        "Use Recommended Location",
+                        action: useRecommendedDataLocation
+                    )
                 }
 
                 Toggle("Enable Sonora Hub", isOn: Binding(
@@ -54,7 +68,14 @@ struct SyncSettingsView: View {
                         requestedHosting = service.isEnabled
                     }
                 ))
-                .disabled(preferences.dataLocation.isEmpty)
+                .disabled(
+                    (
+                        preferences.dataLocation.isEmpty
+                            || !SyncPreferences.isSupportedHelperLocation(
+                                preferences.dataLocation
+                            )
+                    ) && !service.isEnabled
+                )
                 LabeledContent("Helper Status", value: service.statusLabel)
                 Button("Open Pairing Window") {
                     openHostingPairing()
@@ -288,7 +309,25 @@ struct SyncSettingsView: View {
         panel.canChooseDirectories = true
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard SyncPreferences.isSupportedHelperLocation(url.path) else {
+            service.errorMessage = SyncPreferences.protectedLocationMessage
+            return
+        }
         preferences.dataLocation = url.path
+        if service.isEnabled {
+            Task {
+                await service.restartForUpgrade()
+            }
+        }
+    }
+
+    private func useRecommendedDataLocation() {
+        preferences.dataLocation = SyncPreferences.recommendedDataLocation
+        if service.isEnabled {
+            Task {
+                await service.restartForUpgrade()
+            }
+        }
     }
 
     private func pair() {

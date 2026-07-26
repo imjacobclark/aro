@@ -25,8 +25,13 @@ enum ControlCommand {
 #[derive(Serialize)]
 struct ControlResponse {
     ok: bool,
-    result: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
+
+const CONTROL_PROTOCOL_VERSION: u16 = 1;
 
 pub async fn start(path: &Path, state: Arc<AppState>) -> Result<JoinHandle<()>> {
     if let Some(parent) = path.parent() {
@@ -48,7 +53,7 @@ pub async fn start(path: &Path, state: Arc<AppState>) -> Result<JoinHandle<()>> 
             };
             let state = state.clone();
             tokio::spawn(async move {
-                if let Err(error) = handle(stream, state).await {
+                if let Err(error) = respond(stream, state).await {
                     tracing::warn!(%error, "control socket request failed");
                 }
             });
@@ -56,10 +61,31 @@ pub async fn start(path: &Path, state: Arc<AppState>) -> Result<JoinHandle<()>> 
     }))
 }
 
-async fn handle(mut stream: UnixStream, state: Arc<AppState>) -> Result<()> {
+async fn respond(mut stream: UnixStream, state: Arc<AppState>) -> Result<()> {
+    let response = match handle(&mut stream, state).await {
+        Ok(result) => ControlResponse {
+            ok: true,
+            result: Some(result),
+            error: None,
+        },
+        Err(error) => {
+            tracing::warn!(%error, "control socket request rejected");
+            ControlResponse {
+                ok: false,
+                result: None,
+                error: Some(error.to_string()),
+            }
+        }
+    };
+    stream.write_all(&serde_json::to_vec(&response)?).await?;
+    stream.shutdown().await?;
+    Ok(())
+}
+
+async fn handle(stream: &mut UnixStream, state: Arc<AppState>) -> Result<Value> {
     let mut request = Vec::new();
     {
-        let mut reader = BufReader::new(&mut stream);
+        let mut reader = BufReader::new(stream);
         reader.read_until(b'\n', &mut request).await?;
     }
     if request.len() > 64 * 1_024 {
@@ -101,14 +127,12 @@ async fn handle(mut stream: UnixStream, state: Arc<AppState>) -> Result<()> {
             json!({"revoked": revoked})
         }
         ControlCommand::Status => json!({
+            "control_protocol_version": CONTROL_PROTOCOL_VERSION,
             "hub_id": state.hub_id,
             "display_name": state.display_name,
             "sequence": state.store.latest_sequence()?,
             "pairing_available": state.pairing.is_open()
         }),
     };
-    let response = serde_json::to_vec(&ControlResponse { ok: true, result })?;
-    stream.write_all(&response).await?;
-    stream.shutdown().await?;
-    Ok(())
+    Ok(result)
 }

@@ -1,6 +1,26 @@
 import Darwin
 import Foundation
 
+enum HubControlError: LocalizedError {
+    case emptyResponse
+    case invalidResponse
+    case rejected(String)
+    case incompatibleHelper
+
+    var errorDescription: String? {
+        switch self {
+        case .emptyResponse:
+            "The Sonora helper closed its control connection without responding."
+        case .invalidResponse:
+            "The Sonora helper returned an invalid control response."
+        case .rejected(let message):
+            "The Sonora helper rejected the request: \(message)"
+        case .incompatibleHelper:
+            "The running Sonora helper is from an older app build."
+        }
+    }
+}
+
 struct HubPairingWindow: Sendable {
     let code: String
     let fingerprint: String
@@ -24,13 +44,23 @@ struct ControlledPairingRequest: Identifiable, Codable, Sendable {
 }
 
 struct HubControlClient: Sendable {
+    static let controlProtocolVersion = 1
+
     let socketURL: URL
+
+    func verifyCompatibility() async throws {
+        let result = try await send(["command": "status"])
+        guard let version = result["control_protocol_version"] as? Int,
+              version == Self.controlProtocolVersion else {
+            throw HubControlError.incompatibleHelper
+        }
+    }
 
     func openPairing() async throws -> HubPairingWindow {
         let result = try await send(["command": "open_pairing"])
         guard let code = result["code"] as? String,
               let fingerprint = result["tls_fingerprint"] as? String else {
-            throw CocoaError(.coderInvalidValue)
+            throw HubControlError.invalidResponse
         }
         return HubPairingWindow(code: code, fingerprint: fingerprint)
     }
@@ -74,7 +104,7 @@ struct HubControlClient: Sendable {
     ) async throws -> [String: Any] {
         let result = try await sendValue(command)
         guard let object = result as? [String: Any] else {
-            throw CocoaError(.coderInvalidValue)
+            throw HubControlError.invalidResponse
         }
         return object
     }
@@ -148,14 +178,23 @@ struct HubControlClient: Sendable {
             }
             return response
         }.value
+        guard !response.isEmpty else {
+            throw HubControlError.emptyResponse
+        }
         let envelope = try JSONSerialization.jsonObject(
             with: response
         ) as? [String: Any]
         guard let envelope,
-              let isOK = envelope["ok"] as? Bool,
-              isOK,
-              let result = envelope["result"] else {
-            throw CocoaError(.coderInvalidValue)
+              let isOK = envelope["ok"] as? Bool else {
+            throw HubControlError.invalidResponse
+        }
+        guard isOK else {
+            throw HubControlError.rejected(
+                envelope["error"] as? String ?? "unknown error"
+            )
+        }
+        guard let result = envelope["result"] else {
+            throw HubControlError.invalidResponse
         }
         return result
     }

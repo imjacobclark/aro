@@ -34,6 +34,45 @@ final class SonoraHubService {
         }
     }
 
+    func restartForUpgrade() async {
+        do {
+            try await service.unregister()
+            for _ in 0 ..< 20 where service.status != .notRegistered {
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            try service.register()
+            errorMessage = nil
+        } catch {
+            errorMessage = "The bundled helper was updated but could not be "
+                + "restarted: \(error.localizedDescription)"
+        }
+    }
+
+    func ensureCompatibleHelper(dataLocation: String) async {
+        guard isEnabled, !dataLocation.isEmpty else { return }
+        guard SyncPreferences.isSupportedHelperLocation(dataLocation) else {
+            errorMessage = SyncPreferences.protectedLocationMessage
+            return
+        }
+        let client = HubControlClient(
+            socketURL: URL(fileURLWithPath: dataLocation)
+                .appendingPathComponent("control.sock")
+        )
+        for attempt in 0 ..< 25 {
+            do {
+                try await client.verifyCompatibility()
+                return
+            } catch HubControlError.incompatibleHelper {
+                break
+            } catch {
+                if attempt < 24 {
+                    try? await Task.sleep(for: .milliseconds(200))
+                }
+            }
+        }
+        await restartForUpgrade()
+    }
+
     var statusLabel: String {
         switch status {
         case .notRegistered:
@@ -77,6 +116,33 @@ final class SyncPreferences {
 
     private let defaults: UserDefaults
 
+    static var recommendedDataLocation: String {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(
+                "Library/Application Support/Sonora/Hub Data",
+                isDirectory: true
+            )
+            .path
+    }
+
+    static let protectedLocationMessage =
+        "The background helper cannot use a server-data folder inside "
+        + "Desktop, Documents, or Downloads. Choose the recommended Sonora "
+        + "Hub Data location instead. Your music files can remain where they are."
+
+    static func isSupportedHelperLocation(_ path: String) -> Bool {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let protectedDirectories = ["Desktop", "Documents", "Downloads"].map {
+            home.appendingPathComponent($0, isDirectory: true)
+                .standardizedFileURL.path
+        }
+        let candidate = URL(fileURLWithPath: path)
+            .standardizedFileURL.path
+        return !protectedDirectories.contains {
+            candidate == $0 || candidate.hasPrefix($0 + "/")
+        }
+    }
+
     var dataLocation: String {
         didSet {
             defaults.set(dataLocation, forKey: Key.dataLocation)
@@ -110,6 +176,9 @@ final class SyncPreferences {
             : defaults.object(forKey: Key.cacheLimit) as? Int64
                 ?? CacheEvictionPolicy.defaultLimitBytes
         manualAddress = defaults.string(forKey: Key.manualAddress) ?? ""
+        try? MacHubConfigurationWriter(defaults: defaults).write(
+            dataLocation: dataLocation
+        )
     }
 }
 

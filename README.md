@@ -41,8 +41,9 @@ The hub helper is managed by macOS and needs a persistent server-data
 directory before it can start:
 
 1. Open **Sonora → Settings → Sync**.
-2. Under **Host This Library**, click **Choose…** beside **Server Data** and
-   select or create a directory with enough free space.
+2. Under **Host This Library**, click **Use Recommended Location**. This stores
+   the hub database and cache in
+   `~/Library/Application Support/Sonora/Hub Data`.
 3. Turn on **Enable Sonora Hub**.
 4. If Sonora reports **Approval required in Login Items**, open **System
    Settings → General → Login Items & Extensions** and allow Sonora.
@@ -50,6 +51,12 @@ directory before it can start:
 The helper is embedded in `Sonora.app`; don’t move or delete the app after
 enabling hosting. Installing it in `~/Applications` with the commands above
 gives the helper a stable path across logins.
+
+The server-data location cannot be inside `~/Desktop`, `~/Documents`, or
+`~/Downloads`: macOS blocks background LaunchAgents from opening those
+privacy-protected folders. This does not require moving your music library.
+Server data is the hub’s private database/cache location; watched music sources
+remain separate.
 
 To pair another Mac, click **Open Pairing Window** on the host. On the other
 Mac, choose the discovered hub, enter the displayed code and TLS fingerprint,

@@ -8,6 +8,8 @@ app_name=Sonora
 app_dir="$project_dir/dist/$app_name.app"
 icon_source="$project_dir/Assets/app-icon.png"
 info_plist="$project_dir/Packaging/Info.plist"
+app_version=${APP_VERSION:-0.0.0}
+build_number=${BUILD_NUMBER:-$(date -u +%Y%m%d%H%M%S)}
 
 if [[ ! -f "$icon_source" ]]; then
     print -u2 "Missing app icon: $icon_source"
@@ -50,6 +52,10 @@ mkdir -p "$staged_macos" "$staged_resources" "$staged_frameworks" \
     "$staged_launch_agents" "$iconset"
 ditto "$executable" "$staged_macos/$app_name"
 ditto "$info_plist" "$staged_contents/Info.plist"
+/usr/libexec/PlistBuddy \
+    -c "Set :CFBundleShortVersionString $app_version" \
+    -c "Set :CFBundleVersion $build_number" \
+    "$staged_contents/Info.plist"
 
 print "Building Sonora sync helper…"
 cargo build --manifest-path "$project_dir/../server/Cargo.toml" \
