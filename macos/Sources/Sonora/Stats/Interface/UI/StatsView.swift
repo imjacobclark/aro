@@ -89,11 +89,11 @@ struct StatsView: View {
                     detail: "\(listening.currentStreak)-day streak"
                 )
                 StatCard(
-                    label: "Tracks played",
+                    label: "Songs played",
                     value: "\(listening.uniqueTracksPlayed)",
                     detail: library.trackCount > 0
                         ? "\(Int(Double(listening.uniqueTracksPlayed) / Double(library.trackCount) * 100))% of library"
-                        : "No library tracks"
+                        : "No library songs"
                 )
             }
 
@@ -207,7 +207,7 @@ struct StatsView: View {
                 ],
                 spacing: 12
             ) {
-                StatCard(label: "Tracks", value: "\(library.trackCount)")
+                StatCard(label: "Songs", value: "\(library.trackCount)")
                 StatCard(label: "Albums", value: "\(library.albumCount)")
                 StatCard(label: "Artists", value: "\(library.artistCount)")
                 StatCard(
@@ -238,7 +238,7 @@ struct StatsView: View {
 
     private var mostPlayedTracks: some View {
         RankedStatsList(
-            title: "Most Played Tracks",
+            title: "Most Played Songs",
             values: listening.topTracks
         )
     }

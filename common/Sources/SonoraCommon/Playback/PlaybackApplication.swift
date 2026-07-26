@@ -32,9 +32,9 @@ public enum PlaybackEngineError: LocalizedError, Sendable {
         case .invalidAudioFile:
             return "The audio file is empty or has an unsupported format."
         case .missingAudioProperties:
-            return "The track’s sample rate could not be determined."
+            return "The song’s sample rate could not be determined."
         case .missingLoudnessAnalysis:
-            return "The track must be analyzed before normalized playback can begin."
+            return "The song must be analyzed before normalized playback can begin."
         case .outputDeviceMismatch(let requested, let actual):
             return "The selected output could not route playback to \(requested). The active output is \(actual)."
         case .engineFailedToStart(let message):

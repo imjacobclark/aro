@@ -45,7 +45,7 @@ struct SQLiteStatsQuery: StatsQuerying {
             )
             result.topTracks = rankedListeningStats(
                 groupExpression: "ls.track_id",
-                titleExpression: "COALESCE(sm.title, 'Unknown Track')",
+                titleExpression: "COALESCE(sm.title, 'Unknown Song')",
                 subtitleExpression:
                     "COALESCE(sm.artist, 'Unknown Artist') || ' — ' || COALESCE(sm.album, 'Unknown Album')",
                 limit: 5,
@@ -55,7 +55,7 @@ struct SQLiteStatsQuery: StatsQuerying {
                 groupExpression: "COALESCE(sm.artist, 'Unknown Artist')",
                 titleExpression: "COALESCE(sm.artist, 'Unknown Artist')",
                 subtitleExpression:
-                    "COUNT(DISTINCT ls.track_id) || ' tracks'",
+                    "COUNT(DISTINCT ls.track_id) || ' songs'",
                 limit: 5,
                 connection: connection
             )

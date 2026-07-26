@@ -65,7 +65,7 @@ struct SyncSettingsView: View {
                             }
                             HStack(spacing: 18) {
                                 if let trackCount = server.trackCount {
-                                    Text("\(trackCount) tracks")
+                                    Text("\(trackCount) songs")
                                 }
                                 if let blobCount = server.blobCount {
                                     Text("\(blobCount) blobs")
@@ -130,11 +130,7 @@ struct SyncSettingsView: View {
                 }
 
                 Toggle("Host This Sonora", isOn: Binding(
-                    get: {
-                        service.isEnabled
-                            || bundledHelperIsActive
-                            || requestedHosting
-                    },
+                    get: { service.isEnabled || requestedHosting },
                     set: { enabled in
                         setHostingEnabled(enabled)
                     }
@@ -478,6 +474,14 @@ struct SyncSettingsView: View {
             stopLocalServer(running)
             return
         }
+        if enabled,
+           !service.isEnabled,
+           let stale = localServers.servers.first(where: {
+               $0.kind == .bundledHelper
+           }) {
+            localServers.stopBundledService(stale)
+            guard localServers.errorMessage == nil else { return }
+        }
         requestedHosting = enabled
         service.setEnabled(enabled)
         requestedHosting = service.isEnabled
@@ -526,7 +530,7 @@ struct SyncSettingsView: View {
             }
             hostedImportStatus = imported == 0
                 ? "Hosted library is up to date."
-                : "Published \(imported) tracks to this Sonora."
+                : "Published \(imported) songs to this Sonora."
             localServers.refresh()
         } catch {
             service.errorMessage = "Unable to publish the watched library: "
@@ -736,9 +740,9 @@ struct SyncSettingsView: View {
             Text("Review First Join")
                 .font(.title)
             Text(
-                "\(preview.deduplicatedTracks) identical, "
-                    + "\(preview.localOnlyTracks) local-only, "
-                    + "\(preview.hubOnlyTracks) hosting-Sonora-only"
+                "\(preview.deduplicatedTracks) identical songs, "
+                    + "\(preview.localOnlyTracks) local-only songs, "
+                    + "\(preview.hubOnlyTracks) hosting-Sonora-only songs"
             )
             Text("Media required: \(requiredMedia)")
             .foregroundStyle(.secondary)

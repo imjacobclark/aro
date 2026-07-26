@@ -26,7 +26,7 @@ struct BreakdownList: View {
                                 .truncationMode(.tail)
                                 .help(value.name)
                             Spacer()
-                            Text("\(value.trackCount) tracks")
+                            Text("\(value.trackCount) songs")
                                 .foregroundStyle(.secondary)
                                 .fixedSize()
                             Text(

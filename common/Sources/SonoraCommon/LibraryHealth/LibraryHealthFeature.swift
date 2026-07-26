@@ -216,7 +216,7 @@ public struct LibraryHealthAnalyzer: Sendable {
                         title: track.title,
                         artist: track.artist,
                         reason:
-                            "No scanned location for this track is available.",
+                            "No scanned location for this song is available.",
                         copies: unavailable,
                         preferredCopyID: nil,
                         potentialSavingsBytes: 0
