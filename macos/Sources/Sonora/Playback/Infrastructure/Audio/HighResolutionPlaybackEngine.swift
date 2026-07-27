@@ -316,6 +316,7 @@ final class HighResolutionPlaybackEngine: NSObject, AudioPlaybackEngine {
     }
 
     private func discardPlayer() {
+        meterRelay?.invalidate()
         if meterTapIsInstalled, let player {
             player.modifyProcessingGraph { engine in
                 engine.mainMixerNode.removeTap(onBus: 0)

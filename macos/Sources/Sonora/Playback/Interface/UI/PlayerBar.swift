@@ -2,10 +2,15 @@ import SonoraCommon
 
 import SwiftUI
 
+@MainActor
 struct PlayerBar: View {
-    @Bindable var playback: PlaybackController
-    @Bindable var preferences: PlaybackPreferences
-    @Bindable var deviceManager: AudioDeviceManager
+    // These objects are observed through their @Observable accessors. PlayerBar
+    // does not need projected bindings to any of them, and keeping plain strong
+    // references avoids retaining @Bindable registrar state while a library
+    // runtime is replaced.
+    let playback: PlaybackController
+    let preferences: PlaybackPreferences
+    let deviceManager: AudioDeviceManager
 
     @State private var isScrubbing = false
     @State private var scrubTime: TimeInterval = 0
@@ -71,7 +76,9 @@ struct PlayerBar: View {
 
     private var transportControls: some View {
         HStack(spacing: 11) {
-            Button(action: playback.previous) {
+            Button {
+                playback.previous()
+            } label: {
                 Image(systemName: "backward.fill")
                     .font(.system(size: 9.5, weight: .semibold))
                     .frame(width: 22, height: 22)
@@ -83,7 +90,9 @@ struct PlayerBar: View {
             .help("Previous")
             .accessibilityLabel("Previous")
 
-            Button(action: playback.togglePlayPause) {
+            Button {
+                playback.togglePlayPause()
+            } label: {
                 Group {
                     if playback.state == .loading {
                         ProgressView()
@@ -106,7 +115,9 @@ struct PlayerBar: View {
             .help(playback.isPlaying ? "Pause" : "Play")
             .accessibilityLabel(playback.isPlaying ? "Pause" : "Play")
 
-            Button(action: playback.next) {
+            Button {
+                playback.next()
+            } label: {
                 Image(systemName: "forward.fill")
                     .font(.system(size: 9.5, weight: .semibold))
                     .frame(width: 22, height: 22)

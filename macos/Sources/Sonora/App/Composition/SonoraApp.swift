@@ -99,6 +99,7 @@ struct SonoraApp: App {
                 activateProfile: activateProfile,
                 completeRemoteConnection: completeRemoteConnection
             )
+            .id(ObjectIdentifier(runtime))
             .frame(minWidth: 860, minHeight: 480)
             .font(SonoraFont.body)
             .tint(SonoraTheme.violet)
@@ -149,6 +150,10 @@ struct SonoraApp: App {
     }
 
     private func activateProfile(_ profile: LibraryProfile) {
+        // A runtime owns its Core Audio graph and render callbacks. Tear it
+        // down before replacing the observable object graph so SwiftUI cannot
+        // render a player bar backed by a retiring controller.
+        runtime.playbackController.stopAndClear()
         profileRegistry.activate(profile.id)
         if profile.kind == .remote, hubService.isEnabled {
             hubService.setEnabled(false)

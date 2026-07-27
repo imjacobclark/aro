@@ -1,9 +1,18 @@
 import SonoraCommon
 
 import AVFAudio
+import Foundation
 
 final class AudioMeterRelay: @unchecked Sendable {
+    private struct State {
+        var latestLevels: [Double]?
+        var deliveryIsScheduled = false
+        var isValid = true
+    }
+
     private let handler: @MainActor @Sendable ([Double]) -> Void
+    private let lock = NSLock()
+    private var state = State()
 
     init(handler: @escaping @MainActor @Sendable ([Double]) -> Void) {
         self.handler = handler
@@ -11,7 +20,45 @@ final class AudioMeterRelay: @unchecked Sendable {
 
     nonisolated func process(_ buffer: AVAudioPCMBuffer) {
         let levels = meterLevels(from: buffer, barCount: 9)
-        Task { @MainActor [handler] in
+
+        lock.lock()
+        guard state.isValid else {
+            lock.unlock()
+            return
+        }
+        state.latestLevels = levels
+        guard !state.deliveryIsScheduled else {
+            lock.unlock()
+            return
+        }
+        state.deliveryIsScheduled = true
+        lock.unlock()
+
+        // Audio render callbacks can arrive much faster than SwiftUI can draw.
+        // Keep only the newest sample and cap UI delivery at roughly 30 Hz so
+        // the main executor never accumulates an unbounded render backlog.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(33))
+            self?.deliverLatest()
+        }
+    }
+
+    func invalidate() {
+        lock.lock()
+        state.isValid = false
+        state.latestLevels = nil
+        lock.unlock()
+    }
+
+    @MainActor
+    private func deliverLatest() {
+        lock.lock()
+        let levels = state.isValid ? state.latestLevels : nil
+        state.latestLevels = nil
+        state.deliveryIsScheduled = false
+        lock.unlock()
+
+        if let levels {
             handler(levels)
         }
     }
