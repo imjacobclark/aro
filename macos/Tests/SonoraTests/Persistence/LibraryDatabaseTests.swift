@@ -52,6 +52,45 @@ final class LibraryDatabaseTests: XCTestCase {
         XCTAssertEqual(database.songs(folderID: folderID).count, 1)
     }
 
+    func testReconcileKeepsStableIdentityWhenFileAtPathIsEdited() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = LibraryDatabase(
+            url: directory.appendingPathComponent("Library.sqlite3")
+        )
+        let folderID = UUID()
+        database.save(
+            folder: WatchedFolder(
+                id: folderID,
+                url: directory,
+                displayName: "Music",
+                bookmarkData: nil,
+                isAccessible: true,
+                didStartSecurityScope: false
+            )
+        )
+        let path = directory.appendingPathComponent("Edited.flac").path
+        let original = try XCTUnwrap(
+            database.reconcile(
+                songs: [makeSong(path: path, contentHash: "first-hash")],
+                folderID: folderID
+            ).first
+        )
+        let edited = try XCTUnwrap(
+            database.reconcile(
+                songs: [makeSong(path: path, contentHash: "second-hash")],
+                folderID: folderID
+            ).first
+        )
+        XCTAssertEqual(edited.libraryID, original.libraryID)
+        XCTAssertEqual(edited.fileFingerprint?.contentHash, "second-hash")
+    }
+
     func testLoudnessAndHiddenStateSurviveReopeningDatabase() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

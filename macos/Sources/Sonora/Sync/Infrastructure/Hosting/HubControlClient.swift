@@ -58,8 +58,22 @@ struct ControlledPairingRequest: Identifiable, Codable, Sendable {
     var id: UUID { requestID }
 }
 
+struct ControlledSourceFolder: Identifiable, Codable, Sendable {
+    let sourceID: UUID
+    let name: String
+    let path: String
+    let available: Bool
+    let watching: Bool
+    let lastScanAt: String?
+    let lastError: String?
+    let songCount: UInt64
+    let missingCount: UInt64
+
+    var id: UUID { sourceID }
+}
+
 struct HubControlClient: Sendable {
-    static let controlProtocolVersion = 4
+    static let controlProtocolVersion = 5
 
     let socketURL: URL
 
@@ -162,6 +176,30 @@ struct HubControlClient: Sendable {
             throw HubControlError.invalidResponse
         }
         return imported
+    }
+
+    func folders() async throws -> [ControlledSourceFolder] {
+        let result = try await sendValue(["command": "folders"])
+        let data = try JSONSerialization.data(withJSONObject: result)
+        return try JSONDecoder.sonoraSyncProtocol().decode(
+            [ControlledSourceFolder].self,
+            from: data
+        )
+    }
+
+    func scanFolder(_ sourceID: UUID? = nil) async throws {
+        var command: [String: Any] = ["command": "scan_folder"]
+        if let sourceID {
+            command["source_id"] = sourceID.uuidString
+        }
+        _ = try await send(command)
+    }
+
+    func removeFolder(_ sourceID: UUID) async throws {
+        _ = try await send([
+            "command": "remove_folder",
+            "source_id": sourceID.uuidString,
+        ])
     }
 
     private func send(

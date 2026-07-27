@@ -9,12 +9,16 @@ struct SyncSettingsView: View {
     let syncStore: SQLiteSyncOperationStore
     let libraryFiles: any LibraryFileManaging
     let activeProfile: LibraryProfile?
+    @Bindable var registry: LibraryProfileRegistry
+    let activateProfile: (LibraryProfile) -> Void
 
     @State private var localServers = LocalSonoraServerMonitor()
     @State private var manualAddress = ""
     @State private var diagnosticStatus: String?
     @State private var showingResetConfirmation = false
     @State private var showingRemovedConfirmation = false
+    @State private var importedFolders: [ControlledSourceFolder] = []
+    @State private var migrationStatus: String?
 
     var body: some View {
         Form {
@@ -67,6 +71,53 @@ struct SyncSettingsView: View {
                             .truncationMode(.middle)
                             .textSelection(.enabled)
                     }
+                }
+                if activeProfile?.kind == .local {
+                    Button("Move Library Data…", action: moveLibraryData)
+                        .disabled(migrationStatus != nil)
+                    if let migrationStatus {
+                        HStack {
+                            ProgressView()
+                            Text(migrationStatus)
+                        }
+                    }
+                    Text(
+                        "Moves the database, Sonora-managed music, downloads, "
+                            + "and Background Service data. Original locations "
+                            + "are retained as recoverable backups."
+                    )
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                }
+            }
+
+            if activeProfile?.kind != .remote {
+                Section("Imported Folders") {
+                    if importedFolders.isEmpty {
+                        Text(
+                            service.isEnabled
+                                ? "No folders have been imported."
+                                : "Start sharing to manage imported folders."
+                        )
+                        .foregroundStyle(.secondary)
+                    }
+                    ForEach(
+                        0 ..< importedFolders.count,
+                        id: \.self
+                    ) { (index: Int) in
+                        importedFolderRow(importedFolders[index])
+                    }
+                    HStack {
+                        Button("Add Folder…", action: addImportedFolder)
+                            .disabled(!service.isEnabled)
+                        Button("Refresh", action: refreshImportedFolders)
+                            .disabled(!service.isEnabled)
+                    }
+                    Text(
+                        "Stopping a watch keeps every imported song in this Sonora."
+                    )
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                 }
             }
 
@@ -159,7 +210,7 @@ struct SyncSettingsView: View {
                     LabeledContent("Library sequence", value: "\(sequence)")
                 }
                 if let tracks = server.trackCount {
-                    LabeledContent("Indexed tracks", value: "\(tracks)")
+                    LabeledContent("Indexed songs", value: "\(tracks)")
                 }
                 if let files = server.blobCount {
                     LabeledContent("Stored files", value: "\(files)")
@@ -238,6 +289,166 @@ struct SyncSettingsView: View {
     private func refresh() {
         localServers.refresh()
         mediaCache.refreshSummary()
+        refreshImportedFolders()
+    }
+
+    private var controlClient: HubControlClient? {
+        guard !preferences.dataLocation.isEmpty else { return nil }
+        return HubControlClient(
+            socketURL: URL(fileURLWithPath: preferences.dataLocation)
+                .appendingPathComponent("control.sock")
+        )
+    }
+
+    private func refreshImportedFolders() {
+        guard service.isEnabled, let controlClient else {
+            importedFolders = []
+            return
+        }
+        Task {
+            do {
+                importedFolders = try await controlClient.folders()
+            } catch {
+                diagnosticStatus = error.localizedDescription
+            }
+        }
+    }
+
+    private func addImportedFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a Folder to Import"
+        panel.prompt = "Import Folder"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK,
+              let path = panel.url?.path,
+              let controlClient else { return }
+        Task {
+            do {
+                _ = try await controlClient.importFolder(
+                    path: path,
+                    mode: preferences.importMode
+                )
+                importedFolders = try await controlClient.folders()
+            } catch {
+                diagnosticStatus = error.localizedDescription
+            }
+        }
+    }
+
+    private func scanFolder(_ id: UUID) {
+        guard let controlClient else { return }
+        Task {
+            do {
+                try await controlClient.scanFolder(id)
+                importedFolders = try await controlClient.folders()
+            } catch {
+                diagnosticStatus = error.localizedDescription
+            }
+        }
+    }
+
+    private func stopWatching(_ id: UUID) {
+        guard let controlClient else { return }
+        Task {
+            do {
+                try await controlClient.removeFolder(id)
+                importedFolders = try await controlClient.folders()
+            } catch {
+                diagnosticStatus = error.localizedDescription
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func importedFolderRow(
+        _ folder: ControlledSourceFolder
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text(folder.name).font(.headline)
+                Spacer()
+                Text(folder.watching ? "Watching" : "Detached")
+                    .foregroundStyle(
+                        folder.available ? Color.secondary : Color.orange
+                    )
+            }
+            Text(folder.path)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+            Text("\(folder.songCount) songs · \(folder.missingCount) unavailable")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let error = folder.lastError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            if folder.watching {
+                HStack {
+                    Button("Scan Now") {
+                        scanFolder(folder.id)
+                    }
+                    Button("Stop Watching", role: .destructive) {
+                        stopWatching(folder.id)
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func moveLibraryData() {
+        guard let profile = activeProfile, profile.kind == .local else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Choose a New Location for Library Data"
+        panel.prompt = "Move Library Data"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let parent = panel.url else { return }
+        let wasEnabled = service.isEnabled
+        migrationStatus = "Preparing and verifying the new copy…"
+        if wasEnabled {
+            service.setEnabled(false)
+        }
+        Task {
+            do {
+                if wasEnabled {
+                    try await Task.sleep(for: .seconds(1))
+                }
+                let result = try await LibraryDataMigrator().migrate(
+                    profile: profile,
+                    libraryFiles: libraryFiles,
+                    serverDataPath: preferences.dataLocation,
+                    into: parent
+                )
+                registry.update(result.profile)
+                preferences.dataLocation = result.serverDataPath
+                activateProfile(result.profile)
+                if wasEnabled {
+                    service.setEnabled(true)
+                    await service.ensureCompatibleHelper(
+                        dataLocation: result.serverDataPath
+                    )
+                }
+                migrationStatus = nil
+                diagnosticStatus =
+                    "Library Data moved to \(result.root.path). "
+                    + "The previous locations were retained as backups."
+            } catch {
+                if wasEnabled {
+                    service.setEnabled(true)
+                }
+                migrationStatus = nil
+                diagnosticStatus = error.localizedDescription
+            }
+        }
     }
 
     private func restartService() {
@@ -307,7 +518,7 @@ struct SyncSettingsView: View {
             Sharing: \(server == nil ? "off" : "available")
             Listener: \(server?.listener ?? "none")
             Process: \(server.map { String($0.pid) } ?? "none")
-            Tracks: \(server?.trackCount.map(String.init) ?? "unknown")
+            Songs: \(server?.trackCount.map(String.init) ?? "unknown")
             Files: \(server?.blobCount.map(String.init) ?? "unknown")
             Sequence: \(server?.sequence.map(String.init) ?? "unknown")
             Database: \(libraryFiles.libraryURL.path)

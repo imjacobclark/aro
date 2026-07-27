@@ -137,7 +137,9 @@ struct SonoraApp: App {
                         mediaCache: runtime.mediaCacheController,
                         syncStore: runtime.syncOperationStore,
                         libraryFiles: runtime.libraryFileManager,
-                        activeProfile: profileRegistry.activeProfile
+                        activeProfile: profileRegistry.activeProfile,
+                        registry: profileRegistry,
+                        activateProfile: activateProfile
                     )
                 }
             }

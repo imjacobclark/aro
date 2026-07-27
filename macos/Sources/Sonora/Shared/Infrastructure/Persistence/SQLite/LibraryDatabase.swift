@@ -398,11 +398,9 @@ final class LibraryDatabase: @unchecked Sendable {
             if sqlite3_step(statement) == SQLITE_ROW,
                let idString = text(statement, 0),
                let id = UUID(uuidString: idString) {
-                let storedHash = text(statement, 1)
-                if song.fileFingerprint?.contentHash == nil
-                    || storedHash == song.fileFingerprint?.contentHash {
-                    return id
-                }
+                // A source path is the stable logical identity. Replacing the
+                // file updates the same song and preserves ratings/history.
+                return id
             }
         }
 
@@ -771,7 +769,7 @@ final class LibraryDatabase: @unchecked Sendable {
         ).first ?? FileManager.default.temporaryDirectory
         return base
             .appendingPathComponent("Sonora", isDirectory: true)
-            .appendingPathComponent("Hub Data", isDirectory: true)
+            .appendingPathComponent("Library Data", isDirectory: true)
             .appendingPathComponent("Sonora.sqlite3")
     }
 

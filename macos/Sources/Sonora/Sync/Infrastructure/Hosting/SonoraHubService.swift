@@ -135,7 +135,7 @@ final class SyncPreferences {
     static var recommendedDataLocation: String {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(
-                "Library/Application Support/Sonora/Hub Data",
+                "Library/Application Support/Sonora/Library Data",
                 isDirectory: true
             )
             .path
@@ -168,7 +168,12 @@ final class SyncPreferences {
         }
     }
     var importMode: HubImportMode {
-        didSet { defaults.set(importMode.rawValue, forKey: Key.importMode) }
+        didSet {
+            defaults.set(importMode.rawValue, forKey: Key.importMode)
+            try? MacHubConfigurationWriter(defaults: defaults).write(
+                dataLocation: dataLocation
+            )
+        }
     }
     var replicaMode: SyncReplicaMode {
         didSet { defaults.set(replicaMode.rawValue, forKey: Key.replicaMode) }
@@ -246,6 +251,8 @@ private struct MacHubConfigurationWriter {
         control_socket = "\(escapedDataLocation)/control.sock"
         admin_token = "\(adminToken)"
         advertise_mdns = true
+        storage_mode = "\(defaults.string(forKey: "sync.host.importMode") ?? "managed")"
+        source_rescan_seconds = 300
         """
         let configURL = configDirectory.appendingPathComponent("sonora.toml")
         try Data(content.utf8).write(

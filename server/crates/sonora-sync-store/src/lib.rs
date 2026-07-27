@@ -19,6 +19,27 @@ use subtle::ConstantTimeEq;
 use thiserror::Error;
 use uuid::Uuid;
 
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SourceFolder {
+    pub source_id: Uuid,
+    pub name: String,
+    pub path: PathBuf,
+    pub available: bool,
+    pub watching: bool,
+    pub last_scan_at: Option<String>,
+    pub last_error: Option<String>,
+    pub song_count: u64,
+    pub missing_count: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SourceFile {
+    pub relative_path: String,
+    pub track_id: Uuid,
+    pub content_hash: String,
+    pub available: bool,
+}
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error(transparent)]
@@ -745,8 +766,10 @@ impl HubStore {
     pub fn refresh_host_source_health(&self) -> Result<(), StoreError> {
         let sources: Vec<(String, String, String)> = {
             let connection = self.connection.lock();
-            let mut statement = connection
-                .prepare("SELECT source_id, path, mode FROM sources WHERE path IS NOT NULL")?;
+            let mut statement = connection.prepare(
+                "SELECT source_id, path, mode FROM sources
+                     WHERE path IS NOT NULL AND detached_at IS NULL",
+            )?;
             statement
                 .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
                 .collect::<Result<_, _>>()?
@@ -817,6 +840,7 @@ impl HubStore {
                 available = 1,
                 warning = NULL,
                 name = excluded.name,
+                detached_at = NULL,
                 last_seen_at = excluded.last_seen_at
             "#,
             params![
@@ -869,11 +893,169 @@ impl HubStore {
         if upload.exists() {
             fs::remove_file(&upload)?;
         }
-        if fs::hard_link(source, &upload).is_err() {
-            fs::copy(source, &upload)?;
-        }
+        fs::copy(source, &upload)?;
         self.commit_blob(&hash, size)?;
         Ok((hash, size))
+    }
+
+    pub fn source_folders(&self) -> Result<Vec<SourceFolder>, StoreError> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            r#"
+            SELECT s.source_id, s.name, s.path, s.available,
+                   s.detached_at IS NULL, s.last_scan_at, s.last_error,
+                   COUNT(sf.relative_path),
+                   COALESCE(SUM(CASE WHEN sf.available = 0 THEN 1 ELSE 0 END), 0)
+            FROM sources s
+            LEFT JOIN source_files sf ON sf.source_id = s.source_id
+            WHERE s.path IS NOT NULL
+            GROUP BY s.source_id
+            ORDER BY s.name, s.path
+            "#,
+        )?;
+        Ok(statement
+            .query_map([], |row| {
+                let id: String = row.get(0)?;
+                Ok(SourceFolder {
+                    source_id: Uuid::parse_str(&id).unwrap_or_default(),
+                    name: row.get(1)?,
+                    path: PathBuf::from(row.get::<_, String>(2)?),
+                    available: row.get(3)?,
+                    watching: row.get(4)?,
+                    last_scan_at: row.get(5)?,
+                    last_error: row.get(6)?,
+                    song_count: row.get(7)?,
+                    missing_count: row.get(8)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?)
+    }
+
+    pub fn source_folder(&self, source_id: Uuid) -> Result<Option<SourceFolder>, StoreError> {
+        Ok(self
+            .source_folders()?
+            .into_iter()
+            .find(|source| source.source_id == source_id))
+    }
+
+    pub fn source_files(&self, source_id: Uuid) -> Result<Vec<SourceFile>, StoreError> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            r#"
+            SELECT relative_path, hub_track_id, content_hash, available
+            FROM source_files WHERE source_id = ?1
+            ORDER BY relative_path
+            "#,
+        )?;
+        Ok(statement
+            .query_map([source_id.to_string()], |row| {
+                let track: String = row.get(1)?;
+                Ok(SourceFile {
+                    relative_path: row.get(0)?,
+                    track_id: Uuid::parse_str(&track).unwrap_or_default(),
+                    content_hash: row.get(2)?,
+                    available: row.get(3)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?)
+    }
+
+    pub fn track_id_for_hash(&self, hash: &str) -> Result<Option<Uuid>, StoreError> {
+        let value: Option<String> = self
+            .connection
+            .lock()
+            .query_row(
+                "SELECT hub_track_id FROM tracks WHERE content_hash = ?1 AND purged_at IS NULL LIMIT 1",
+                [hash],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value.and_then(|value| Uuid::parse_str(&value).ok()))
+    }
+
+    pub fn upsert_source_file(
+        &self,
+        source_id: Uuid,
+        relative_path: &str,
+        track_id: Uuid,
+        hash: &str,
+        size: u64,
+        modified_millis: i64,
+    ) -> Result<(), StoreError> {
+        self.connection.lock().execute(
+            r#"
+            INSERT INTO source_files
+                (source_id, relative_path, hub_track_id, content_hash, size,
+                 modified_millis, available, last_seen_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)
+            ON CONFLICT(source_id, relative_path) DO UPDATE SET
+                hub_track_id = excluded.hub_track_id,
+                content_hash = excluded.content_hash,
+                size = excluded.size,
+                modified_millis = excluded.modified_millis,
+                available = 1,
+                last_seen_at = excluded.last_seen_at
+            "#,
+            params![
+                source_id.to_string(),
+                relative_path,
+                track_id.to_string(),
+                hash,
+                size,
+                modified_millis,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn finish_source_scan(
+        &self,
+        source_id: Uuid,
+        seen_paths: &HashSet<String>,
+        error: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "UPDATE source_files SET available = 0 WHERE source_id = ?1",
+            [source_id.to_string()],
+        )?;
+        for path in seen_paths {
+            transaction.execute(
+                "UPDATE source_files SET available = 1 WHERE source_id = ?1 AND relative_path = ?2",
+                params![source_id.to_string(), path],
+            )?;
+        }
+        transaction.execute(
+            r#"
+            UPDATE sources SET available = ?1, warning = ?2, last_error = ?2,
+                last_scan_at = ?3, last_seen_at = ?3
+            WHERE source_id = ?4
+            "#,
+            params![
+                error.is_none(),
+                error,
+                chrono::Utc::now().to_rfc3339(),
+                source_id.to_string(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn detach_source(&self, source_id: Uuid) -> Result<bool, StoreError> {
+        Ok(self.connection.lock().execute(
+            "UPDATE sources SET detached_at = ?1 WHERE source_id = ?2 AND detached_at IS NULL",
+            params![chrono::Utc::now().to_rfc3339(), source_id.to_string()],
+        )? == 1)
+    }
+
+    pub fn checkpoint(&self) -> Result<(), StoreError> {
+        self.connection
+            .lock()
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
     }
 
     pub fn import_referenced(&self, source: &Path) -> Result<(String, u64), StoreError> {
@@ -1159,8 +1341,24 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
             warning TEXT,
             owner_device_id TEXT,
             name TEXT NOT NULL DEFAULT 'Music Folder',
-            last_seen_at TEXT
+            last_seen_at TEXT,
+            last_scan_at TEXT,
+            last_error TEXT,
+            detached_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS source_files (
+            source_id TEXT NOT NULL REFERENCES sources(source_id),
+            relative_path TEXT NOT NULL,
+            hub_track_id TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            size INTEGER NOT NULL,
+            modified_millis INTEGER NOT NULL,
+            available INTEGER NOT NULL DEFAULT 1,
+            last_seen_at TEXT NOT NULL,
+            PRIMARY KEY(source_id, relative_path)
+        );
+        CREATE INDEX IF NOT EXISTS source_files_track
+            ON source_files(hub_track_id);
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -1194,6 +1392,28 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
         [],
     );
     let _ = connection.execute("ALTER TABLE sources ADD COLUMN last_seen_at TEXT", []);
+    let _ = connection.execute("ALTER TABLE sources ADD COLUMN last_scan_at TEXT", []);
+    let _ = connection.execute("ALTER TABLE sources ADD COLUMN last_error TEXT", []);
+    let _ = connection.execute("ALTER TABLE sources ADD COLUMN detached_at TEXT", []);
+    connection.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS source_files (
+            source_id TEXT NOT NULL REFERENCES sources(source_id),
+            relative_path TEXT NOT NULL,
+            hub_track_id TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            size INTEGER NOT NULL,
+            modified_millis INTEGER NOT NULL,
+            available INTEGER NOT NULL DEFAULT 1,
+            last_seen_at TEXT NOT NULL,
+            PRIMARY KEY(source_id, relative_path)
+        );
+        CREATE INDEX IF NOT EXISTS source_files_track
+            ON source_files(hub_track_id);
+        INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+            VALUES (4, unixepoch());
+        "#,
+    )?;
     connection.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (3, unixepoch())",
         [],
@@ -1605,6 +1825,19 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        let managed_blob = store.blob_path(&managed_hash);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_ne!(
+                managed.metadata().unwrap().ino(),
+                managed_blob.metadata().unwrap().ino(),
+                "Managed imports must be independent copies, never hard links"
+            );
+            assert_eq!(managed_blob.metadata().unwrap().nlink(), 1);
+        }
+        fs::write(&managed, b"source changed later").unwrap();
+        assert_eq!(fs::read(managed_blob).unwrap(), b"managed audio");
 
         fs::write(&referenced, b"changed").unwrap();
         assert!(

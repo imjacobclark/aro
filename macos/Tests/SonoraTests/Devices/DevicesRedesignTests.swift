@@ -96,7 +96,7 @@ final class DevicesRedesignTests: XCTestCase {
         )
         XCTAssertTrue(
             local.databasePath.hasSuffix(
-                "Application Support/Sonora/Hub Data/Sonora.sqlite3"
+                "Application Support/Sonora/Library Data/Sonora.sqlite3"
             )
         )
         registry.activate(local.id)
@@ -197,6 +197,27 @@ final class DevicesRedesignTests: XCTestCase {
         XCTAssertEqual(first.importedFiles, 1)
         XCTAssertEqual(second.importedFiles, 0)
         XCTAssertEqual(second.skippedDuplicates, 1)
+
+        try Data("replaced audio".utf8).write(
+            to: source.appendingPathComponent("Track.mp3"),
+            options: .atomic
+        )
+        let edited = try await ManagedMusicImporter().importFolder(
+            source,
+            into: library
+        )
+        XCTAssertEqual(edited.importedFiles, 1)
+        XCTAssertEqual(
+            try Data(contentsOf: library.appendingPathComponent("Track.mp3")),
+            Data("replaced audio".utf8)
+        )
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(
+                at: library,
+                includingPropertiesForKeys: nil
+            ).filter { !$0.lastPathComponent.hasPrefix(".") }.count,
+            1
+        )
     }
 }
 #endif

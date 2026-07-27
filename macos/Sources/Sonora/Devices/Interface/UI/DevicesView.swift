@@ -79,7 +79,9 @@ struct DevicesView: View {
                 mediaCache: mediaCache,
                 syncStore: syncStore,
                 libraryFiles: libraryFiles,
-                activeProfile: registry.activeProfile
+                activeProfile: registry.activeProfile,
+                registry: registry,
+                activateProfile: activateProfile
             )
         }
         .confirmationDialog(
@@ -232,7 +234,7 @@ struct DevicesView: View {
                     )
                     .foregroundStyle(primaryStatusColor(profile))
                     Text(
-                        "\(library.allSongs.count) tracks · Last updated just now"
+                        "\(library.allSongs.count) songs · Last updated just now"
                     )
                     .foregroundStyle(.secondary)
                     Text(libraryDescription(profile))
@@ -405,7 +407,7 @@ struct DevicesView: View {
                             total: Double(max(1, progress.total))
                         ) {
                             Text(
-                                "Downloading \(progress.completed) of \(progress.total) tracks"
+                                "Downloading \(progress.completed) of \(progress.total) songs"
                             )
                         }
                     }
@@ -595,6 +597,7 @@ struct DevicesView: View {
             let mode: HubImportMode = profile?.managedMusicPath == nil
                 ? .referenced
                 : .managed
+            preferences.importMode = mode
             for path in syncStore.activeWatchedFolderPaths {
                 _ = try? await controlClient?.importFolder(
                     path: path,
@@ -816,7 +819,7 @@ struct DevicesView: View {
             parts.append("Approved")
         }
         if let offline = device.offlineTrackCount {
-            parts.append("\(offline) tracks offline")
+            parts.append("\(offline) songs offline")
         }
         if device.allowsContributions {
             parts.append("Can add music")

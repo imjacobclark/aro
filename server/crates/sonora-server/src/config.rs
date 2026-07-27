@@ -6,6 +6,23 @@ use std::{
 };
 use uuid::Uuid;
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, clap::ValueEnum, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StorageMode {
+    #[default]
+    Managed,
+    Referenced,
+}
+
+impl StorageMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Managed => "managed",
+            Self::Referenced => "referenced",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -18,6 +35,8 @@ pub struct Config {
     pub control_socket: PathBuf,
     pub admin_token: String,
     pub advertise_mdns: bool,
+    pub storage_mode: StorageMode,
+    pub source_rescan_seconds: u64,
 }
 
 impl Default for Config {
@@ -33,6 +52,8 @@ impl Default for Config {
             data_dir,
             admin_token: Uuid::new_v4().simple().to_string(),
             advertise_mdns: true,
+            storage_mode: StorageMode::Managed,
+            source_rescan_seconds: 300,
         }
     }
 }
@@ -56,6 +77,13 @@ impl Config {
         if let Ok(value) = std::env::var("SONORA_ADMIN_TOKEN") {
             config.admin_token = value;
         }
+        if let Ok(value) = std::env::var("SONORA_STORAGE_MODE") {
+            config.storage_mode = match value.to_ascii_lowercase().as_str() {
+                "managed" => StorageMode::Managed,
+                "referenced" => StorageMode::Referenced,
+                _ => bail!("SONORA_STORAGE_MODE must be managed or referenced"),
+            };
+        }
         config.validate()?;
         Ok(config)
     }
@@ -76,6 +104,9 @@ impl Config {
     fn validate(&self) -> Result<()> {
         if self.admin_token.len() < 16 {
             bail!("admin_token must contain at least 16 characters");
+        }
+        if self.source_rescan_seconds < 10 {
+            bail!("source_rescan_seconds must be at least 10");
         }
         if let IpAddr::V4(ip) = self.bind.ip()
             && !(ip.is_unspecified() || ip.is_private() || ip.is_loopback())

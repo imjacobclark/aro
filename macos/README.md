@@ -111,7 +111,7 @@ dependency graph is stored at `macos/Package.resolved`.
 
 Legacy local libraries are migrated from
 `Application Support/Sonora/Sonora.sqlite3` to
-`Application Support/Sonora/Hub Data/Sonora.sqlite3`. Remote library
+`Application Support/Sonora/Library Data/Sonora.sqlite3`. Remote library
 subscriptions use isolated databases under
 `Application Support/Sonora/Libraries/<profile>/Library.sqlite3`.
 The filesystem remains the source of audio data, while SQLite stores stable

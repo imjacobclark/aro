@@ -1,3 +1,4 @@
+use crate::sources::SourceManager;
 use axum::{
     Json, Router,
     body::Bytes,
@@ -20,12 +21,11 @@ use uuid::Uuid;
 pub struct AppState {
     pub hub_id: Uuid,
     pub display_name: String,
-    #[cfg(unix)]
-    pub data_dir: PathBuf,
     pub admin_token: String,
     pub pairing: PairingManager,
     pub jobs: JobRegistry,
     pub store: HubStore,
+    pub sources: SourceManager,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -38,6 +38,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/pairing/{id}/confirm", post(confirm_pairing))
         .route("/v1/pairing/{id}", get(pairing_status))
         .route("/v1/pairing/approve", post(approve_pairing))
+        .route("/v1/pairing/requests", get(pairing_requests))
+        .route("/v1/admin/folders", get(folders).post(add_folder))
+        .route("/v1/admin/folders/scan", post(scan_folders))
+        .route("/v1/admin/folders/remove", post(remove_folder))
         .route("/v1/devices", get(devices))
         .route("/v1/device", get(current_device))
         .route("/v1/devices/revoke", post(revoke))
@@ -53,6 +57,90 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/library/sources", get(source_health))
         .route("/v1/jobs/{id}", get(job_status).delete(cancel_job))
         .with_state(Arc::new(state))
+}
+
+async fn pairing_requests(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_admin(&state, &headers)?;
+    Ok(Json(json!(state.pairing.pending_requests())))
+}
+
+async fn folders(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_admin(&state, &headers)?;
+    Ok(Json(json!(
+        state.sources.list().map_err(ApiError::internal)?
+    )))
+}
+
+#[derive(Deserialize)]
+struct AddFolderRequest {
+    path: PathBuf,
+}
+
+async fn add_folder(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<AddFolderRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_admin(&state, &headers)?;
+    let manager = state.sources.clone();
+    let folder = tokio::task::spawn_blocking(move || manager.add(&request.path))
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!(folder)))
+}
+
+#[derive(Deserialize)]
+struct ScanFoldersRequest {
+    source_id: Option<Uuid>,
+}
+
+async fn scan_folders(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<ScanFoldersRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_admin(&state, &headers)?;
+    let manager = state.sources.clone();
+    let changed = tokio::task::spawn_blocking(move || match request.source_id {
+        Some(id) => manager.scan(id),
+        None => {
+            manager.scan_all()?;
+            Ok(0)
+        }
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
+    Ok(Json(json!({"changed_songs": changed})))
+}
+
+#[derive(Deserialize)]
+struct RemoveFolderRequest {
+    source_id: Uuid,
+}
+
+async fn remove_folder(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<RemoveFolderRequest>,
+) -> Result<StatusCode, ApiError> {
+    require_admin(&state, &headers)?;
+    if state
+        .sources
+        .remove(request.source_id)
+        .map_err(ApiError::internal)?
+    {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found("folder_not_found"))
+    }
 }
 
 async fn hub_info(State(state): State<Arc<AppState>>) -> Json<HubInfo> {

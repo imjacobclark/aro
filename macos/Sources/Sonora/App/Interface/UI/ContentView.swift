@@ -24,6 +24,7 @@ struct ContentView: View {
         OfflineDownloadPolicy
     ) -> Void
     @State private var importStatus: String?
+    @State private var managedSourceMonitors: [String: FolderMonitor] = [:]
     @State private var importError: String?
 
     var body: some View {
@@ -163,6 +164,7 @@ struct ContentView: View {
         .task {
             store.start()
             playback.reconcileAvailableSongs(store.allSongs)
+            startManagedSourceMonitors()
         }
         .onChange(of: store.allSongs.map(\.id)) {
             playback.reconcileAvailableSongs(store.allSongs)
@@ -212,6 +214,12 @@ struct ContentView: View {
                         into: destination
                     )
                     store.addFolder(destination)
+                    if var profile = profileRegistry.activeProfile,
+                       !profile.referencedMusicPaths.contains(url.path) {
+                        profile.referencedMusicPaths.append(url.path)
+                        profileRegistry.update(profile)
+                    }
+                    watchManagedSource(url, destination: destination)
                     importStatus = "Imported \(result.importedFiles) files"
                     try? await Task.sleep(for: .seconds(3))
                     importStatus = nil
@@ -222,6 +230,30 @@ struct ContentView: View {
             }
         } else {
             store.addFolder(url)
+        }
+    }
+
+    private func startManagedSourceMonitors() {
+        guard let profile = profileRegistry.activeProfile,
+              let managedPath = profile.managedMusicPath else { return }
+        let destination = URL(fileURLWithPath: managedPath)
+        for path in profile.referencedMusicPaths {
+            watchManagedSource(
+                URL(fileURLWithPath: path),
+                destination: destination
+            )
+        }
+    }
+
+    private func watchManagedSource(_ source: URL, destination: URL) {
+        guard managedSourceMonitors[source.path] == nil else { return }
+        managedSourceMonitors[source.path] = FolderMonitor(url: source) {
+            Task {
+                _ = try? await ManagedMusicImporter().importFolder(
+                    source,
+                    into: destination
+                )
+            }
         }
     }
 

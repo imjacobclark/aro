@@ -76,14 +76,14 @@ Sonora presents two library behaviours:
   online.
 
 Newly paired devices can play by default. A library owner must explicitly grant
-**Can add music** before that device may upload tracks. Every upload and
+**Can add music** before that device may upload songs. Every upload and
 download preserves the original bytes and SHA-256 identity; Sonora does not
 transcode, retag, recompress, or change the file extension.
 
 **Remove from Sonora** removes the logical track but never deletes an original
 file. A stored Sonora copy remains recoverable for 30 days, after which
 unreferenced storage can be reclaimed. **Export Entire Library** writes active
-tracks to `sonora-library/<Artist>/<Album>/…`, recoverable removed tracks to
+songs to `sonora-library/<Artist>/<Album>/…`, recoverable removed songs to
 `_Recently Removed`, and includes a JSON manifest. Interrupted exports resume,
 matching files are skipped by SHA-256, and conflicting files are not
 overwritten.
@@ -130,7 +130,9 @@ On every push to `main`, the Development Release workflow:
 2. Builds and embeds the optimized Rust Background Service.
 3. Ad-hoc signs and verifies the complete app bundle.
 4. Archives it with resource forks preserved.
-5. Publishes a GitHub prerelease and SHA-256 checksum for that commit.
+5. Cross-builds the standalone Linux ARMv7 server used by Mercury.
+6. Publishes the next sequential `v0.0.N` GitHub prerelease and SHA-256
+   checksums for that commit.
 
 Production distribution will require a Developer ID Application certificate
 and Apple notarization; the development workflow deliberately does not store

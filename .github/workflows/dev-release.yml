@@ -137,11 +137,64 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  build-linux-armv7:
+    name: Build Linux ARMv7 server
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          targets: armv7-unknown-linux-gnueabihf
+
+      - name: Install ARMv7 cross compiler
+        run: >-
+          sudo apt-get update &&
+          sudo apt-get install -y
+          gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+
+      - name: Build server
+        env:
+          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
+          CC_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-gcc
+          CXX_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-g++
+        run: >-
+          cargo build --locked --release
+          --manifest-path server/Cargo.toml
+          --target armv7-unknown-linux-gnueabihf
+          -p sonora-server
+
+      - name: Package server
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          asset="sonora-server-v${VERSION}-linux-armv7.tar.gz"
+          tar -C server/target/armv7-unknown-linux-gnueabihf/release \
+            -czf "${asset}" sonora-server
+          sha256sum "${asset}" > "${asset}.sha256"
+
+      - name: Upload server for release job
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonora-server-v${{ needs.version.outputs.version }}-linux-armv7
+          path: |
+            sonora-server-v${{ needs.version.outputs.version }}-linux-armv7.tar.gz
+            sonora-server-v${{ needs.version.outputs.version }}-linux-armv7.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     name: Publish development prerelease
     needs:
       - version
       - build-macos
+      - build-linux-armv7
     runs-on: ubuntu-24.04
     timeout-minutes: 10
 
@@ -164,6 +217,8 @@ jobs:
           assets=(
             Sonora-v"${VERSION}"-macos-*.zip
             Sonora-v"${VERSION}"-macos-*.zip.sha256
+            sonora-server-v"${VERSION}"-linux-armv7.tar.gz
+            sonora-server-v"${VERSION}"-linux-armv7.tar.gz.sha256
           )
           if gh release view "${tag}" \
             --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then

@@ -48,23 +48,41 @@ struct ManagedMusicImporter: Sendable {
                     continue
                 }
                 let hash = try Self.sha256(file)
-                guard !knownHashes.contains(hash) else {
+                let relative = String(
+                    file.path.dropFirst(source.path.count)
+                ).trimmingCharacters(
+                    in: CharacterSet(charactersIn: "/")
+                )
+                let destination = library.appendingPathComponent(relative)
+                if FileManager.default.fileExists(atPath: destination.path),
+                   (try? Self.sha256(destination)) == hash {
                     duplicates += 1
                     continue
                 }
+                if knownHashes.contains(hash),
+                   !FileManager.default.fileExists(atPath: destination.path) {
+                    duplicates += 1
+                    continue
+                }
+                try FileManager.default.createDirectory(
+                    at: destination.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
                 let staged = staging.appendingPathComponent(
-                    file.lastPathComponent
+                    "\(UUID().uuidString)-\(file.lastPathComponent)"
                 )
                 try FileManager.default.copyItem(at: file, to: staged)
-                let destination = Self.collisionSafeDestination(
-                    for: file,
-                    hash: hash,
-                    in: library
-                )
-                try FileManager.default.moveItem(
-                    at: staged,
-                    to: destination
-                )
+                if FileManager.default.fileExists(atPath: destination.path) {
+                    _ = try FileManager.default.replaceItemAt(
+                        destination,
+                        withItemAt: staged
+                    )
+                } else {
+                    try FileManager.default.moveItem(
+                        at: staged,
+                        to: destination
+                    )
+                }
                 knownHashes.insert(hash)
                 imported += 1
             }
@@ -93,24 +111,6 @@ struct ManagedMusicImporter: Sendable {
             }
         }
         return hashes
-    }
-
-    private static func collisionSafeDestination(
-        for source: URL,
-        hash: String,
-        in library: URL
-    ) -> URL {
-        let preferred = library.appendingPathComponent(
-            source.lastPathComponent
-        )
-        guard FileManager.default.fileExists(atPath: preferred.path) else {
-            return preferred
-        }
-        let stem = source.deletingPathExtension().lastPathComponent
-        let suffix = source.pathExtension
-        let name = "\(stem)-\(hash.prefix(8))"
-        return library.appendingPathComponent(name)
-            .appendingPathExtension(suffix)
     }
 
     private static func sha256(_ url: URL) throws -> String {

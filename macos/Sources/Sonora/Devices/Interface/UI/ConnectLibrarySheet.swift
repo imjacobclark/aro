@@ -21,6 +21,7 @@ struct ConnectLibrarySheet: View {
     @State private var status = "Looking for your Sonora libraries…"
     @State private var pairingTask: Task<Void, Never>?
     @State private var completedPairing: CompletedConnection?
+    @State private var pairingRequestID: UUID?
     @State private var policy: OfflineDownloadPolicy = .stream
     @State private var selectedAlbums: Set<String> = []
 
@@ -159,6 +160,23 @@ struct ConnectLibrarySheet: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .lineLimit(3)
+            if let pairingRequestID {
+                GroupBox("Pairing request ID") {
+                    HStack {
+                        Text(pairingRequestID.uuidString)
+                            .font(.system(.footnote, design: .monospaced))
+                            .textSelection(.enabled)
+                        Spacer()
+                        Button("Copy") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(
+                                pairingRequestID.uuidString,
+                                forType: .string
+                            )
+                        }
+                    }
+                }
+            }
             Spacer()
             HStack {
                 Spacer()
@@ -184,7 +202,7 @@ struct ConnectLibrarySheet: View {
             policyChoice(
                 .favourites,
                 title: "Keep favourites offline",
-                detail: "Favourite tracks remain downloaded on this Mac."
+                detail: "Favourite songs remain downloaded on this Mac."
             )
             policyChoice(
                 .selectedAlbums(selectedAlbums),
@@ -287,6 +305,7 @@ struct ConnectLibrarySheet: View {
         guard let url = URL(string: manualAddress) else { return }
         pairingTask?.cancel()
         status = "Sending a connection request…"
+        pairingRequestID = nil
         pairingTask = Task {
             defer { pairingTask = nil }
             do {
@@ -298,6 +317,7 @@ struct ConnectLibrarySheet: View {
                     deviceName: Host.current().localizedName ?? "Mac",
                     code: code
                 )
+                pairingRequestID = pairing.requestID
                 status = "Waiting for approval from the library owner…"
                 for _ in 0 ..< 150 {
                     try Task.checkCancellation()

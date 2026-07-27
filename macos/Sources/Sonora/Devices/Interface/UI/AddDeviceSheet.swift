@@ -128,8 +128,20 @@ struct AddDeviceSheet: View {
                         )
                             .font(.footnote)
                             .foregroundStyle(.secondary)
+                        Text(request.requestID.uuidString)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
                     }
                     Spacer()
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(
+                            request.requestID.uuidString,
+                            forType: .string
+                        )
+                    } label: {
+                        Label("Copy ID", systemImage: "doc.on.doc")
+                    }
                     Button("Deny", role: .destructive) {
                         approve(request, allowed: false)
                     }

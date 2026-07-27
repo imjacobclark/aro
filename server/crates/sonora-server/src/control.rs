@@ -38,7 +38,15 @@ enum ControlCommand {
     },
     Import {
         path: PathBuf,
-        mode: String,
+        #[serde(rename = "mode")]
+        _mode: String,
+    },
+    Folders,
+    ScanFolder {
+        source_id: Option<Uuid>,
+    },
+    RemoveFolder {
+        source_id: Uuid,
     },
     Status,
 }
@@ -52,7 +60,7 @@ struct ControlResponse {
     error: Option<String>,
 }
 
-const CONTROL_PROTOCOL_VERSION: u16 = 4;
+const CONTROL_PROTOCOL_VERSION: u16 = 5;
 
 pub async fn start(path: &Path, state: Arc<AppState>) -> Result<JoinHandle<()>> {
     if let Some(parent) = path.parent() {
@@ -155,15 +163,30 @@ async fn handle(stream: &mut UnixStream, state: Arc<AppState>) -> Result<Value> 
             state.pairing.revoke(device_id);
             json!({"revoked": revoked})
         }
-        ControlCommand::Import { path, mode } => {
-            let store = state.store.clone();
-            let hub_id = state.hub_id;
-            let data_dir = state.data_dir.clone();
-            let imported = tokio::task::spawn_blocking(move || {
-                crate::import_into_store(&store, hub_id, &data_dir, &path, &mode)
+        ControlCommand::Import { path, _mode: _ } => {
+            let sources = state.sources.clone();
+            let folder = tokio::task::spawn_blocking(move || sources.add(&path)).await??;
+            json!({
+                "imported_songs": folder.song_count,
+                "imported_tracks": folder.song_count,
+                "source_id": folder.source_id
+            })
+        }
+        ControlCommand::Folders => serde_json::to_value(state.sources.list()?)?,
+        ControlCommand::ScanFolder { source_id } => {
+            let sources = state.sources.clone();
+            let changed = tokio::task::spawn_blocking(move || match source_id {
+                Some(id) => sources.scan(id),
+                None => {
+                    sources.scan_all()?;
+                    Ok(0)
+                }
             })
             .await??;
-            json!({"imported_tracks": imported})
+            json!({"changed_songs": changed})
+        }
+        ControlCommand::RemoveFolder { source_id } => {
+            json!({"removed": state.sources.remove(source_id)?})
         }
         ControlCommand::Status => json!({
             "control_protocol_version": CONTROL_PROTOCOL_VERSION,
@@ -171,6 +194,7 @@ async fn handle(stream: &mut UnixStream, state: Arc<AppState>) -> Result<Value> 
             "display_name": state.display_name,
             "sequence": state.store.latest_sequence()?,
             "pairing_available": state.pairing.is_open()
+            ,"storage_mode": state.sources.mode().as_str()
         }),
     };
     Ok(result)

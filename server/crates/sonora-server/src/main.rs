@@ -2,27 +2,32 @@ mod config;
 #[cfg(unix)]
 mod control;
 mod http;
+mod sources;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use axum_server::tls_rustls::RustlsConfig;
 use clap::{Parser, Subcommand};
-use config::{Config, default_config_path};
+use config::{Config, StorageMode, default_config_path};
 use http::AppState;
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use rcgen::generate_simple_self_signed;
 use sha2::{Digest, Sha256};
 use sonora_sync_core::{JobRegistry, PairingManager};
-use sonora_sync_protocol::{HybridTimestamp, Operation, PROTOCOL_VERSION, SERVICE_TYPE};
+#[cfg(test)]
+use sonora_sync_protocol::{HybridTimestamp, Operation};
+use sonora_sync_protocol::{PROTOCOL_VERSION, SERVICE_TYPE};
 use sonora_sync_store::HubStore;
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::{
-    collections::BTreeMap,
+    fs::{self, File, OpenOptions},
     net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
 };
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(version, about = "Authoritative Sonora LAN library hub")]
+#[command(version, about = "Authoritative Sonora LAN library server")]
 struct Cli {
     #[arg(long, global = true, env = "SONORA_CONFIG")]
     config: Option<PathBuf>,
@@ -38,11 +43,16 @@ enum Command {
         data_dir: Option<PathBuf>,
         #[arg(long)]
         display_name: Option<String>,
+        #[arg(long, value_enum, default_value = "managed")]
+        mode: StorageMode,
     },
-    Import {
-        path: PathBuf,
-        #[arg(long, default_value = "managed")]
-        mode: String,
+    Folders {
+        #[command(subcommand)]
+        command: FolderCommand,
+    },
+    Pairing {
+        #[command(subcommand)]
+        command: PairingCommand,
     },
     Pair,
     Approve {
@@ -56,6 +66,37 @@ enum Command {
     Verify,
     Purge {
         hash: String,
+    },
+    Migrate {
+        #[arg(long)]
+        to: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum FolderCommand {
+    Add {
+        path: PathBuf,
+    },
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    Scan {
+        source_id: Option<uuid::Uuid>,
+        #[arg(long)]
+        all: bool,
+    },
+    Remove {
+        source_id: uuid::Uuid,
+    },
+}
+
+#[derive(Subcommand)]
+enum PairingCommand {
+    Requests {
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -73,9 +114,11 @@ async fn main() -> Result<()> {
         Command::Init {
             data_dir,
             display_name,
-        } => init(&config_path, data_dir, display_name),
+            mode,
+        } => init(&config_path, data_dir, display_name, mode),
         Command::Serve => serve(Config::load(&config_path)?).await,
-        Command::Import { path, mode } => import(&config_path, path, mode),
+        Command::Folders { command } => folders(&config_path, command).await,
+        Command::Pairing { command } => pairing(&config_path, command).await,
         Command::Pair => open_pairing(&config_path).await,
         Command::Approve { request_id } => approve_pairing(&config_path, request_id).await,
         Command::Devices => list_devices(&config_path).await,
@@ -83,10 +126,16 @@ async fn main() -> Result<()> {
         Command::Status => status(&config_path),
         Command::Verify => verify(&config_path),
         Command::Purge { hash } => purge(&config_path, &hash),
+        Command::Migrate { to } => migrate_instance(&config_path, &to),
     }
 }
 
-fn init(path: &Path, data_dir: Option<PathBuf>, display_name: Option<String>) -> Result<()> {
+fn init(
+    path: &Path,
+    data_dir: Option<PathBuf>,
+    display_name: Option<String>,
+    mode: StorageMode,
+) -> Result<()> {
     if path.exists() {
         bail!("configuration already exists at {}", path.display());
     }
@@ -100,6 +149,7 @@ fn init(path: &Path, data_dir: Option<PathBuf>, display_name: Option<String>) ->
     if let Some(name) = display_name {
         config.display_name = name;
     }
+    config.storage_mode = mode;
     std::fs::create_dir_all(&config.data_dir)?;
     ensure_certificate(&config)?;
     HubStore::open(&config.data_dir)?;
@@ -110,19 +160,25 @@ fn init(path: &Path, data_dir: Option<PathBuf>, display_name: Option<String>) ->
 }
 
 async fn serve(config: Config) -> Result<()> {
+    let _instance_lock = lock_instance(&config.data_dir)?;
     ensure_certificate(&config)?;
     let fingerprint = certificate_fingerprint(&config.tls_cert)?;
     let store = HubStore::open(&config.data_dir)?;
+    let sources = sources::SourceManager::start(
+        store.clone(),
+        config.hub_id,
+        config.storage_mode,
+        config.source_rescan_seconds,
+    )?;
     let pairing = PairingManager::new(fingerprint.clone());
     let state = AppState {
         hub_id: config.hub_id,
         display_name: config.display_name.clone(),
-        #[cfg(unix)]
-        data_dir: config.data_dir.clone(),
         admin_token: config.admin_token.clone(),
         pairing,
         jobs: JobRegistry::default(),
         store,
+        sources,
     };
     #[cfg(unix)]
     let _control =
@@ -136,12 +192,155 @@ async fn serve(config: Config) -> Result<()> {
         address = %config.bind,
         hub_id = %config.hub_id,
         fingerprint,
-        "Sonora hub listening"
+        "Sonora server listening"
     );
     let tls = RustlsConfig::from_pem_file(&config.tls_cert, &config.tls_key).await?;
     axum_server::bind_rustls(config.bind, tls)
         .serve(http::router(state).into_make_service())
         .await?;
+    Ok(())
+}
+
+fn lock_instance(data_dir: &Path) -> Result<File> {
+    fs::create_dir_all(data_dir)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(data_dir.join("instance.lock"))?;
+    fs2::FileExt::try_lock_exclusive(&file).with_context(|| {
+        format!(
+            "Sonora instance at {} is already running",
+            data_dir.display()
+        )
+    })?;
+    Ok(file)
+}
+
+fn migrate_instance(config_path: &Path, destination: &Path) -> Result<()> {
+    let mut config = Config::load(config_path)?;
+    let source = config.data_dir.canonicalize()?;
+    let destination = destination.to_path_buf();
+    if destination.exists() {
+        bail!(
+            "destination must not already exist: {}",
+            destination.display()
+        );
+    }
+    let parent = destination
+        .parent()
+        .context("migration destination must have a parent directory")?;
+    fs::create_dir_all(parent)?;
+    let parent = parent.canonicalize()?;
+    let destination = parent.join(
+        destination
+            .file_name()
+            .context("migration destination needs a directory name")?,
+    );
+    if destination.starts_with(&source) || source.starts_with(&destination) {
+        bail!("migration destination must not contain the current Library Data or be inside it");
+    }
+    let _lock = lock_instance(&source)?;
+    {
+        let store = HubStore::open(&source)?;
+        store.checkpoint()?;
+        let (_, failures) = store.verify_all()?;
+        if !failures.is_empty() {
+            bail!(
+                "current Library Data contains corrupt blobs: {}",
+                failures.join(", ")
+            );
+        }
+    }
+    let required = directory_size(&source)?;
+    let free = fs2::available_space(&parent)?;
+    if required > free {
+        bail!("migration needs {required} bytes but only {free} bytes are free");
+    }
+    let stage = parent.join(format!(".sonora-migrate-{}", uuid::Uuid::new_v4().simple()));
+    copy_directory(&source, &stage)?;
+    {
+        let copied = HubStore::open(&stage)?;
+        let (_, failures) = copied.verify_all()?;
+        if !failures.is_empty() {
+            let _ = fs::remove_dir_all(&stage);
+            bail!(
+                "copied Library Data failed verification: {}",
+                failures.join(", ")
+            );
+        }
+        copied.checkpoint()?;
+    }
+    fs::rename(&stage, &destination)?;
+    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+    let backup = source.with_file_name(format!(
+        "{}.backup-{stamp}",
+        source
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("Sonora")
+    ));
+    fs::rename(&source, &backup)?;
+
+    let relocate = |path: &Path| {
+        path.strip_prefix(&source)
+            .map(|relative| destination.join(relative))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    config.data_dir = destination.clone();
+    config.tls_cert = relocate(&config.tls_cert);
+    config.tls_key = relocate(&config.tls_key);
+    config.control_socket = relocate(&config.control_socket);
+    let new_config_path = config_path
+        .strip_prefix(&source)
+        .map(|relative| destination.join(relative))
+        .unwrap_or_else(|_| config_path.to_path_buf());
+    if let Err(error) = config.save(&new_config_path) {
+        let _ = fs::rename(&backup, &source);
+        return Err(error);
+    }
+    println!("Migrated Library Data to {}", destination.display());
+    println!("Configuration: {}", new_config_path.display());
+    println!("Recoverable backup: {}", backup.display());
+    Ok(())
+}
+
+fn directory_size(root: &Path) -> Result<u64> {
+    walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .try_fold(0_u64, |total, entry| {
+            let entry = entry?;
+            Ok(total.saturating_add(entry.metadata().map(|metadata| {
+                if metadata.is_file() {
+                    metadata.len()
+                } else {
+                    0
+                }
+            })?))
+        })
+}
+
+fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir_all(destination)?;
+    for entry in walkdir::WalkDir::new(source).follow_links(false) {
+        let entry = entry?;
+        let relative = entry.path().strip_prefix(source)?;
+        if relative == Path::new("control.sock")
+            || relative == Path::new("instance.lock")
+            || relative == Path::new("hub.sqlite3-wal")
+            || relative == Path::new("hub.sqlite3-shm")
+        {
+            continue;
+        }
+        let target = destination.join(relative);
+        if entry.file_type().is_dir() {
+            fs::create_dir_all(&target)?;
+        } else if entry.file_type().is_file() {
+            fs::copy(entry.path(), &target)?;
+        }
+    }
     Ok(())
 }
 
@@ -223,10 +422,16 @@ fn service_info(config: &Config, pairing_available: bool) -> Result<ServiceInfo>
 fn status(path: &Path) -> Result<()> {
     let config = Config::load(path)?;
     let store = HubStore::open(&config.data_dir)?;
-    println!("Hub: {} ({})", config.display_name, config.hub_id);
+    println!("Sonora: {} ({})", config.display_name, config.hub_id);
     println!("Data: {}", config.data_dir.display());
+    println!("Storage: {}", config.storage_mode.as_str());
     println!("Bind: {}", config.bind);
     println!("Sequence: {}", store.latest_sequence()?);
+    let folders = store.source_folders()?;
+    println!(
+        "Imported folders: {}",
+        folders.iter().filter(|folder| folder.watching).count()
+    );
     println!(
         "TLS fingerprint: {}",
         certificate_fingerprint(&config.tls_cert)?
@@ -262,14 +467,17 @@ fn purge(path: &Path, hash: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn import(path: &Path, source: PathBuf, mode: String) -> Result<()> {
     let config = Config::load(path)?;
     let store = HubStore::open(&config.data_dir)?;
     let imported = import_into_store(&store, config.hub_id, &config.data_dir, &source, &mode)?;
-    println!("Imported {imported} tracks in {mode} mode");
+    println!("Imported {imported} songs in {mode} mode");
     Ok(())
 }
 
+#[cfg(test)]
 fn import_into_store(
     store: &HubStore,
     hub_id: uuid::Uuid,
@@ -362,6 +570,7 @@ fn import_into_store(
     Ok(imported)
 }
 
+#[cfg(test)]
 fn media_files(source: &Path) -> Result<Vec<PathBuf>> {
     const EXTENSIONS: &[&str] = &[
         "aac", "aif", "aiff", "alac", "ape", "dsf", "dff", "flac", "m4a", "mp3", "ogg", "opus",
@@ -388,6 +597,101 @@ fn media_files(source: &Path) -> Result<Vec<PathBuf>> {
     }
     files.sort();
     Ok(files)
+}
+
+async fn folders(path: &Path, command: FolderCommand) -> Result<()> {
+    let config = Config::load(path)?;
+    let client = admin_client()?;
+    match command {
+        FolderCommand::Add { path } => {
+            let value = client
+                .post(format!("{}/v1/admin/folders", local_url(&config)))
+                .bearer_auth(&config.admin_token)
+                .json(&serde_json::json!({"path": path}))
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<serde_json::Value>()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        FolderCommand::List { json } => {
+            let value = client
+                .get(format!("{}/v1/admin/folders", local_url(&config)))
+                .bearer_auth(&config.admin_token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<serde_json::Value>()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                let folders = value.as_array().cloned().unwrap_or_default();
+                if folders.is_empty() {
+                    println!("No imported folders");
+                }
+                for folder in folders {
+                    println!(
+                        "{}  {}  {} songs, {} missing  {}",
+                        folder["source_id"].as_str().unwrap_or("?"),
+                        folder["path"].as_str().unwrap_or("?"),
+                        folder["song_count"].as_u64().unwrap_or(0),
+                        folder["missing_count"].as_u64().unwrap_or(0),
+                        if folder["watching"].as_bool().unwrap_or(false) {
+                            "watching"
+                        } else {
+                            "detached"
+                        }
+                    );
+                }
+            }
+        }
+        FolderCommand::Scan { source_id, all } => {
+            if !all && source_id.is_none() {
+                bail!("provide a folder ID or --all");
+            }
+            let value = client
+                .post(format!("{}/v1/admin/folders/scan", local_url(&config)))
+                .bearer_auth(&config.admin_token)
+                .json(&serde_json::json!({"source_id": if all { None } else { source_id }}))
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<serde_json::Value>()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        FolderCommand::Remove { source_id } => {
+            client
+                .post(format!("{}/v1/admin/folders/remove", local_url(&config)))
+                .bearer_auth(&config.admin_token)
+                .json(&serde_json::json!({"source_id": source_id}))
+                .send()
+                .await?
+                .error_for_status()?;
+            println!("Stopped watching {source_id}; imported songs were kept");
+        }
+    }
+    Ok(())
+}
+
+async fn pairing(path: &Path, command: PairingCommand) -> Result<()> {
+    let config = Config::load(path)?;
+    match command {
+        PairingCommand::Requests { json: _ } => {
+            let response = admin_client()?
+                .get(format!("{}/v1/pairing/requests", local_url(&config)))
+                .bearer_auth(&config.admin_token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<serde_json::Value>()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+    }
+    Ok(())
 }
 
 async fn open_pairing(path: &Path) -> Result<()> {
