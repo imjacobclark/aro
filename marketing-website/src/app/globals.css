@@ -168,6 +168,31 @@ button:focus-visible {
   line-height: 1.72;
 }
 
+.hero-hosts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0;
+  margin-top: 1.6rem;
+  border-block: 1px solid rgba(18, 23, 51, 0.18);
+}
+
+.hero-hosts span {
+  padding: 0.7rem 1.15rem 0.7rem 0;
+  margin-right: 1.15rem;
+  font-size: 0.66rem;
+  font-weight: 740;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.hero-hosts span:not(:last-child)::after {
+  padding-left: 1.15rem;
+  color: var(--coral);
+  content: "●";
+  font-size: 0.45rem;
+  vertical-align: 0.12rem;
+}
+
 .hero-actions {
   display: flex;
   flex-wrap: wrap;
@@ -374,42 +399,99 @@ button:focus-visible {
   font-weight: 720;
 }
 
-.orbit-pair {
-  position: relative;
+.signal-path {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: clamp(0.75rem, 2vw, 1.5rem);
+  align-items: center;
   align-self: center;
-  height: 65%;
 }
 
-.orbit-pair::before,
-.orbit-pair::after {
-  position: absolute;
-  width: 58%;
-  aspect-ratio: 1;
-  top: 13%;
-  border: 2px solid currentColor;
-  border-radius: 50%;
-  content: "";
-}
-
-.orbit-pair::before {
-  left: 0;
-}
-
-.orbit-pair::after {
-  right: 0;
-  border-color: var(--coral);
-}
-
-.orbit-pair span {
-  position: absolute;
-  z-index: 2;
-  inset: 0;
+.signal-path span {
+  min-height: 7rem;
   display: grid;
   place-items: center;
-  font-size: 0.74rem;
+  padding: 1rem;
+  border: 1px solid currentColor;
+  font-size: clamp(0.78rem, 1.4vw, 1rem);
   font-weight: 760;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.08em;
+  text-align: center;
   text-transform: uppercase;
+}
+
+.signal-path b {
+  color: var(--amber);
+  font-size: clamp(1.6rem, 4vw, 2.5rem);
+  font-weight: 500;
+}
+
+.host-map {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.1rem;
+  align-self: center;
+}
+
+.host-map::before {
+  position: absolute;
+  inset: 28% 16% 23%;
+  border: 1px solid currentColor;
+  border-top: 0;
+  content: "";
+  opacity: 0.55;
+}
+
+.host-map span {
+  position: relative;
+  z-index: 1;
+  min-height: 4.5rem;
+  display: grid;
+  place-items: center;
+  border: 1px solid currentColor;
+  background: var(--paper-bright);
+  font-size: 0.7rem;
+  font-weight: 760;
+  letter-spacing: 0.1em;
+}
+
+.host-map .host-core {
+  grid-column: 1 / -1;
+  width: 42%;
+  justify-self: center;
+  color: white;
+  background: var(--ink);
+}
+
+.copy-stack {
+  display: grid;
+  align-self: center;
+}
+
+.copy-stack span {
+  display: flex;
+  justify-content: space-between;
+  padding: 1.15rem 1.25rem;
+  border: 1px solid currentColor;
+  background: color-mix(in srgb, var(--paper-bright) 88%, transparent);
+  font-size: clamp(0.9rem, 1.6vw, 1.15rem);
+  font-weight: 760;
+}
+
+.copy-stack span:nth-child(2) {
+  margin: -1px 6% 0;
+}
+
+.copy-stack span:nth-child(3) {
+  margin: -1px 12% 0;
+}
+
+.copy-stack small,
+.format-stack small {
+  align-self: center;
+  font-size: 0.54rem;
+  letter-spacing: 0.12em;
 }
 
 .folder-tree {

@@ -15,7 +15,7 @@ export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: "Sonora — Your music. Fully yours.",
   description:
-    "A private home for the music you own, with uncompromised playback and effortless access around your home.",
+    "Own, host, and preserve your music library across the Sonoras you choose, with uncompromised playback and no Sonora cloud account.",
   alternates: {
     canonical: siteUrl,
   },
@@ -28,7 +28,7 @@ export const metadata: Metadata = {
     url: siteUrl,
     title: "Sonora — Your music. Fully yours.",
     description:
-      "A native Mac music library for people who care about ownership, sound, and their collection.",
+      "Host your music almost anywhere, connect securely from anywhere it is reachable, and keep complete independent copies on the Sonoras you choose.",
     siteName: "Sonora",
     images: [
       {
@@ -43,7 +43,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "Sonora — Your music. Fully yours.",
     description:
-      "A private home for the music you own, with uncompromised playback.",
+      "Host, hear, and preserve the music you own across every Sonora you choose.",
     images: [`${siteUrl}og.png`],
   },
 };

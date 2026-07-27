@@ -51,13 +51,41 @@ const stories = [
     visual: "formats",
   },
   {
-    id: "sound",
+    id: "everywhere",
     number: "02",
+    eyebrow: "Host anywhere",
+    title: "Your Sonora lives where you choose.",
+    copy: "Run it inside the macOS app or headless on an always-on Linux computer, server, container, or compatible NAS. Nearby Sonoras find it automatically; farther away, connect directly to any secure address you make reachable.",
+    points: [
+      "Works across local, private, and public networks",
+      "No Sonora cloud account or relay in the middle",
+      "Approve, limit, or remove every connected device",
+    ],
+    tone: "coral",
+    visual: "host",
+  },
+  {
+    id: "durability",
+    number: "03",
+    eyebrow: "Durability",
+    title: "Every Sonora makes the library stronger.",
+    copy: "Connected Sonoras keep a synchronized library of their own, not a disposable view into one machine. Keep selected music—or every available song—on each Mac you choose, creating independent, verified copies across your devices.",
+    points: [
+      "The full library can remain playable if the host is unavailable",
+      "Every copied song is complete and checked against the original",
+      "Interrupted copies continue instead of starting over",
+    ],
+    tone: "amber",
+    visual: "copies",
+  },
+  {
+    id: "sound",
+    number: "04",
     eyebrow: "Listening",
     title: "Hear the recording, not the player.",
     copy: "Bit-perfect playback is the starting point. Sonora matches native sample rates, can take exclusive control of wired equipment, and shows the whole signal path when you want to look closer.",
     points: [
-      "Native sample-rate matching up to 192 kHz",
+      "The file’s original sample rate follows it to your audio device",
       "Gapless albums and optional loudness matching",
       "Choose a DAC, headphones, HomePod, TV, or AirPlay speaker",
     ],
@@ -66,7 +94,7 @@ const stories = [
   },
   {
     id: "library",
-    number: "03",
+    number: "05",
     eyebrow: "Collection",
     title: "Your shelves, alive again.",
     copy: "Add a folder and Sonora turns it into a library made for browsing. Artwork, artists, albums, listening history, and library health bring order and rediscovery without turning music into a feed.",
@@ -77,34 +105,6 @@ const stories = [
     ],
     tone: "",
     visual: "library",
-  },
-  {
-    id: "home",
-    number: "04",
-    eyebrow: "Around home",
-    title: "One collection. Your devices.",
-    copy: "Share a Sonora privately around your home. A QR code or six digits connects another device, and nothing enters the library until you approve it.",
-    points: [
-      "No Sonora cloud account",
-      "Approve, limit, or remove each connected device",
-      "Keep local and connected libraries clearly separate",
-    ],
-    tone: "coral",
-    visual: "connect",
-  },
-  {
-    id: "offline",
-    number: "05",
-    eyebrow: "Offline",
-    title: "Keep the albums that matter close.",
-    copy: "Listen from a connected collection when you need it, then choose favourites, albums, or everything to keep on your Mac. Sonora handles storage without removing what is playing or queued.",
-    points: [
-      "Every download is complete and checked before playback",
-      "Interrupted transfers continue where they stopped",
-      "Automatic or personal storage limits",
-    ],
-    tone: "amber",
-    visual: "offline",
   },
   {
     id: "recovery",
@@ -139,18 +139,27 @@ function StoryVisual({ visual, number }: { visual: string; number: string }) {
   if (visual === "resolution") {
     return (
       <div className="story-visual" aria-hidden="true">
-        <span className="visual-kicker">Native output</span>
-        <div className="visual-large">24<br />192</div>
-        <div className="visual-footer"><span>bit</span><span>kHz</span><span>{number}</span></div>
+        <span className="visual-kicker">The direct path</span>
+        <div className="signal-path">
+          <span>Original file</span>
+          <b>→</b>
+          <span>Your output</span>
+        </div>
+        <div className="visual-footer"><span>No forced resampling</span><span>{number}</span></div>
       </div>
     );
   }
-  if (visual === "connect") {
+  if (visual === "host") {
     return (
       <div className="story-visual" aria-hidden="true">
-        <span className="visual-kicker">Private connection</span>
-        <div className="orbit-pair"><span>Approved devices</span></div>
-        <div className="visual-footer"><span>Home network</span><span>{number}</span></div>
+        <span className="visual-kicker">Place it anywhere</span>
+        <div className="host-map">
+          <span className="host-core">SONORA</span>
+          <span>MAC</span>
+          <span>LINUX</span>
+          <span>NAS</span>
+        </div>
+        <div className="visual-footer"><span>Any reachable network</span><span>{number}</span></div>
       </div>
     );
   }
@@ -168,12 +177,16 @@ function StoryVisual({ visual, number }: { visual: string; number: string }) {
       </div>
     );
   }
-  if (visual === "offline") {
+  if (visual === "copies") {
     return (
       <div className="story-visual" aria-hidden="true">
-        <span className="visual-kicker">Kept for you</span>
-        <div className="visual-large">100<span className="text-[0.32em] tracking-normal">%</span></div>
-        <div className="visual-footer"><span>Downloaded</span><span>Checked</span><span>{number}</span></div>
+        <span className="visual-kicker">A library that endures</span>
+        <div className="copy-stack">
+          <span>HOST <small>COMPLETE</small></span>
+          <span>MAC <small>COMPLETE</small></span>
+          <span>MAC <small>COMPLETE</small></span>
+        </div>
+        <div className="visual-footer"><span>Independent verified copies</span><span>{number}</span></div>
       </div>
     );
   }
@@ -199,7 +212,7 @@ export default function Home() {
     applicationCategory: "MultimediaApplication",
     operatingSystem: "macOS 26 or later",
     description:
-      "A private Mac music library for people who care about ownership, sound, and their collection.",
+      "A self-hosted music library for people who care about ownership, sound, and keeping their collection for good.",
     downloadUrl: release.arm64Url,
     softwareVersion: release.version.replace(/^v/, ""),
   };
@@ -211,15 +224,21 @@ export default function Home() {
         <section className="hero" aria-labelledby="hero-title">
           <div className="site-shell hero-grid">
             <Reveal className="hero-copy">
-              <p className="eyebrow">A private home for your music</p>
+              <p className="eyebrow">A lasting home for your music</p>
               <h1 id="hero-title" className="display-title balanced">
                 Your music.<br />Fully yours.
               </h1>
               <p className="hero-lede balanced">
-                Sonora brings the files you own back to life—with uncompromised
-                playback, a library worth exploring, and private access around
-                your home.
+                Sonora brings the files you own back to life. Host the library
+                wherever it belongs, connect from anywhere it is reachable,
+                and keep verified copies across every Sonora you choose.
               </p>
+              <div className="hero-hosts" aria-label="Sonora hosting options">
+                <span>macOS app</span>
+                <span>Linux</span>
+                <span>Docker / NAS</span>
+                <span>Any reachable network</span>
+              </div>
               <div className="hero-actions">
                 <a
                   href="#download"
@@ -253,7 +272,7 @@ export default function Home() {
                   priority
                 />
               </div>
-              <span className="sleeve-label">Designed for your collection</span>
+              <span className="sleeve-label">One library. As many homes as you choose.</span>
             </Reveal>
           </div>
         </section>
@@ -316,7 +335,7 @@ export default function Home() {
             <Reveal>
               <p className="eyebrow">Development preview</p>
               <h2 id="download-title" className="section-title balanced">
-                Bring your collection home.
+                Start your Sonora.
               </h2>
               <p className="download-copy balanced">
                 Sonora is available now as an early preview for macOS 26 and

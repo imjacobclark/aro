@@ -26,14 +26,17 @@ export function SiteHeader({ basePath }: { basePath: string }) {
           aria-label="Primary navigation"
           className="hidden items-center gap-7 text-[0.72rem] font-semibold md:flex"
         >
+          <a className="transition-colors hover:text-[#7359e0]" href="#everywhere">
+            Everywhere
+          </a>
+          <a className="transition-colors hover:text-[#7359e0]" href="#durability">
+            Durability
+          </a>
           <a className="transition-colors hover:text-[#7359e0]" href="#sound">
             Sound
           </a>
           <a className="transition-colors hover:text-[#7359e0]" href="#library">
             Library
-          </a>
-          <a className="transition-colors hover:text-[#7359e0]" href="#home">
-            Around home
           </a>
           <a className="transition-colors hover:text-[#7359e0]" href="#features">
             All features
