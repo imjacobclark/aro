@@ -67,15 +67,26 @@ impl SourceManager {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 let sources = event_manager.list().unwrap_or_default();
                 for source in sources {
-                    if source.watching
-                        && path.starts_with(&source.path)
-                        && let Err(error) = event_manager.scan(source.source_id)
-                    {
-                        tracing::warn!(
-                            source_id = %source.source_id,
-                            %error,
-                            "source reconciliation failed"
-                        );
+                    if source.watching && path.starts_with(&source.path) {
+                        let scanner = event_manager.clone();
+                        let source_id = source.source_id;
+                        match tokio::task::spawn_blocking(move || scanner.scan(source_id)).await {
+                            Ok(Ok(_)) => {}
+                            Ok(Err(error)) => {
+                                tracing::warn!(
+                                    source_id = %source_id,
+                                    %error,
+                                    "source reconciliation failed"
+                                );
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    source_id = %source_id,
+                                    %error,
+                                    "source reconciliation task failed"
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -86,8 +97,15 @@ impl SourceManager {
             let mut timer = tokio::time::interval(Duration::from_secs(rescan_seconds));
             loop {
                 timer.tick().await;
-                if let Err(error) = periodic.scan_all() {
-                    tracing::warn!(%error, "periodic source reconciliation failed");
+                let scanner = periodic.clone();
+                match tokio::task::spawn_blocking(move || scanner.scan_all()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "periodic source reconciliation failed");
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "periodic source reconciliation task failed");
+                    }
                 }
             }
         });
