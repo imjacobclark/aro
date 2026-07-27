@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 import UniformTypeIdentifiers
 
@@ -73,9 +74,9 @@ struct ManagedMusicImporter: Sendable {
                 )
                 try FileManager.default.copyItem(at: file, to: staged)
                 if FileManager.default.fileExists(atPath: destination.path) {
-                    _ = try FileManager.default.replaceItemAt(
+                    try Self.replaceAtomically(
                         destination,
-                        withItemAt: staged
+                        with: staged
                     )
                 } else {
                     try FileManager.default.moveItem(
@@ -111,6 +112,27 @@ struct ManagedMusicImporter: Sendable {
             }
         }
         return hashes
+    }
+
+    private static func replaceAtomically(
+        _ destination: URL,
+        with staged: URL
+    ) throws {
+        let result = staged.path.withCString { sourcePath in
+            destination.path.withCString { destinationPath in
+                Darwin.rename(sourcePath, destinationPath)
+            }
+        }
+        guard result == 0 else {
+            let code = errno
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(code),
+                userInfo: [
+                    NSFilePathErrorKey: destination.path,
+                ]
+            )
+        }
     }
 
     private static func sha256(_ url: URL) throws -> String {
