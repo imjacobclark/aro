@@ -7,6 +7,27 @@ on:
   pull_request:
 
 jobs:
+  marketing-website:
+    name: Marketing website
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: marketing-website/package-lock.json
+      - run: npm ci
+        working-directory: marketing-website
+      - run: npm run check:content
+        working-directory: marketing-website
+      - run: npm run lint
+        working-directory: marketing-website
+      - run: npm run build
+        working-directory: marketing-website
+        env:
+          NEXT_PUBLIC_BASE_PATH: /sonora
+
   rust:
     strategy:
       matrix:
