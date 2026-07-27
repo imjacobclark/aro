@@ -1,3 +1,4 @@
+mod audio_metadata;
 mod config;
 #[cfg(unix)]
 mod control;
@@ -544,23 +545,17 @@ fn import_into_store(
             entity_type: "track".into(),
             entity_id: track_id.to_string(),
             kind: "upsert".into(),
-            payload: serde_json::json!({
-                "content_hash": hash,
-                "byte_count": size,
-                "title": file.file_stem().and_then(|value| value.to_str()).unwrap_or("Unknown"),
-                "original_filename": file.file_name().and_then(|value| value.to_str()).unwrap_or("Unknown"),
-                "original_extension": file.extension().and_then(|value| value.to_str()).unwrap_or("audio"),
-                "source_id": source_id
-            }),
-            field_versions: BTreeMap::from([
-                ("content_hash".into(), timestamp.clone()),
-                ("byte_count".into(), timestamp.clone()),
-                ("title".into(), timestamp.clone()),
-                ("original_filename".into(), timestamp.clone()),
-                ("original_extension".into(), timestamp.clone()),
-                ("source_id".into(), timestamp),
-            ]),
+            payload: audio_metadata::song_payload(&file, &hash, size, source_id),
+            field_versions: BTreeMap::new(),
         });
+        let operation = operations.last_mut().expect("operation was just added");
+        operation.field_versions = operation
+            .payload
+            .as_object()
+            .expect("song payload is an object")
+            .keys()
+            .map(|field| (field.clone(), timestamp.clone()))
+            .collect();
     }
     let imported = store.append_operations(&operations)?.len();
     store.set_setting(

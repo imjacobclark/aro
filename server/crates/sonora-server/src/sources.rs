@@ -223,6 +223,29 @@ impl SourceManager {
                 .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
                 .map(|value| value.as_millis() as i64)
                 .unwrap_or_default();
+            let prior = existing.get(&relative);
+            if let Some(prior) = prior
+                && prior.size == before.len()
+                && prior.modified_millis == modified
+                && prior.available
+            {
+                if !self
+                    .inner
+                    .store
+                    .track_metadata_has_field(prior.track_id, "sample_rate")?
+                {
+                    self.append_song_operation(
+                        prior.track_id,
+                        source_id,
+                        &file,
+                        &prior.content_hash,
+                        prior.size,
+                        changed as u32,
+                    )?;
+                    changed += 1;
+                }
+                continue;
+            }
             let (hash, size) = match self.inner.mode {
                 StorageMode::Managed => self.inner.store.import_managed(&file)?,
                 StorageMode::Referenced => self.inner.store.import_referenced(&file)?,
@@ -232,12 +255,17 @@ impl SourceManager {
                 tracing::info!(path = %file.display(), "file changed while importing; retrying later");
                 continue;
             }
-            let prior = existing.get(&relative);
             let track_id = prior
                 .map(|value| value.track_id)
                 .or(self.inner.store.track_id_for_hash(&hash)?)
                 .unwrap_or_else(Uuid::new_v4);
-            if prior.is_none_or(|value| value.content_hash != hash || !value.available) {
+            let needs_metadata = !self
+                .inner
+                .store
+                .track_metadata_has_field(track_id, "sample_rate")?;
+            if prior.is_none_or(|value| value.content_hash != hash || !value.available)
+                || needs_metadata
+            {
                 self.append_song_operation(
                     track_id,
                     source_id,
@@ -272,14 +300,7 @@ impl SourceManager {
             logical,
             device_id: self.inner.hub_id,
         };
-        let payload = serde_json::json!({
-            "content_hash": hash,
-            "byte_count": size,
-            "title": file.file_stem().and_then(|value| value.to_str()).unwrap_or("Unknown"),
-            "original_filename": file.file_name().and_then(|value| value.to_str()).unwrap_or("Unknown"),
-            "original_extension": file.extension().and_then(|value| value.to_str()).unwrap_or("audio"),
-            "source_id": source_id
-        });
+        let payload = crate::audio_metadata::song_payload(file, hash, size, source_id);
         let field_versions = payload
             .as_object()
             .expect("song payload is an object")

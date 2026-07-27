@@ -21,6 +21,7 @@ hex.workspace = true
 fs2.workspace = true
 http.workspace = true
 mdns-sd.workspace = true
+lofty.workspace = true
 notify.workspace = true
 parking_lot.workspace = true
 rcgen.workspace = true

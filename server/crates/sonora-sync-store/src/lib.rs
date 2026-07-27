@@ -37,6 +37,8 @@ pub struct SourceFile {
     pub relative_path: String,
     pub track_id: Uuid,
     pub content_hash: String,
+    pub size: u64,
+    pub modified_millis: i64,
     pub available: bool,
 }
 
@@ -172,6 +174,25 @@ impl HubStore {
         Ok(statement
             .query_map([], |row| row.get(0))?
             .collect::<Result<_, _>>()?)
+    }
+
+    pub fn track_metadata_has_field(
+        &self,
+        track_id: Uuid,
+        field: &str,
+    ) -> Result<bool, StoreError> {
+        let metadata: Option<String> = self
+            .connection
+            .lock()
+            .query_row(
+                "SELECT metadata FROM tracks WHERE hub_track_id = ?1",
+                [track_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(metadata
+            .and_then(|value| serde_json::from_str::<serde_json::Map<String, Value>>(&value).ok())
+            .is_some_and(|values| values.get(field).is_some_and(|value| !value.is_null())))
     }
 
     pub fn snapshot_tracks(
@@ -942,7 +963,8 @@ impl HubStore {
         let connection = self.connection.lock();
         let mut statement = connection.prepare(
             r#"
-            SELECT relative_path, hub_track_id, content_hash, available
+            SELECT relative_path, hub_track_id, content_hash, size,
+                   modified_millis, available
             FROM source_files WHERE source_id = ?1
             ORDER BY relative_path
             "#,
@@ -954,7 +976,9 @@ impl HubStore {
                     relative_path: row.get(0)?,
                     track_id: Uuid::parse_str(&track).unwrap_or_default(),
                     content_hash: row.get(2)?,
-                    available: row.get(3)?,
+                    size: row.get(3)?,
+                    modified_millis: row.get(4)?,
+                    available: row.get(5)?,
                 })
             })?
             .collect::<Result<_, _>>()?)
