@@ -207,15 +207,22 @@ final class DevicesRedesignTests: XCTestCase {
             into: library
         )
         XCTAssertEqual(edited.importedFiles, 1)
+        let filesAfterEdit = try FileManager.default.contentsOfDirectory(
+            at: library,
+            includingPropertiesForKeys: nil
+        )
+        XCTAssertEqual(
+            filesAfterEdit.map(\.lastPathComponent).sorted(),
+            ["Track.mp3"]
+        )
         XCTAssertEqual(
             try Data(contentsOf: library.appendingPathComponent("Track.mp3")),
             Data("replaced audio".utf8)
         )
         XCTAssertEqual(
-            try FileManager.default.contentsOfDirectory(
-                at: library,
-                includingPropertiesForKeys: nil
-            ).filter { !$0.lastPathComponent.hasPrefix(".") }.count,
+            filesAfterEdit.filter {
+                !$0.lastPathComponent.hasPrefix(".")
+            }.count,
             1
         )
     }
