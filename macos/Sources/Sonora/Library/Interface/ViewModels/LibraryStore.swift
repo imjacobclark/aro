@@ -392,12 +392,20 @@ final class LibraryStore {
             StoredWatchedFolder(
                 id: $0.id,
                 displayName: $0.displayName,
-                path: $0.url.path,
+                path: persistedLocation(for: $0.url),
                 bookmarkData: $0.bookmarkData
             )
         }
 
         legacyFolders.save(records)
+    }
+
+    private func persistedLocation(for url: URL) -> String {
+        if let scheme = url.scheme?.lowercased(),
+           scheme == "http" || scheme == "https" {
+            return url.absoluteString
+        }
+        return url.path
     }
 
     private func updateAccessibility(for id: UUID, isAccessible: Bool) {

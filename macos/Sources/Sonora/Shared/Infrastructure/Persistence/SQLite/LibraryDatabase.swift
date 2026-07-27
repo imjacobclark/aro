@@ -144,11 +144,23 @@ final class LibraryDatabase: @unchecked Sendable {
             defer { sqlite3_finalize(statement) }
             bind(folder.id.uuidString, to: statement, at: 1)
             bind(folder.displayName, to: statement, at: 2)
-            bind(folder.url.standardizedFileURL.path, to: statement, at: 3)
+            bind(
+                Self.persistedLocation(for: folder.url),
+                to: statement,
+                at: 3
+            )
             bind(folder.bookmarkData, to: statement, at: 4)
             sqlite3_bind_double(statement, 5, Date().timeIntervalSince1970)
             _ = sqlite3_step(statement)
         }
+    }
+
+    private static func persistedLocation(for url: URL) -> String {
+        if let scheme = url.scheme?.lowercased(),
+           scheme == "http" || scheme == "https" {
+            return url.absoluteString
+        }
+        return url.standardizedFileURL.path
     }
 
     func removeFolder(id: UUID) {

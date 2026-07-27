@@ -170,6 +170,81 @@ final class DevicesRedesignTests: XCTestCase {
             "https://sonora-test.local:4848/v1/blobs/"
                 + String(repeating: "b", count: 64)
         )
+        XCTAssertEqual(
+            database.watchedFolders().first?.path,
+            "https://sonora-test.local:4848"
+        )
+    }
+
+    func testRemoteLibraryFolderRepairsLegacyRootPath() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = LibraryDatabase(
+            url: directory.appendingPathComponent("Library.sqlite3")
+        )
+        let hubID = UUID()
+        let hub = SonoraHubInfo(
+            hubID: hubID,
+            displayName: "Mercury",
+            protocolMin: 2,
+            protocolMax: 4,
+            pairingAvailable: false
+        )
+        let baseURL = URL(string: "https://mercury.local:4848")!
+        let store = SQLiteSyncOperationStore(database: database)
+        store.upsertMembership(
+            hub: hub,
+            baseURL: baseURL,
+            tlsFingerprint: String(repeating: "a", count: 64),
+            replicaMode: .onDemand
+        )
+        let contentHash = String(repeating: "b", count: 64)
+        _ = try store.applyRemote(
+            SequencedSyncOperation(
+                sequence: 1,
+                operationID: UUID(),
+                deviceID: UUID(),
+                entityType: "track",
+                entityID: UUID().uuidString,
+                kind: "upsert",
+                payload: .object([
+                    "title": .string("A Song"),
+                    "artist": .string("An Artist"),
+                    "content_hash": .string(contentHash),
+                    "byte_count": .number(42),
+                ]),
+                fieldVersions: [:]
+            ),
+            hubID: hubID
+        )
+        XCTAssertEqual(database.songs(folderID: hubID).count, 1)
+
+        database.save(
+            folder: WatchedFolder(
+                id: hubID,
+                url: URL(fileURLWithPath: "/"),
+                displayName: "Mercury",
+                bookmarkData: nil,
+                isAccessible: true,
+                didStartSecurityScope: false
+            )
+        )
+        database.markFolderUnavailable(id: hubID)
+        XCTAssertEqual(database.watchedFolders().first?.path, "/")
+        XCTAssertTrue(database.songs(folderID: hubID).isEmpty)
+
+        _ = SQLiteSyncOperationStore(database: database)
+
+        XCTAssertEqual(
+            database.watchedFolders().first?.path,
+            baseURL.absoluteString
+        )
+        XCTAssertEqual(database.songs(folderID: hubID).count, 1)
     }
 
     func testManagedImportCopiesAudioAndDeduplicatesByContent() async throws {

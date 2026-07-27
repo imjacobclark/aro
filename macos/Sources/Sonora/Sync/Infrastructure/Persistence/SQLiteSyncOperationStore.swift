@@ -90,6 +90,54 @@ struct SQLiteSyncOperationStore {
 
     init(database: LibraryDatabase) {
         self.database = database
+        repairRemoteLibraryFolders()
+    }
+
+    /// Older clients accidentally converted remote library URLs into `/` when
+    /// saving their synthetic watched-folder row. Repair those rows before the
+    /// library store restores them, otherwise it scans the Mac's filesystem
+    /// root instead of displaying the already-synchronized remote catalogue.
+    private func repairRemoteLibraryFolders() {
+        database.withConnection { connection in
+            _ = sqlite3_exec(
+                connection,
+                """
+                UPDATE watched_folders
+                SET path = (
+                    SELECT base_url
+                    FROM hub_memberships
+                    WHERE hub_memberships.hub_id = watched_folders.id
+                )
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM hub_memberships
+                    WHERE hub_memberships.hub_id = watched_folders.id
+                      AND watched_folders.path != hub_memberships.base_url
+                )
+                """,
+                nil,
+                nil,
+                nil
+            )
+            _ = sqlite3_exec(
+                connection,
+                """
+                UPDATE file_locations
+                SET available = 1,
+                    updated_at = strftime('%s', 'now')
+                WHERE folder_id IN (
+                    SELECT hub_id FROM hub_memberships
+                )
+                  AND (
+                    path LIKE 'https://%'
+                    OR path LIKE 'http://%'
+                  )
+                """,
+                nil,
+                nil,
+                nil
+            )
+        }
     }
 
     func pending(limit: Int = 200) -> [PendingSyncOperation] {
