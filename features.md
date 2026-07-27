@@ -1,0 +1,39 @@
+# Sonora Features
+
+- **Your Music Stays Yours** — Build a lasting library from the music files you own, without depending on a subscription catalogue or cloud account.
+- **Originals Stay Original** — Sonora preserves the exact files you add without recompressing, retagging, renaming, or changing their format.
+- **Bit-Perfect by Default** — Hear songs at unity gain with no added processing, so capable audio equipment receives the music as it was mastered.
+- **Native-Rate Playback** — Sonora automatically matches each song’s original sample rate, including high-resolution 96 kHz and 192 kHz recordings.
+- **Exclusive Listening Mode** — Give Sonora sole control of a wired audio device when you want the cleanest direct path to your headphones, speakers, or hi-fi.
+- **Consistent Volume, Your Choice** — Switch to carefully measured loudness matching when you want a varied listening queue to stay comfortable without riding the volume control.
+- **Albums Flow Without Gaps** — Consecutive songs with compatible formats play continuously, preserving live recordings, classical works, and mix albums as intended.
+- **Your Output, Your Choice** — Send music to the Mac, a connected DAC, headphones, HomePod, TV, or AirPlay speaker from a clear native control.
+- **See the Signal Path** — Check the source quality, processing choice, output mode, and hardware format while a song plays, with honest warnings when the route changes fidelity.
+- **Plays the Collection You Have** — Enjoy FLAC, ALAC, AAC, MP3, WAV, AIFF, and OGG Vorbis libraries together in one player.
+- **Add a Folder and Listen** — Point Sonora at a music folder and it discovers playable songs throughout every subfolder, complete with embedded metadata and artwork.
+- **Always in Step** — Watched folders refresh automatically as music is added, edited, moved, or removed, keeping the library aligned with the files you manage.
+- **Browse Music as Music** — Move naturally between Songs, Artists, and Albums, with artwork, song order, duration, and the shape of your collection kept front and centre.
+- **Find Artists and Albums Fast** — Search the collection by name without giving up the album-focused browsing experience.
+- **A Queue That Follows You** — Start from the songs in front of you, then pause, seek, skip, adjust volume, and move through that listening context from the player bar.
+- **Store It Your Way** — Keep a protected Sonora-managed copy of the collection, or link music in place when you prefer to use existing storage without duplication.
+- **Safe Library Housekeeping** — Stop watching a folder or remove a song from Sonora without deleting the original music from disk.
+- **A Health Check for Music** — Find byte-for-byte duplicates, likely alternate encodings, moved songs, and missing files before collection clutter becomes a mystery.
+- **See Space You Could Reclaim** — Sonora totals the storage occupied by exact duplicates while leaving every clean-up decision to you.
+- **Your Listening Story** — Follow total listening time, recent plays, a 30-day listening chart, listening streaks, and the songs and artists you return to most.
+- **Know Your Collection** — See song, album, and artist totals alongside playing time, storage size, formats, favourite genres, and the decades represented in your library.
+- **One Library Around Home** — Share a personal collection with another Sonora device on the same home network and browse it there as a familiar local library.
+- **Pair in Seconds** — Connect another device with a QR code or a six-digit code, then approve the named device before it can enter the library.
+- **Private by Design** — Your shared collection stays between approved devices on your home network, with no Sonora cloud account required.
+- **You Control Every Device** — See connected devices, decide which ones may contribute music, remove access at any time, and reject anything you do not recognize.
+- **Listen Now or Keep Offline** — Play connected songs as needed, or keep favourites, selected albums, or the entire library downloaded on a Mac.
+- **Offline Music That Protects Itself** — Sonora never automatically removes the song playing now, the songs waiting in the queue, or music you chose to keep.
+- **Storage Without the Guesswork** — Let Sonora choose an offline storage allowance or set your own limit, with clear usage and download progress.
+- **Every Download Checked** — Connected music is fully downloaded and checked against the original before playback, so an incomplete or damaged file never reaches the player.
+- **Interrupted Downloads Recover** — If a connection drops, Sonora continues partial music downloads and whole-library exports instead of starting over.
+- **No Wasteful Duplicates** — Identical songs are recognized by their actual contents, allowing connected libraries to share one dependable copy instead of multiplying storage.
+- **Switch Libraries in One App** — Keep local and connected libraries separate, then move between them without mixing their songs, settings, or downloaded music.
+- **Sharing Outlives the Window** — Once enabled, the Background Service can keep the library available after the Sonora app closes and after the Mac signs in again.
+- **A Home for Shared Music** — Keep the always-available collection on a Mac or compatible home computer while Sonora devices handle discovery, connection, and listening.
+- **Take the Whole Library Back** — Export every active and recoverable recently removed song into tidy Artist and Album folders, preserving original formats and including a library manifest.
+- **Exports Respect What Exists** — Repeat an export safely: matching songs are skipped, interrupted files continue, and unrelated files are never silently overwritten.
+- **Move Without Rebuilding** — Relocate Sonora’s Library Data from the app when storage needs change, carrying its music and records together.

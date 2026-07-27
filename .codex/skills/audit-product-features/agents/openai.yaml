@@ -1,0 +1,4 @@
+interface:
+  display_name: "Audit Product Features"
+  short_description: "Turn real Sonora capabilities into buyer-facing USPs"
+  default_prompt: "Use $audit-product-features to audit Sonora and regenerate ./features.md from verified product capabilities."
