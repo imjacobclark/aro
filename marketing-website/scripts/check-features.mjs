@@ -36,4 +36,4 @@ for (const feature of features) {
   }
 }
 
-console.log(`Validated ${features.length} Sonora product features.`);
+console.log(`Validated ${features.length} Aro product features.`);

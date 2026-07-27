@@ -23,18 +23,18 @@ endif
 	all-build all-test all-run all-app all-install
 
 help:
-	@echo "Sonora monorepo commands"
+	@echo "Aro monorepo commands"
 	@echo ""
 	@echo "  make macos build     Build the macOS app"
 	@echo "  make macos test      Test the macOS app"
 	@echo "  make macos run       Run the macOS app"
-	@echo "  make macos app       Create macos/dist/Sonora.app"
+	@echo "  make macos app       Create macos/dist/Aro.app"
 	@echo "  make macos install   Install the app in ~/Applications"
 	@echo "  make common build    Build the shared library"
 	@echo "  make common test     Test the shared library"
-	@echo "  make server build    Build the LAN sync hub"
+	@echo "  make server build    Build the library server"
 	@echo "  make server test     Test protocol, core, store, and daemon"
-	@echo "  make server run      Run the configured hub"
+	@echo "  make server run      Run the configured library server"
 	@echo "  make server package  Package standalone distribution assets"
 	@echo "  make server doctor   Report toolchain, targets, and signing tools"
 	@echo "  make all build       Build every package"
@@ -75,13 +75,13 @@ common-test:
 	swift test --package-path common
 
 common-run: common-build
-	@echo "SonoraCommon is a library; there is no standalone process to run."
+	@echo "AroCommon is a library; there is no standalone process to run."
 
 common-app: common-build
-	@echo "SonoraCommon is a library; there is no app bundle to create."
+	@echo "AroCommon is a library; there is no app bundle to create."
 
 common-install: common-build
-	@echo "SonoraCommon is a library; there is no app to install."
+	@echo "AroCommon is a library; there is no app to install."
 
 macos-build:
 	swift build --package-path macos
@@ -90,7 +90,7 @@ macos-test:
 	swift test --package-path macos
 
 macos-run:
-	swift run --package-path macos Sonora
+	swift run --package-path macos Aro
 
 macos-app:
 	./macos/scripts/build-app.sh
@@ -105,10 +105,10 @@ server-test:
 	cargo test --manifest-path server/Cargo.toml --workspace
 
 server-run:
-	cargo run --manifest-path server/Cargo.toml -p sonora-server -- serve
+	cargo run --manifest-path server/Cargo.toml -p aro-server -- serve
 
 server-package:
-	cargo build --manifest-path server/Cargo.toml -p sonora-server --release
+	cargo build --manifest-path server/Cargo.toml -p aro-server --release
 	./server/scripts/package.sh
 
 server-doctor:
@@ -125,6 +125,7 @@ all-app: common-build macos-app
 all-install: common-build macos-install
 
 check: all-test
+	./scripts/check-legacy-brand.sh
 	./macos/scripts/check-architecture.sh
 	./macos/scripts/check-library-health-architecture.sh
 	cargo fmt --manifest-path server/Cargo.toml --all -- --check

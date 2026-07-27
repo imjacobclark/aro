@@ -7,6 +7,13 @@ on:
   pull_request:
 
 jobs:
+  legacy-brand:
+    name: Legacy brand audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/check-legacy-brand.sh
+
   marketing-website:
     name: Marketing website
     runs-on: ubuntu-24.04
@@ -26,7 +33,7 @@ jobs:
       - run: npm run build
         working-directory: marketing-website
         env:
-          NEXT_PUBLIC_BASE_PATH: /sonora
+          NEXT_PUBLIC_BASE_PATH: /aro
 
   rust:
     strategy:
@@ -50,16 +57,16 @@ jobs:
       - run: swift test --package-path common
       - name: Test Swift and Rust pairing interoperability
         run: |
-          cargo build --manifest-path server/Cargo.toml -p sonora-server
+          cargo build --manifest-path server/Cargo.toml -p aro-server
           pairing_root="${RUNNER_TEMP}/pairing-hub"
           mkdir -p "${pairing_root}"
-          server/target/debug/sonora-server \
+          server/target/debug/aro-server \
             --config "${pairing_root}/config.toml" \
             init \
             --data-dir "${pairing_root}/data" \
             --display-name "CI Pairing Hub"
-          SONORA_BIND=127.0.0.1:49488 \
-            server/target/debug/sonora-server \
+          ARO_BIND=127.0.0.1:49488 \
+            server/target/debug/aro-server \
             --config "${pairing_root}/config.toml" \
             serve >"${pairing_root}/server.log" 2>&1 &
           server_pid=$!
@@ -76,24 +83,24 @@ jobs:
             cat "${pairing_root}/server.log"
             exit 1
           }
-          SONORA_LIVE_PAIRING_URL=https://127.0.0.1:49488 \
-            SONORA_LIVE_PAIRING_DATA_DIR="${pairing_root}/data" \
+          ARO_LIVE_PAIRING_URL=https://127.0.0.1:49488 \
+            ARO_LIVE_PAIRING_DATA_DIR="${pairing_root}/data" \
             swift test --package-path macos
       - run: make macos app
-      - run: test -x macos/dist/Sonora.app/Contents/MacOS/sonora-server
-      - run: test -f macos/dist/Sonora.app/Contents/Resources/Montserrat-Variable.ttf
-      - run: plutil -lint macos/dist/Sonora.app/Contents/Library/LaunchAgents/com.sonora.server.plist
-      - run: codesign --verify --deep --strict macos/dist/Sonora.app
+      - run: test -x macos/dist/Aro.app/Contents/MacOS/aro-server
+      - run: test -f macos/dist/Aro.app/Contents/Resources/Montserrat-Variable.ttf
+      - run: plutil -lint macos/dist/Aro.app/Contents/Library/LaunchAgents/com.aro.server.plist
+      - run: codesign --verify --deep --strict macos/dist/Aro.app
       - name: Smoke-test packaged app launch
         run: |
-          macos/dist/Sonora.app/Contents/MacOS/Sonora \
-            >"${RUNNER_TEMP}/sonora-launch.log" 2>&1 &
+          macos/dist/Aro.app/Contents/MacOS/Aro \
+            >"${RUNNER_TEMP}/aro-launch.log" 2>&1 &
           app_pid=$!
           sleep 3
           if ! kill -0 "${app_pid}" 2>/dev/null; then
-            cat "${RUNNER_TEMP}/sonora-launch.log"
+            cat "${RUNNER_TEMP}/aro-launch.log"
             wait "${app_pid}" || true
-            echo "Sonora exited during the launch smoke test" >&2
+            echo "Aro exited during the launch smoke test" >&2
             exit 1
           fi
           kill "${app_pid}" 2>/dev/null || true

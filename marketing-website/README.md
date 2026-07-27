@@ -1,8 +1,8 @@
-# Sonora marketing website
+# Aro marketing website
 
-The single-page Sonora product site is generated from the audited
+The single-page Aro product site is generated from the audited
 [`features.md`](../features.md) catalogue. It is a static Next.js export hosted
-at [imjacobclark.github.io/sonora](https://imjacobclark.github.io/sonora/).
+at [imjacobclark.github.io/aro](https://imjacobclark.github.io/aro/).
 
 ## Work locally
 
@@ -21,5 +21,5 @@ The production site is built after a successful `Development Release`. That
 workflow passes the new semantic version and exact Apple Silicon/Intel release
 asset URLs into the static build before deploying it to GitHub Pages.
 
-For a production-shaped local export, set `NEXT_PUBLIC_BASE_PATH=/sonora` before
+For a production-shaped local export, set `NEXT_PUBLIC_BASE_PATH=/aro` before
 running `npm run build`.

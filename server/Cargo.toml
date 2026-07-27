@@ -1,11 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/sonora-sync-protocol",
-    "crates/sonora-sync-core",
-    "crates/sonora-sync-store",
-    "crates/sonora-server",
-    "crates/sonora-sync-ffi",
+    "crates/aro-sync-protocol",
+    "crates/aro-sync-core",
+    "crates/aro-sync-store",
+    "crates/aro-server",
+    "crates/aro-sync-ffi",
 ]
 
 [workspace.package]

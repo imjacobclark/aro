@@ -1,39 +1,39 @@
-# Sonora Features
+# Aro Features
 
 - **Your Music Stays Yours** — Build a lasting library from the music files you own, without depending on a subscription catalogue or cloud account.
-- **Originals Stay Original** — Sonora preserves the exact files you add without recompressing, retagging, renaming, or changing their format.
+- **Originals Stay Original** — Aro preserves the exact files you add without recompressing, retagging, renaming, or changing their format.
 - **Bit-Perfect by Default** — Hear songs at unity gain with no added processing, so capable audio equipment receives the music as it was mastered.
-- **Native-Rate Playback** — Sonora automatically matches each song’s original sample rate, including high-resolution 96 kHz and 192 kHz recordings.
-- **Exclusive Listening Mode** — Give Sonora sole control of a wired audio device when you want the cleanest direct path to your headphones, speakers, or hi-fi.
+- **Native-Rate Playback** — Aro automatically matches each song’s original sample rate, including high-resolution 96 kHz and 192 kHz recordings.
+- **Exclusive Listening Mode** — Give Aro sole control of a wired audio device when you want the cleanest direct path to your headphones, speakers, or hi-fi.
 - **Consistent Volume, Your Choice** — Switch to carefully measured loudness matching when you want a varied listening queue to stay comfortable without riding the volume control.
 - **Albums Flow Without Gaps** — Consecutive songs with compatible formats play continuously, preserving live recordings, classical works, and mix albums as intended.
 - **Your Output, Your Choice** — Send music to the Mac, a connected DAC, headphones, HomePod, TV, or AirPlay speaker from a clear native control.
 - **See the Signal Path** — Check the source quality, processing choice, output mode, and hardware format while a song plays, with honest warnings when the route changes fidelity.
 - **Plays the Collection You Have** — Enjoy FLAC, ALAC, AAC, MP3, WAV, AIFF, and OGG Vorbis libraries together in one player.
-- **Add a Folder and Listen** — Point Sonora at a music folder and it discovers playable songs throughout every subfolder, complete with embedded metadata and artwork.
+- **Add a Folder and Listen** — Point Aro at a music folder and it discovers playable songs throughout every subfolder, complete with embedded metadata and artwork.
 - **Always in Step** — Watched folders refresh automatically as music is added, edited, moved, or removed, keeping the library aligned with the files you manage.
 - **Browse Music as Music** — Move naturally between Songs, Artists, and Albums, with artwork, song order, duration, and the shape of your collection kept front and centre.
 - **Find Artists and Albums Fast** — Search the collection by name without giving up the album-focused browsing experience.
 - **A Queue That Follows You** — Start from the songs in front of you, then pause, seek, skip, adjust volume, and move through that listening context from the player bar.
-- **Store It Your Way** — Keep a protected Sonora-managed copy of the collection, or link music in place when you prefer to use existing storage without duplication.
-- **Safe Library Housekeeping** — Stop watching a folder or remove a song from Sonora without deleting the original music from disk.
+- **Store It Your Way** — Keep a protected Aro-managed copy of the collection, or link music in place when you prefer to use existing storage without duplication.
+- **Safe Library Housekeeping** — Stop watching a folder or remove a song from Aro without deleting the original music from disk.
 - **A Health Check for Music** — Find byte-for-byte duplicates, likely alternate encodings, moved songs, and missing files before collection clutter becomes a mystery.
-- **See Space You Could Reclaim** — Sonora totals the storage occupied by exact duplicates while leaving every clean-up decision to you.
+- **See Space You Could Reclaim** — Aro totals the storage occupied by exact duplicates while leaving every clean-up decision to you.
 - **Your Listening Story** — Follow total listening time, recent plays, a 30-day listening chart, listening streaks, and the songs and artists you return to most.
 - **Know Your Collection** — See song, album, and artist totals alongside playing time, storage size, formats, favourite genres, and the decades represented in your library.
-- **Your Sonora, Everywhere** — Reach the same personal library from another Sonora wherever its secure address is accessible, with automatic discovery nearby and manual addresses for private or public networks farther away.
+- **Your Aro, Everywhere** — Reach the same personal library from another Aro wherever its secure address is accessible, with automatic discovery nearby and manual addresses for private or public networks farther away.
 - **Pair in Seconds** — Connect another device with a QR code or a six-digit code, then approve the named device before it can enter the library.
-- **Direct, Encrypted, Approved** — Connect straight to your own Sonora with no Sonora cloud account in the middle; only named devices you approve receive access.
+- **Direct, Encrypted, Approved** — Connect straight to your own Aro with no Aro cloud account in the middle; only named devices you approve receive access.
 - **You Control Every Device** — See connected devices, decide which ones may contribute music, remove access at any time, and reject anything you do not recognize.
-- **Every Sonora Carries the Library** — Each connected Sonora keeps its own synchronized view of the library instead of acting as a disposable remote screen; choose favourites, albums, or every available song to keep downloaded and independently playable on any Mac you choose.
-- **Offline Music That Protects Itself** — Sonora never automatically removes the song playing now, the songs waiting in the queue, or music you chose to keep.
-- **Storage Without the Guesswork** — Let Sonora choose an offline storage allowance or set your own limit, with clear usage and download progress.
+- **Every Aro Carries the Library** — Each connected Aro keeps its own synchronized view of the library instead of acting as a disposable remote screen; choose favourites, albums, or every available song to keep downloaded and independently playable on any Mac you choose.
+- **Offline Music That Protects Itself** — Aro never automatically removes the song playing now, the songs waiting in the queue, or music you chose to keep.
+- **Storage Without the Guesswork** — Let Aro choose an offline storage allowance or set your own limit, with clear usage and download progress.
 - **Every Download Checked** — Connected music is fully downloaded and checked against the original before playback, so an incomplete or damaged file never reaches the player.
-- **Interrupted Downloads Recover** — If a connection drops, Sonora continues partial music downloads and whole-library exports instead of starting over.
-- **Durability Without Waste** — Make complete copies on the Sonoras you choose while identical songs within each library share one dependable stored file instead of needlessly multiplying storage.
+- **Interrupted Downloads Recover** — If a connection drops, Aro continues partial music downloads and whole-library exports instead of starting over.
+- **Durability Without Waste** — Make complete copies on the Aros you choose while identical songs within each library share one dependable stored file instead of needlessly multiplying storage.
 - **Switch Libraries in One App** — Keep local and connected libraries separate, then move between them without mixing their songs, settings, or downloaded music.
-- **Runs Beyond the App** — Once enabled on a Mac, the Background Service can keep the library available after the Sonora app closes and after the Mac signs in again.
-- **Host Sonora Almost Anywhere** — Run the library directly from the Mac app or place the standalone Sonora on an always-on Linux computer, server, container, or compatible NAS.
+- **Runs Beyond the App** — Once enabled on a Mac, the Background Service can keep the library available after the Aro app closes and after the Mac signs in again.
+- **Host Aro Almost Anywhere** — Run the library directly from the Mac app or place the standalone Aro on an always-on Linux computer, server, container, or compatible NAS.
 - **Take the Whole Library Back** — Export every active and recoverable recently removed song into tidy Artist and Album folders, preserving original formats and including a library manifest.
 - **Exports Respect What Exists** — Repeat an export safely: matching songs are skipped, interrupted files continue, and unrelated files are never silently overwritten.
-- **Move Without Rebuilding** — Relocate Sonora’s Library Data from the app when storage needs change, carrying its music and records together.
+- **Move Without Rebuilding** — Relocate Aro’s Library Data from the app when storage needs change, carrying its music and records together.

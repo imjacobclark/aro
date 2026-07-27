@@ -24,16 +24,16 @@ import { groupFeatures, loadFeatures } from "@/lib/features";
 import { releaseDownload } from "@/lib/release";
 import { cn } from "@/lib/utils";
 
-const installCommand = `ditto -x -k Sonora-v*-macos-*.zip .
-xattr -dr com.apple.quarantine Sonora.app
+const installCommand = `ditto -x -k Aro-v*-macos-*.zip .
+xattr -dr com.apple.quarantine Aro.app
 codesign --force --sign - --timestamp=none \\
-  --identifier com.imjacobclark.sonora.server \\
-  Sonora.app/Contents/MacOS/sonora-server
+  --identifier com.imjacobclark.aro.server \\
+  Aro.app/Contents/MacOS/aro-server
 codesign --force --deep --sign - --timestamp=none \\
-  --preserve-metadata=identifier Sonora.app
+  --preserve-metadata=identifier Aro.app
 mkdir -p "$HOME/Applications"
-ditto Sonora.app "$HOME/Applications/Sonora.app"
-open "$HOME/Applications/Sonora.app"`;
+ditto Aro.app "$HOME/Applications/Aro.app"
+open "$HOME/Applications/Aro.app"`;
 
 const stories = [
   {
@@ -41,7 +41,7 @@ const stories = [
     number: "01",
     eyebrow: "Ownership",
     title: "A real home for your music.",
-    copy: "Your collection is more than access to a catalogue. Sonora starts with the files you chose, keeps them in their original quality, and never quietly edits or deletes the source.",
+    copy: "Your collection is more than access to a catalogue. Aro starts with the files you chose, keeps them in their original quality, and never quietly edits or deletes the source.",
     points: [
       "Original files remain exactly as you added them",
       "FLAC, ALAC, AAC, MP3, WAV, AIFF, and OGG Vorbis together",
@@ -54,11 +54,11 @@ const stories = [
     id: "everywhere",
     number: "02",
     eyebrow: "Host anywhere",
-    title: "Your Sonora lives where you choose.",
-    copy: "Run it inside the macOS app or headless on an always-on Linux computer, server, container, or compatible NAS. Nearby Sonoras find it automatically; farther away, connect directly to any secure address you make reachable.",
+    title: "Your Aro lives where you choose.",
+    copy: "Run it inside the macOS app or headless on an always-on Linux computer, server, container, or compatible NAS. Nearby Aros find it automatically; farther away, connect directly to any secure address you make reachable.",
     points: [
       "Works across local, private, and public networks",
-      "No Sonora cloud account or relay in the middle",
+      "No Aro cloud account or relay in the middle",
       "Approve, limit, or remove every connected device",
     ],
     tone: "coral",
@@ -68,8 +68,8 @@ const stories = [
     id: "durability",
     number: "03",
     eyebrow: "Durability",
-    title: "Every Sonora makes the library stronger.",
-    copy: "Connected Sonoras keep a synchronized library of their own, not a disposable view into one machine. Keep selected music—or every available song—on each Mac you choose, creating independent, verified copies across your devices.",
+    title: "Every Aro makes the library stronger.",
+    copy: "Connected Aros keep a synchronized library of their own, not a disposable view into one machine. Keep selected music—or every available song—on each Mac you choose, creating independent, verified copies across your devices.",
     points: [
       "The full library can remain playable if the host is unavailable",
       "Every copied song is complete and checked against the original",
@@ -83,7 +83,7 @@ const stories = [
     number: "04",
     eyebrow: "Listening",
     title: "Hear the recording, not the player.",
-    copy: "Bit-perfect playback is the starting point. Sonora matches native sample rates, can take exclusive control of wired equipment, and shows the whole signal path when you want to look closer.",
+    copy: "Bit-perfect playback is the starting point. Aro matches native sample rates, can take exclusive control of wired equipment, and shows the whole signal path when you want to look closer.",
     points: [
       "The file’s original sample rate follows it to your audio device",
       "Gapless albums and optional loudness matching",
@@ -97,7 +97,7 @@ const stories = [
     number: "05",
     eyebrow: "Collection",
     title: "Your shelves, alive again.",
-    copy: "Add a folder and Sonora turns it into a library made for browsing. Artwork, artists, albums, listening history, and library health bring order and rediscovery without turning music into a feed.",
+    copy: "Add a folder and Aro turns it into a library made for browsing. Artwork, artists, albums, listening history, and library health bring order and rediscovery without turning music into a feed.",
     points: [
       "Folders stay updated as your files change",
       "Find duplicates, alternate copies, moved songs, and gaps",
@@ -111,11 +111,11 @@ const stories = [
     number: "06",
     eyebrow: "Portability",
     title: "You can always take it with you.",
-    copy: "A collection should never feel trapped. Export the entire library into tidy Artist and Album folders, carry recoverable removals with it, or move Sonora’s Library Data when your storage changes.",
+    copy: "A collection should never feel trapped. Export the entire library into tidy Artist and Album folders, carry recoverable removals with it, or move Aro’s Library Data when your storage changes.",
     points: [
       "Repeatable, resumable whole-library exports",
       "Existing files are respected, never silently overwritten",
-      "Sharing can continue after the Sonora window closes",
+      "Sharing can continue after the Aro window closes",
     ],
     tone: "dark",
     visual: "export",
@@ -132,7 +132,7 @@ function StoryVisual({ visual, number }: { visual: string; number: string }) {
           <span>ALAC <small>UNCHANGED</small></span>
           <span>WAV <small>UNCHANGED</small></span>
         </div>
-        <div className="visual-footer"><span>Sonora library</span><span>{number}</span></div>
+        <div className="visual-footer"><span>Aro library</span><span>{number}</span></div>
       </div>
     );
   }
@@ -154,7 +154,7 @@ function StoryVisual({ visual, number }: { visual: string; number: string }) {
       <div className="story-visual" aria-hidden="true">
         <span className="visual-kicker">Place it anywhere</span>
         <div className="host-map">
-          <span className="host-core">SONORA</span>
+          <span className="host-core">ARO</span>
           <span>MAC</span>
           <span>LINUX</span>
           <span>NAS</span>
@@ -168,7 +168,7 @@ function StoryVisual({ visual, number }: { visual: string; number: string }) {
       <div className="story-visual" aria-hidden="true">
         <span className="visual-kicker">Your whole library</span>
         <div className="folder-tree">
-          <span>sonora-library/</span>
+          <span>aro-library/</span>
           <span className="indent-1">Artist/</span>
           <span className="indent-2">Album/</span>
           <span className="indent-2">01 — Song.flac</span>
@@ -208,7 +208,7 @@ export default function Home() {
   const structuredData = {
     "@context": "https://schema.org",
     "@type": "SoftwareApplication",
-    name: "Sonora",
+    name: "Aro",
     applicationCategory: "MultimediaApplication",
     operatingSystem: "macOS 26 or later",
     description:
@@ -229,11 +229,11 @@ export default function Home() {
                 Your music.<br />Fully yours.
               </h1>
               <p className="hero-lede balanced">
-                Sonora brings the files you own back to life. Host the library
+                Aro brings the files you own back to life. Host the library
                 wherever it belongs, connect from anywhere it is reachable,
-                and keep verified copies across every Sonora you choose.
+                and keep verified copies across every Aro you choose.
               </p>
-              <div className="hero-hosts" aria-label="Sonora hosting options">
+              <div className="hero-hosts" aria-label="Aro hosting options">
                 <span>macOS app</span>
                 <span>Linux</span>
                 <span>Docker / NAS</span>
@@ -257,7 +257,7 @@ export default function Home() {
                     "h-12 rounded-none border-[#121733] bg-transparent px-6 text-xs font-bold shadow-none hover:bg-[#121733] hover:text-white",
                   )}
                 >
-                  Explore Sonora
+                  Explore Aro
                   <ArrowDown aria-hidden="true" data-icon="inline-end" />
                 </a>
               </div>
@@ -266,7 +266,7 @@ export default function Home() {
               <div className="sleeve-icon">
                 <Image
                   src={`${basePath}/app-icon.png`}
-                  alt="Sonora app icon"
+                  alt="Aro app icon"
                   width={220}
                   height={220}
                   priority
@@ -315,7 +315,7 @@ export default function Home() {
               <div>
                 <p className="eyebrow">The full collection</p>
                 <h2 id="features-title" className="section-title balanced">
-                  Every reason to choose Sonora.
+                  Every reason to choose Aro.
                 </h2>
               </div>
               <p>
@@ -335,10 +335,10 @@ export default function Home() {
             <Reveal>
               <p className="eyebrow">Development preview</p>
               <h2 id="download-title" className="section-title balanced">
-                Start your Sonora.
+                Start your Aro.
               </h2>
               <p className="download-copy balanced">
-                Sonora is available now as an early preview for macOS 26 and
+                Aro is available now as an early preview for macOS 26 and
                 later. Choose the build that matches your Mac.
               </p>
               <div className="mt-8 flex flex-wrap gap-2">
@@ -402,7 +402,7 @@ export default function Home() {
               )}
               <p className="preview-note">
                 Preview builds are ad-hoc signed rather than Apple-notarized.
-                Only download Sonora from this official repository.
+                Only download Aro from this official repository.
               </p>
               <Separator className="my-6 bg-[rgba(18,23,51,0.14)]" />
               <Accordion type="single" collapsible>
@@ -413,7 +413,7 @@ export default function Home() {
                   <AccordionContent className="pb-0 pt-4">
                     <p className="text-xs leading-6 text-[#67697c]">
                       Open Terminal in your Downloads folder, paste this block,
-                      and press Return. It verifies and installs Sonora in your
+                      and press Return. It verifies and installs Aro in your
                       personal Applications folder.
                     </p>
                     <div className="command-block">
@@ -425,7 +425,7 @@ export default function Home() {
               </Accordion>
               <div className="mt-6 flex items-center gap-2 text-[0.66rem] font-semibold text-[#67697c]">
                 <ShieldCheck className="size-4 text-[#7359e0]" aria-hidden="true" />
-                No account. No subscription. No Sonora cloud.
+                No account. No subscription. No Aro cloud.
               </div>
             </Reveal>
           </div>
@@ -433,10 +433,10 @@ export default function Home() {
       </main>
       <footer className="site-footer">
         <div className="site-shell footer-inner">
-          <span>© 2026 Sonora. Your music, fully yours.</span>
+          <span>© 2026 Aro. Your music, fully yours.</span>
           <div className="footer-links">
             <a
-              href="https://github.com/imjacobclark/sonora"
+              href="https://github.com/imjacobclark/aro"
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center gap-1.5"
@@ -444,7 +444,7 @@ export default function Home() {
               GitHub
             </a>
             <a
-              href="https://github.com/imjacobclark/sonora/releases"
+              href="https://github.com/imjacobclark/aro/releases"
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center gap-1.5"

@@ -1,7 +1,7 @@
-# Sonora
+# Aro
 
 A native macOS SwiftUI audio library. Add music folders from the sidebar and
-Sonora recursively discovers playable audio, reads song metadata, and keeps the
+Aro recursively discovers playable audio, reads song metadata, and keeps the
 library updated as files change.
 
 ## Features
@@ -24,14 +24,14 @@ library updated as files change.
 
 ## Repository layout
 
-Sonora is a small monorepo with independently buildable Swift packages:
+Aro is a small monorepo with independently buildable Swift packages:
 
 ```text
 common/   Cross-platform library models, policies, and use cases
 macos/    The macOS app, UI, audio engine, filesystem, and SQLite adapters
 ```
 
-`SonoraCommon` supports macOS and iOS, but there is intentionally no iOS app
+`AroCommon` supports macOS and iOS, but there is intentionally no iOS app
 yet. The repository root owns orchestration through `Makefile`; it is not
 itself a Swift package.
 
@@ -66,7 +66,7 @@ Build, install, and open a release copy in your user Applications folder:
 make macos install
 ```
 
-Sonora will appear at `~/Applications/Sonora.app` and can be launched from
+Aro will appear at `~/Applications/Aro.app` and can be launched from
 Spotlight, Finder, or the Dock like any other Mac app. The build is signed
 locally for this Mac. To only create the app bundle without installing it, run:
 
@@ -74,7 +74,7 @@ locally for this Mac. To only create the app bundle without installing it, run:
 make macos app
 ```
 
-The resulting bundle is at `macos/dist/Sonora.app`. Drag that bundle into
+The resulting bundle is at `macos/dist/Aro.app`. Drag that bundle into
 `/Applications` if you prefer a system-wide installation.
 
 ## Playback
@@ -83,7 +83,7 @@ Select a song in the table and double-click it, or press Return, to begin
 playback. The current table becomes the playback queue. Use the bottom player
 bar to pause, skip, seek, or adjust volume.
 
-Open **Sonora → Settings** (or press Command-,) to choose Bit-Perfect or
+Open **Aro → Settings** (or press Command-,) to choose Bit-Perfect or
 Normalized playback, select an output device, enable exclusive mode, and set
 the loudness target.
 
@@ -110,22 +110,22 @@ dependency graph is stored at `macos/Package.resolved`.
 ## Library database
 
 Legacy local libraries are migrated from
-`Application Support/Sonora/Sonora.sqlite3` to
-`Application Support/Sonora/Library Data/Sonora.sqlite3`. Remote library
+`Application Support/Aro/Aro.sqlite3` to
+`Application Support/Aro/Library Data/Aro.sqlite3`. Remote library
 subscriptions use isolated databases under
-`Application Support/Sonora/Libraries/<profile>/Library.sqlite3`.
+`Application Support/Aro/Libraries/<profile>/Library.sqlite3`.
 The filesystem remains the source of audio data, while SQLite stores stable
 song IDs, scanned metadata, device-specific file locations, hidden/deleted
 state, loudness results, and a future synchronization change log.
 
 The database is loaded before filesystem reconciliation, so the library can
 reopen immediately. Open Playback Settings to reveal it in Finder or export a
-consistent standalone SQLite copy. Sonora synchronizes logical records rather
+consistent standalone SQLite copy. Aro synchronizes logical records rather
 than sharing live SQLite/WAL files.
 
 ## Architecture
 
-Sonora is split into a platform-neutral package and a capability-owned macOS
+Aro is split into a platform-neutral package and a capability-owned macOS
 application. [Architecture notes](docs/architecture.md) describe the package
 boundary, dependency direction, composition root, persistence boundaries, and
 automated enforcement.

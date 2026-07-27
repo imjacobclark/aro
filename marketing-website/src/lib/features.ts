@@ -23,14 +23,14 @@ const groupTitles: Record<string, string[]> = {
     "Move Without Rebuilding",
   ],
   "Host, Connect & Endure": [
-    "Your Sonora, Everywhere",
+    "Your Aro, Everywhere",
     "Pair in Seconds",
     "Direct, Encrypted, Approved",
     "You Control Every Device",
-    "Every Sonora Carries the Library",
+    "Every Aro Carries the Library",
     "Switch Libraries in One App",
     "Runs Beyond the App",
-    "Host Sonora Almost Anywhere",
+    "Host Aro Almost Anywhere",
   ],
   "Sound & Playback": [
     "Bit-Perfect by Default",
@@ -124,7 +124,7 @@ export function groupFeatures(features: ProductFeature[]): FeatureGroup[] {
 
   const remaining = features.filter((feature) => !assigned.has(feature.title));
   if (remaining.length > 0) {
-    groups.push({ title: "More from Sonora", features: remaining });
+    groups.push({ title: "More from Aro", features: remaining });
   }
 
   return groups.filter((group) => group.features.length > 0);

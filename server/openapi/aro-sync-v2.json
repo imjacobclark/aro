@@ -1,0 +1,34 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Aro Sync Protocol",
+    "version": "2.0.0"
+  },
+  "servers": [{"url": "https://{hub}:4848", "variables": {"hub": {"default": "aro.local"}}}],
+  "paths": {
+    "/v1/hub": {"get": {"summary": "Hub information and protocol range", "responses": {"200": {"description": "Hub information"}}}},
+    "/v1/negotiate": {"post": {"summary": "Negotiate a protocol version", "responses": {"200": {"description": "Selected version"}, "426": {"description": "Incompatible"}}}},
+    "/v1/pairing/open": {"post": {"summary": "Open an admin-authorized pairing window", "responses": {"200": {"description": "Short-lived code"}}}},
+    "/v1/pairing/start": {"post": {"summary": "Start a SPAKE2+ pairing exchange", "responses": {"200": {"description": "PBKDF parameters"}}}},
+    "/v1/pairing/{id}/pake1": {"post": {"summary": "Exchange SPAKE2+ public values and verify the hub", "responses": {"200": {"description": "Hub public value and confirmation"}}}},
+    "/v1/pairing/{id}/confirm": {"post": {"summary": "Confirm code possession and submit for hub approval", "responses": {"200": {"description": "Pending approval"}}}},
+    "/v1/pairing/{id}": {"get": {"summary": "Poll pairing state and receive the encrypted credential and TLS pin", "responses": {"200": {"description": "Pairing state"}}}},
+    "/v1/pairing/approve": {"post": {"summary": "Approve or reject pairing", "responses": {"200": {"description": "Per-device credential"}}}},
+    "/v1/devices": {"get": {"summary": "List paired devices", "responses": {"200": {"description": "Devices"}}}},
+    "/v1/devices/revoke": {"post": {"summary": "Revoke a device immediately", "responses": {"204": {"description": "Revoked"}}}},
+    "/v1/join/preview": {"post": {"summary": "Compare client and hub manifests before media transfer", "responses": {"200": {"description": "Deduplication and conflict preview"}}}},
+    "/v1/join/commit": {"post": {"summary": "Commit reviewed first-join choices as a resumable job", "responses": {"200": {"description": "Sync job"}}}},
+    "/v1/snapshot": {"get": {"summary": "Read a paginated snapshot", "responses": {"200": {"description": "Snapshot page"}}}},
+    "/v1/exchange": {"post": {"summary": "Push idempotent operations and pull cursor changes", "responses": {"200": {"description": "Exchange result"}}}},
+    "/v1/blobs/{hash}/status": {"get": {"summary": "Inspect committed and partial blob state", "parameters": [{"name": "hash", "in": "path", "required": true}], "responses": {"200": {"description": "Blob state"}}}},
+    "/v1/blobs/{hash}": {
+      "get": {"summary": "Download a blob, optionally by byte range", "parameters": [{"name": "hash", "in": "path", "required": true}], "responses": {"200": {"description": "Blob"}, "206": {"description": "Blob range"}}},
+      "put": {"summary": "Append a resumable upload chunk", "parameters": [{"name": "hash", "in": "path", "required": true}, {"name": "X-Aro-Offset", "in": "header", "required": true}], "responses": {"200": {"description": "Upload state"}}}
+    },
+    "/v1/blobs/commit": {"post": {"summary": "Hash-verify and publish an upload", "responses": {"200": {"description": "Committed blob"}}}},
+    "/v1/jobs/{id}": {
+      "get": {"summary": "Read sync-job state", "responses": {"200": {"description": "Job"}}},
+      "delete": {"summary": "Cancel a sync job safely", "responses": {"200": {"description": "Cancelled job"}}}
+    }
+  }
+}

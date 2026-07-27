@@ -5,20 +5,20 @@
             "request": "launch",
             "args": [],
             "cwd": "${workspaceFolder}/macos",
-            "name": "Debug Sonora",
-            "target": "Sonora",
+            "name": "Debug Aro",
+            "target": "Aro",
             "configuration": "debug",
-            "preLaunchTask": "swift: Build Debug Sonora"
+            "preLaunchTask": "swift: Build Debug Aro"
         },
         {
             "type": "swift",
             "request": "launch",
             "args": [],
             "cwd": "${workspaceFolder}/macos",
-            "name": "Release Sonora",
-            "target": "Sonora",
+            "name": "Release Aro",
+            "target": "Aro",
             "configuration": "release",
-            "preLaunchTask": "swift: Build Release Sonora"
+            "preLaunchTask": "swift: Build Release Aro"
         }
     ]
 }

@@ -10,7 +10,7 @@ export function SiteHeader({ basePath }: { basePath: string }) {
         <a
           href="#top"
           className="flex items-center gap-2.5 text-sm font-extrabold tracking-[-0.03em]"
-          aria-label="Sonora home"
+          aria-label="Aro home"
         >
           <Image
             src={`${basePath}/app-icon.png`}
@@ -20,7 +20,7 @@ export function SiteHeader({ basePath }: { basePath: string }) {
             className="rounded-[22%]"
             priority
           />
-          Sonora
+          Aro
         </a>
         <nav
           aria-label="Primary navigation"

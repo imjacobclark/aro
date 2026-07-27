@@ -5,7 +5,7 @@ struct PersistenceAdapterChecks {
     static func main() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(
-                "sonora-persistence-\(UUID().uuidString)",
+                "aro-persistence-\(UUID().uuidString)",
                 isDirectory: true
             )
         try FileManager.default.createDirectory(

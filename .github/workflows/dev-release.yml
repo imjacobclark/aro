@@ -40,7 +40,7 @@ jobs:
           )
           version="0.0.$((max_patch + 1))"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
-          echo "Selected Sonora v${version}"
+          echo "Selected Aro v${version}"
 
   build-macos:
     name: Build macOS ${{ matrix.architecture }}
@@ -79,39 +79,39 @@ jobs:
 
       - name: Verify app and embedded helper
         run: |
-          test -x macos/dist/Sonora.app/Contents/MacOS/Sonora
-          test -x macos/dist/Sonora.app/Contents/MacOS/sonora-server
-          test -f macos/dist/Sonora.app/Contents/Resources/Montserrat-Variable.ttf
-          plutil -lint macos/dist/Sonora.app/Contents/Info.plist
+          test -x macos/dist/Aro.app/Contents/MacOS/Aro
+          test -x macos/dist/Aro.app/Contents/MacOS/aro-server
+          test -f macos/dist/Aro.app/Contents/Resources/Montserrat-Variable.ttf
+          plutil -lint macos/dist/Aro.app/Contents/Info.plist
           test "$(
             /usr/libexec/PlistBuddy \
               -c 'Print :CFBundleShortVersionString' \
-              macos/dist/Sonora.app/Contents/Info.plist
+              macos/dist/Aro.app/Contents/Info.plist
           )" = "${APP_VERSION}"
           test "$(
             /usr/libexec/PlistBuddy \
               -c 'Print :CFBundleVersion' \
-              macos/dist/Sonora.app/Contents/Info.plist
+              macos/dist/Aro.app/Contents/Info.plist
           )" = "${BUILD_NUMBER}"
-          plutil -lint macos/dist/Sonora.app/Contents/Library/LaunchAgents/com.sonora.server.plist
+          plutil -lint macos/dist/Aro.app/Contents/Library/LaunchAgents/com.aro.server.plist
           codesign --verify --strict \
-            --test-requirement '=identifier "com.imjacobclark.sonora.server"' \
-            macos/dist/Sonora.app/Contents/MacOS/sonora-server
-          codesign --verify --deep --strict --verbose=2 macos/dist/Sonora.app
+            --test-requirement '=identifier "com.imjacobclark.aro.server"' \
+            macos/dist/Aro.app/Contents/MacOS/aro-server
+          codesign --verify --deep --strict --verbose=2 macos/dist/Aro.app
         env:
           APP_VERSION: ${{ needs.version.outputs.version }}
           BUILD_NUMBER: ${{ github.run_number }}
 
       - name: Smoke-test packaged app launch
         run: |
-          macos/dist/Sonora.app/Contents/MacOS/Sonora \
-            >"${RUNNER_TEMP}/sonora-launch.log" 2>&1 &
+          macos/dist/Aro.app/Contents/MacOS/Aro \
+            >"${RUNNER_TEMP}/aro-launch.log" 2>&1 &
           app_pid=$!
           sleep 3
           if ! kill -0 "${app_pid}" 2>/dev/null; then
-            cat "${RUNNER_TEMP}/sonora-launch.log"
+            cat "${RUNNER_TEMP}/aro-launch.log"
             wait "${app_pid}" || true
-            echo "Sonora exited during the launch smoke test" >&2
+            echo "Aro exited during the launch smoke test" >&2
             exit 1
           fi
           kill "${app_pid}" 2>/dev/null || true
@@ -122,18 +122,18 @@ jobs:
           ARCHITECTURE: ${{ matrix.architecture }}
           VERSION: ${{ needs.version.outputs.version }}
         run: |
-          asset="Sonora-v${VERSION}-macos-${ARCHITECTURE}.zip"
+          asset="Aro-v${VERSION}-macos-${ARCHITECTURE}.zip"
           ditto -c -k --sequesterRsrc --keepParent \
-            macos/dist/Sonora.app "${asset}"
+            macos/dist/Aro.app "${asset}"
           shasum -a 256 "${asset}" > "${asset}.sha256"
 
       - name: Upload signed app for release job
         uses: actions/upload-artifact@v4
         with:
-          name: sonora-v${{ needs.version.outputs.version }}-${{ matrix.architecture }}
+          name: aro-v${{ needs.version.outputs.version }}-${{ matrix.architecture }}
           path: |
-            Sonora-v${{ needs.version.outputs.version }}-macos-${{ matrix.architecture }}.zip
-            Sonora-v${{ needs.version.outputs.version }}-macos-${{ matrix.architecture }}.zip.sha256
+            Aro-v${{ needs.version.outputs.version }}-macos-${{ matrix.architecture }}.zip
+            Aro-v${{ needs.version.outputs.version }}-macos-${{ matrix.architecture }}.zip.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -170,24 +170,24 @@ jobs:
           cargo build --locked --release
           --manifest-path server/Cargo.toml
           --target armv7-unknown-linux-gnueabihf
-          -p sonora-server
+          -p aro-server
 
       - name: Package server
         env:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
-          asset="sonora-server-v${VERSION}-linux-armv7.tar.gz"
+          asset="aro-server-v${VERSION}-linux-armv7.tar.gz"
           tar -C server/target/armv7-unknown-linux-gnueabihf/release \
-            -czf "${asset}" sonora-server
+            -czf "${asset}" aro-server
           sha256sum "${asset}" > "${asset}.sha256"
 
       - name: Upload server for release job
         uses: actions/upload-artifact@v4
         with:
-          name: sonora-server-v${{ needs.version.outputs.version }}-linux-armv7
+          name: aro-server-v${{ needs.version.outputs.version }}-linux-armv7
           path: |
-            sonora-server-v${{ needs.version.outputs.version }}-linux-armv7.tar.gz
-            sonora-server-v${{ needs.version.outputs.version }}-linux-armv7.tar.gz.sha256
+            aro-server-v${{ needs.version.outputs.version }}-linux-armv7.tar.gz
+            aro-server-v${{ needs.version.outputs.version }}-linux-armv7.tar.gz.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -204,13 +204,13 @@ jobs:
       - name: Download signed apps
         uses: actions/download-artifact@v4
         with:
-          pattern: sonora-v${{ needs.version.outputs.version }}-*
+          pattern: aro-v${{ needs.version.outputs.version }}-*
           merge-multiple: true
 
       - name: Download Linux server
         uses: actions/download-artifact@v4
         with:
-          name: sonora-server-v${{ needs.version.outputs.version }}-linux-armv7
+          name: aro-server-v${{ needs.version.outputs.version }}-linux-armv7
 
       - name: Publish GitHub prerelease
         env:
@@ -218,14 +218,14 @@ jobs:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           tag="v${VERSION}"
-          notes="Automated ad-hoc-signed Sonora ${VERSION} build from commit ${GITHUB_SHA}.
+          notes="Automated ad-hoc-signed Aro ${VERSION} build from commit ${GITHUB_SHA}.
 
           These builds are not notarized. Follow the README launch commands after downloading the archive for your Mac architecture."
           assets=(
-            Sonora-v"${VERSION}"-macos-*.zip
-            Sonora-v"${VERSION}"-macos-*.zip.sha256
-            sonora-server-v"${VERSION}"-linux-armv7.tar.gz
-            sonora-server-v"${VERSION}"-linux-armv7.tar.gz.sha256
+            Aro-v"${VERSION}"-macos-*.zip
+            Aro-v"${VERSION}"-macos-*.zip.sha256
+            aro-server-v"${VERSION}"-linux-armv7.tar.gz
+            aro-server-v"${VERSION}"-linux-armv7.tar.gz.sha256
           )
           if gh release view "${tag}" \
             --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
@@ -235,7 +235,7 @@ jobs:
               --repo "${GITHUB_REPOSITORY}"
             gh release edit "${tag}" \
               --repo "${GITHUB_REPOSITORY}" \
-              --title "Sonora v${VERSION}" \
+              --title "Aro v${VERSION}" \
               --notes "${notes}" \
               --prerelease
           else
@@ -243,7 +243,7 @@ jobs:
               "${assets[@]}" \
               --repo "${GITHUB_REPOSITORY}" \
               --target "${GITHUB_SHA}" \
-              --title "Sonora v${VERSION}" \
+              --title "Aro v${VERSION}" \
               --notes "${notes}" \
               --prerelease
           fi

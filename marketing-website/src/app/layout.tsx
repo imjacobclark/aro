@@ -9,41 +9,41 @@ const montserrat = localFont({
   weight: "100 900",
 });
 
-const siteUrl = "https://imjacobclark.github.io/sonora/";
+const siteUrl = "https://imjacobclark.github.io/aro/";
 
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
-  title: "Sonora — Your music. Fully yours.",
+  title: "Aro — Your music. Fully yours.",
   description:
-    "Own, host, and preserve your music library across the Sonoras you choose, with uncompromised playback and no Sonora cloud account.",
+    "Own, host, and preserve your music library across the Aros you choose, with uncompromised playback and no Aro cloud account.",
   alternates: {
     canonical: siteUrl,
   },
   icons: {
-    icon: "/sonora/app-icon.png",
-    apple: "/sonora/app-icon.png",
+    icon: "/aro/app-icon.png",
+    apple: "/aro/app-icon.png",
   },
   openGraph: {
     type: "website",
     url: siteUrl,
-    title: "Sonora — Your music. Fully yours.",
+    title: "Aro — Your music. Fully yours.",
     description:
-      "Host your music almost anywhere, connect securely from anywhere it is reachable, and keep complete independent copies on the Sonoras you choose.",
-    siteName: "Sonora",
+      "Host your music almost anywhere, connect securely from anywhere it is reachable, and keep complete independent copies on the Aros you choose.",
+    siteName: "Aro",
     images: [
       {
         url: `${siteUrl}og.png`,
         width: 1200,
         height: 630,
-        alt: "Sonora — Your music. Fully yours.",
+        alt: "Aro — Your music. Fully yours.",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "Sonora — Your music. Fully yours.",
+    title: "Aro — Your music. Fully yours.",
     description:
-      "Host, hear, and preserve the music you own across every Sonora you choose.",
+      "Host, hear, and preserve the music you own across every Aro you choose.",
     images: [`${siteUrl}og.png`],
   },
 };

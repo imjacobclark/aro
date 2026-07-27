@@ -1,4 +1,4 @@
-# Sonora Audience and Voice
+# Aro Audience and Voice
 
 ## Primary audience
 
@@ -25,7 +25,7 @@ library.
 
 ## Positioning
 
-Sonora is the private home for a music collection: a native Mac player that
+Aro is the private home for a music collection: a native Mac player that
 preserves the owner's files, gives capable audio equipment the right signal,
 and makes one personal library available across the owner's devices.
 
@@ -37,7 +37,7 @@ The strongest themes are:
    clear benefits, not laboratory controls.
 3. **One collection around the home** — Personal music follows the listener
    without becoming a public cloud library.
-4. **Confidence over housekeeping** — Sonora watches, verifies, protects,
+4. **Confidence over housekeeping** — Aro watches, verifies, protects,
    diagnoses, and recovers so the collection feels dependable.
 5. **Rediscovery** — Browsing, history, and statistics turn stored files back
    into an active relationship with music.
@@ -72,7 +72,7 @@ A strong feature bullet is specific enough to be believable and broad enough
 to matter:
 
 ```markdown
-- **Originals Stay Original** — Sonora preserves the exact audio files you add, without recompressing, retagging, or changing their format.
+- **Originals Stay Original** — Aro preserves the exact audio files you add, without recompressing, retagging, or changing their format.
 ```
 
 A weak bullet merely exposes implementation:

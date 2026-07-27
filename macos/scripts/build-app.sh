@@ -4,7 +4,7 @@ set -euo pipefail
 
 project_dir=${0:A:h:h}
 configuration=${CONFIGURATION:-release}
-app_name=Sonora
+app_name=Aro
 app_dir="$project_dir/dist/$app_name.app"
 icon_source="$project_dir/Assets/app-icon.png"
 info_plist="$project_dir/Packaging/Info.plist"
@@ -21,11 +21,11 @@ if [[ ! -f "$info_plist" ]]; then
     exit 1
 fi
 
-print "Building Sonora ($configuration)…"
+print "Building Aro ($configuration)…"
 swift build --package-path "$project_dir" -c "$configuration"
 bin_dir=$(swift build --package-path "$project_dir" -c "$configuration" --show-bin-path)
 executable="$bin_dir/$app_name"
-resource_bundle_name="SonoraMac_Sonora.bundle"
+resource_bundle_name="AroMac_Aro.bundle"
 resource_bundle="$bin_dir/$resource_bundle_name"
 
 if [[ ! -x "$executable" ]]; then
@@ -38,7 +38,7 @@ if [[ ! -d "$resource_bundle" ]]; then
     exit 1
 fi
 
-staging_dir=$(mktemp -d "${TMPDIR:-/tmp}/sonora-app.XXXXXX")
+staging_dir=$(mktemp -d "${TMPDIR:-/tmp}/aro-app.XXXXXX")
 trap 'rm -rf "$staging_dir"' EXIT
 staged_app="$staging_dir/$app_name.app"
 staged_contents="$staged_app/Contents"
@@ -57,13 +57,13 @@ ditto "$info_plist" "$staged_contents/Info.plist"
     -c "Set :CFBundleVersion $build_number" \
     "$staged_contents/Info.plist"
 
-print "Building Sonora sync helper…"
+print "Building Aro sync helper…"
 cargo build --manifest-path "$project_dir/../server/Cargo.toml" \
-    -p sonora-server --release
-helper="$project_dir/../server/target/release/sonora-server"
-ditto "$helper" "$staged_macos/sonora-server"
-ditto "$project_dir/../server/packaging/com.sonora.server.plist" \
-    "$staged_launch_agents/com.sonora.server.plist"
+    -p aro-server --release
+helper="$project_dir/../server/target/release/aro-server"
+ditto "$helper" "$staged_macos/aro-server"
+ditto "$project_dir/../server/packaging/com.aro.server.plist" \
+    "$staged_launch_agents/com.aro.server.plist"
 
 # App bundles expose resources through Contents/Resources. Bundle.module still
 # resolves the SwiftPM bundle when running the executable directly in builds.
@@ -102,17 +102,17 @@ done
 
 iconutil --convert icns "$iconset" --output "$staged_resources/$app_name.icns"
 chmod 755 "$staged_macos/$app_name"
-chmod 755 "$staged_macos/sonora-server"
+chmod 755 "$staged_macos/aro-server"
 
 codesign --force --sign - --timestamp=none \
-    --identifier com.imjacobclark.sonora.server \
-    "$staged_macos/sonora-server"
+    --identifier com.imjacobclark.aro.server \
+    "$staged_macos/aro-server"
 codesign --force --deep --sign - --timestamp=none \
     --preserve-metadata=identifier \
     "$staged_app"
 codesign --verify --strict \
-    --test-requirement '=identifier "com.imjacobclark.sonora.server"' \
-    "$staged_macos/sonora-server"
+    --test-requirement '=identifier "com.imjacobclark.aro.server"' \
+    "$staged_macos/aro-server"
 codesign --verify --deep --strict "$staged_app"
 plutil -lint "$staged_contents/Info.plist" >/dev/null
 

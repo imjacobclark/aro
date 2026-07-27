@@ -3,14 +3,14 @@
 import PackageDescription
 
 let package = Package(
-    name: "SonoraMac",
+    name: "AroMac",
     platforms: [
         .macOS(.v26)
     ],
     products: [
         .executable(
-            name: "Sonora",
-            targets: ["Sonora"]
+            name: "Aro",
+            targets: ["Aro"]
         )
     ],
     dependencies: [
@@ -26,10 +26,10 @@ let package = Package(
     ],
     targets: [
         .executableTarget(
-            name: "Sonora",
+            name: "Aro",
             dependencies: [
                 .product(
-                    name: "SonoraCommon",
+                    name: "AroCommon",
                     package: "common"
                 ),
                 .product(
@@ -49,11 +49,11 @@ let package = Package(
             ]
         ),
         .testTarget(
-            name: "SonoraTests",
+            name: "AroTests",
             dependencies: [
-                "Sonora",
+                "Aro",
                 .product(
-                    name: "SonoraCommon",
+                    name: "AroCommon",
                     package: "common"
                 )
             ]

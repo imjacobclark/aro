@@ -3,22 +3,22 @@
 import PackageDescription
 
 let package = Package(
-    name: "SonoraCommon",
+    name: "AroCommon",
     platforms: [
         .macOS(.v13),
         .iOS(.v16)
     ],
     products: [
         .library(
-            name: "SonoraCommon",
-            targets: ["SonoraCommon"]
+            name: "AroCommon",
+            targets: ["AroCommon"]
         )
     ],
     targets: [
-        .target(name: "SonoraCommon"),
+        .target(name: "AroCommon"),
         .testTarget(
-            name: "SonoraCommonTests",
-            dependencies: ["SonoraCommon"]
+            name: "AroCommonTests",
+            dependencies: ["AroCommon"]
         )
     ]
 )

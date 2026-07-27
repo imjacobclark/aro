@@ -1,4 +1,4 @@
-const releasesUrl = "https://github.com/imjacobclark/sonora/releases";
+const releasesUrl = "https://github.com/imjacobclark/aro/releases";
 
 export type ReleaseDownload = {
   version: string;
@@ -10,7 +10,7 @@ export type ReleaseDownload = {
 };
 
 export function releaseDownload(): ReleaseDownload {
-  const version = process.env.NEXT_PUBLIC_SONORA_VERSION?.trim();
+  const version = process.env.NEXT_PUBLIC_ARO_VERSION?.trim();
   const arm64Url = process.env.NEXT_PUBLIC_ARM64_DOWNLOAD_URL?.trim();
   const intelUrl = process.env.NEXT_PUBLIC_INTEL_DOWNLOAD_URL?.trim();
 

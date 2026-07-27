@@ -1,30 +1,30 @@
-# Sonora architecture
+# Aro architecture
 
-Sonora is a local-first application organized as a small monorepo. The root is
+Aro is a local-first application organized as a small monorepo. The root is
 an orchestration workspace rather than a Swift package:
 
 ```text
 .
 ├── common/
 │   ├── Package.swift
-│   ├── Sources/SonoraCommon/
-│   └── Tests/SonoraCommonTests/
+│   ├── Sources/AroCommon/
+│   └── Tests/AroCommonTests/
 ├── macos/
 │   ├── Package.swift
-│   ├── Sources/Sonora/
-│   ├── Tests/SonoraTests/
+│   ├── Sources/Aro/
+│   ├── Tests/AroTests/
 │   ├── Assets/
 │   ├── Packaging/
 │   └── scripts/
 └── Makefile
 ```
 
-The macOS package depends on `SonoraCommon` through a local SwiftPM package
+The macOS package depends on `AroCommon` through a local SwiftPM package
 dependency. Common never depends on macOS.
 
 ## Package boundary
 
-`SonoraCommon` contains behavior that can be reused by a future iOS app:
+`AroCommon` contains behavior that can be reused by a future iOS app:
 
 - stable track identity, audio properties, fingerprints, and library
   ordering/deduplication;
@@ -46,7 +46,7 @@ The package uses Foundation only and currently supports macOS 13 and iOS 16.
 It contains no SwiftUI, AppKit, Core Audio, AVFoundation, SQLite, filesystem
 monitoring, or security-scoped bookmark implementation.
 
-`SonoraMac` owns everything that integrates with the platform:
+`AroMac` owns everything that integrates with the platform:
 
 - SwiftUI, AppKit, Charts, navigation, visual design, and typography;
 - Core Audio and SFBAudioEngine playback;
@@ -71,7 +71,7 @@ Interface -> Application -> Domain
 The source map is:
 
 ```text
-macos/Sources/Sonora/
+macos/Sources/Aro/
   App/
   AudioAnalysis/
   DesignSystem/
@@ -84,7 +84,7 @@ macos/Sources/Sonora/
 ```
 
 The composition root is
-`macos/Sources/Sonora/App/Composition/SonoraApp.swift`. It is the only place
+`macos/Sources/Aro/App/Composition/AroApp.swift`. It is the only place
 that constructs the database and joins concrete adapters to application
 ports.
 
@@ -144,7 +144,7 @@ make check
 ```
 
 `make all run` builds common and launches the only runnable product, the macOS
-app. `SonoraCommon` is a library and therefore has no standalone runtime.
+app. `AroCommon` is a library and therefore has no standalone runtime.
 
 ## Enforcement
 

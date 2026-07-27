@@ -3,21 +3,32 @@
 <plist version="1.0">
 <dict>
 	<key>NSCameraUsageDescription</key>
-	<string>Sonora uses the camera to scan a connection code from another Sonora device.</string>
+	<string>Aro uses the camera to scan a connection code from another Aro device.</string>
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleDisplayName</key>
-    <string>Sonora</string>
+    <string>Aro</string>
     <key>CFBundleExecutable</key>
-    <string>Sonora</string>
+    <string>Aro</string>
     <key>CFBundleIconFile</key>
-    <string>Sonora</string>
+    <string>Aro</string>
     <key>CFBundleIdentifier</key>
-    <string>com.imjacobclark.sonora</string>
+    <string>com.imjacobclark.aro</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Sonora</string>
+    <string>Aro</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.imjacobclark.aro.pairing</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>aro</string>
+            </array>
+        </dict>
+    </array>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -31,10 +42,10 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>Sonora discovers and synchronizes with library hubs on your local network.</string>
+    <string>Aro discovers and synchronizes with your other Aro libraries on the local network.</string>
     <key>NSBonjourServices</key>
     <array>
-        <string>_sonora-sync._tcp</string>
+        <string>_aro-sync._tcp</string>
     </array>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>

@@ -4,8 +4,8 @@ set -euo pipefail
 
 script_directory=${0:A:h}
 repository_root=${script_directory:h:h}
-common_feature="$repository_root/common/Sources/SonoraCommon/LibraryHealth/LibraryHealthFeature.swift"
-macos_context="$repository_root/macos/Sources/Sonora/LibraryHealth"
+common_feature="$repository_root/common/Sources/AroCommon/LibraryHealth/LibraryHealthFeature.swift"
+macos_context="$repository_root/macos/Sources/Aro/LibraryHealth"
 
 required_files=(
   "$common_feature"

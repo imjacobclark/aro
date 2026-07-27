@@ -40,7 +40,7 @@ jobs:
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
 
-      - name: Find current Sonora release assets
+      - name: Find current Aro release assets
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_COMMIT: ${{ github.event.workflow_run.head_sha || github.sha }}
@@ -61,8 +61,8 @@ jobs:
           test "${release}" != "null"
 
           version="$(jq -r '.tag_name | sub("^v"; "")' <<<"${release}")"
-          arm64_name="Sonora-v${version}-macos-arm64.zip"
-          intel_name="Sonora-v${version}-macos-x86_64.zip"
+          arm64_name="Aro-v${version}-macos-arm64.zip"
+          intel_name="Aro-v${version}-macos-x86_64.zip"
           arm64_url="$(
             jq -r --arg name "${arm64_name}" \
               '.assets[] | select(.name == $name) | .browser_download_url' \
@@ -90,7 +90,7 @@ jobs:
           test -n "${intel_checksum_url}"
 
           {
-            echo "NEXT_PUBLIC_SONORA_VERSION=${version}"
+            echo "NEXT_PUBLIC_ARO_VERSION=${version}"
             echo "NEXT_PUBLIC_ARM64_DOWNLOAD_URL=${arm64_url}"
             echo "NEXT_PUBLIC_INTEL_DOWNLOAD_URL=${intel_url}"
             echo "NEXT_PUBLIC_ARM64_CHECKSUM_URL=${arm64_checksum_url}"
@@ -113,7 +113,7 @@ jobs:
         run: npm run build
         working-directory: marketing-website
         env:
-          NEXT_PUBLIC_BASE_PATH: /sonora
+          NEXT_PUBLIC_BASE_PATH: /aro
 
       - name: Upload website
         uses: actions/upload-pages-artifact@v4

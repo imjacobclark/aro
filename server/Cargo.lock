@@ -127,6 +127,101 @@ dependencies = [
 ]
 
 [[package]]
+name = "aro-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aro-sync-core",
+ "aro-sync-protocol",
+ "aro-sync-store",
+ "axum",
+ "axum-server",
+ "base64",
+ "bytes",
+ "chrono",
+ "clap",
+ "fs2",
+ "hex",
+ "http",
+ "libc",
+ "lofty",
+ "mdns-sd",
+ "notify",
+ "parking_lot",
+ "rcgen",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
+name = "aro-sync-core"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "aro-sync-protocol",
+ "base64",
+ "chrono",
+ "hex",
+ "matter-crypto",
+ "parking_lot",
+ "rand 0.9.5",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "aro-sync-ffi"
+version = "0.1.0"
+dependencies = [
+ "aro-sync-protocol",
+]
+
+[[package]]
+name = "aro-sync-protocol"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "aro-sync-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aro-sync-core",
+ "aro-sync-protocol",
+ "chrono",
+ "hex",
+ "parking_lot",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "asn1-rs"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2253,101 +2348,6 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "sonora-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "axum-server",
- "base64",
- "bytes",
- "chrono",
- "clap",
- "fs2",
- "hex",
- "http",
- "libc",
- "lofty",
- "mdns-sd",
- "notify",
- "parking_lot",
- "rcgen",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "sha2",
- "sonora-sync-core",
- "sonora-sync-protocol",
- "sonora-sync-store",
- "tempfile",
- "tokio",
- "toml",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "walkdir",
-]
-
-[[package]]
-name = "sonora-sync-core"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "base64",
- "chrono",
- "hex",
- "matter-crypto",
- "parking_lot",
- "rand 0.9.5",
- "serde_json",
- "sha2",
- "sonora-sync-protocol",
- "subtle",
- "tempfile",
- "thiserror",
- "uuid",
-]
-
-[[package]]
-name = "sonora-sync-ffi"
-version = "0.1.0"
-dependencies = [
- "sonora-sync-protocol",
-]
-
-[[package]]
-name = "sonora-sync-protocol"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "uuid",
-]
-
-[[package]]
-name = "sonora-sync-store"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "hex",
- "parking_lot",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "sonora-sync-core",
- "sonora-sync-protocol",
- "subtle",
- "tempfile",
- "thiserror",
- "uuid",
 ]
 
 [[package]]

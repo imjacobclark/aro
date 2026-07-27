@@ -5,8 +5,8 @@ set -eu
 repository_root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 cd "$repository_root"
 
-common_root="common/Sources/SonoraCommon"
-macos_root="macos/Sources/Sonora"
+common_root="common/Sources/AroCommon"
+macos_root="macos/Sources/Aro"
 
 fail() {
     echo "Architecture check failed: $1" >&2

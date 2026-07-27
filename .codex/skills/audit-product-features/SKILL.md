@@ -1,12 +1,12 @@
 ---
 name: audit-product-features
-description: Audit Sonora's repository for shipped, user-visible product capabilities and regenerate the root features.md as an evidence-backed marketing list. Use when cataloguing features, refreshing product positioning, preparing website or release copy, checking that marketing reflects the current app, or identifying Sonora's differentiators for non-technical music listeners and collectors.
+description: Audit Aro's repository for shipped, user-visible product capabilities and regenerate the root features.md as an evidence-backed marketing list. Use when cataloguing features, refreshing product positioning, preparing website or release copy, checking that marketing reflects the current app, or identifying Aro's differentiators for non-technical music listeners and collectors.
 ---
 
 # Audit Product Features
 
 Create or replace `./features.md` with a complete, defensible inventory of
-Sonora's shipped product value. Write for people who love, collect, and listen
+Aro's shipped product value. Write for people who love, collect, and listen
 to music—not for developers.
 
 Read [references/audience-and-voice.md](references/audience-and-voice.md)
@@ -25,7 +25,7 @@ evidence than plans or comments.
    - playback, library, health, statistics, devices, offline music, import,
      migration, recovery, and export code
    - standalone server commands only where they create a benefit visible to a
-     Sonora listener
+     Aro listener
 3. Search tests for behaviours that are easy to miss in the UI: safety,
    resumability, deduplication, verification, recovery, deterministic sync,
    cache protection, reconnection, and failure handling.
@@ -33,7 +33,7 @@ evidence than plans or comments.
    availability, platform, or packaging claims.
 5. Search terminology broadly, including synonyms and historical names. The
    code may still say `track`, `hub`, `server`, `host`, or `sync`; translate
-   these into Sonora's current customer vocabulary.
+   these into Aro's current customer vocabulary.
 6. Reconcile conflicting evidence. Prefer currently reachable UI plus passing
    tests. Exclude a capability when it exists only in a plan, TODO, disabled
    control, fixture, preview, future-facing comment, unused model, or
@@ -67,7 +67,7 @@ example:
   putting the original library at risk.
 
 Keep separate bullets when customers would recognize separate reasons to
-choose or keep using Sonora.
+choose or keep using Aro.
 
 ## Determine the audience
 
@@ -76,7 +76,7 @@ reference as the baseline. Look for:
 
 - the collection they own and how they currently store it
 - the listening equipment and quality they care about
-- the frustrations Sonora removes
+- the frustrations Aro removes
 - the emotional benefit: ownership, confidence, continuity, discovery, or
   calm
 - the level of technical knowledge the interface expects
@@ -89,7 +89,7 @@ Use that audience model to prioritize and phrase every bullet. Do not turn
 Replace the file rather than appending to stale claims. Use this exact shape:
 
 ```markdown
-# Sonora Features
+# Aro Features
 
 - **Snappy USP or Differentiator** — Marketing description.
 - **Another Customer Benefit** — Marketing description.
@@ -101,11 +101,11 @@ Apply all of these rules:
 - Start each bullet with a short, memorable, title-cased promise, normally
   two to six words.
 - Follow it with an em dash and one or two benefit-led sentences.
-- Explain what the listener gains before how Sonora delivers it.
+- Explain what the listener gains before how Aro delivers it.
 - Use plain, warm language that makes sense without technical knowledge.
 - Say `songs`, never `tracks`.
-- Say `Sonora`, `library`, `Library Data`, `Background Service`,
-  `Connect to a Sonora`, and `Share this Sonora` where those nouns are needed.
+- Say `Aro`, `library`, `Library Data`, `Background Service`,
+  `Connect to a Aro`, and `Share this Aro` where those nouns are needed.
 - Avoid `hub`, `daemon`, `helper`, `blob`, `endpoint`, `protocol`, `SQLite`,
   `WAL`, `hash`, `cursor`, `mDNS`, `LAN`, `HLC`, `cache`, `replica`, and
   similar implementation language in customer-facing copy.
@@ -142,7 +142,7 @@ Before finishing:
 5. Confirm format with:
 
    ```sh
-   rg -n -v '^(# Sonora Features|$|- \*\*[^*]+\*\* — .+)$' features.md
+   rg -n -v '^(# Aro Features|$|- \*\*[^*]+\*\* — .+)$' features.md
    ```
 
    The command must return no lines.
