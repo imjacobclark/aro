@@ -89,6 +89,10 @@ final class LegacyProductMigrationTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: true
+        )
         let databaseURL = root.appendingPathComponent("Library.sqlite3")
         var connection: OpaquePointer?
         XCTAssertEqual(sqlite3_open(databaseURL.path, &connection), SQLITE_OK)
