@@ -8,8 +8,20 @@ final class LegacyProductMigrationTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let legacy = root.appendingPathComponent("Sonora", isDirectory: true)
-        let current = root.appendingPathComponent("Aro", isDirectory: true)
+        let applicationSupport = root
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent(
+                "Application Support",
+                isDirectory: true
+            )
+        let legacy = applicationSupport.appendingPathComponent(
+            "Sonora",
+            isDirectory: true
+        )
+        let current = applicationSupport.appendingPathComponent(
+            "Aro",
+            isDirectory: true
+        )
         let server = legacy.appendingPathComponent(
             "Server",
             isDirectory: true
