@@ -10,6 +10,7 @@ struct ConnectLibrarySheet: View {
         OfflineDownloadPolicy
     ) -> Void
     var willPauseSharing = false
+    var initialAddress = ""
 
     @Environment(\.dismiss) private var dismiss
     @State private var browser = AroHubBrowser()
@@ -56,7 +57,14 @@ struct ConnectLibrarySheet: View {
         }
         .padding(28)
         .frame(width: 600, height: 600)
-        .onAppear { browser.restart() }
+        .onAppear {
+            if manualAddress.isEmpty, !initialAddress.isEmpty {
+                manualAddress = initialAddress
+                showingManual = true
+                status = "Enter the current connection code to repair this library."
+            }
+            browser.restart()
+        }
         .onDisappear {
             browser.stop()
             pairingTask?.cancel()

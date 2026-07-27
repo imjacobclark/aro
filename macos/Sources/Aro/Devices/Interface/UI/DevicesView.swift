@@ -22,6 +22,7 @@ struct DevicesView: View {
     @State private var pairingSession: PairingSession?
     @State private var addDeviceError: String?
     @State private var showingConnect = false
+    @State private var connectionInitialAddress = ""
     @State private var showingOfflineSettings = false
     @State private var deviceToRemove: ControlledHubDevice?
     @State private var statusMessage: String?
@@ -54,7 +55,8 @@ struct DevicesView: View {
             ConnectLibrarySheet(
                 completeConnection: completeRemoteConnection,
                 willPauseSharing: registry.activeProfile?.kind == .local
-                    && sharingIsAvailable
+                    && sharingIsAvailable,
+                initialAddress: connectionInitialAddress
             )
         }
         .sheet(isPresented: $showingOfflineSettings) {
@@ -252,11 +254,22 @@ struct DevicesView: View {
                             .buttonStyle(.borderedProminent)
                         }
                     } else {
-                        Button("Check for Updates") {
-                            Task { await performSync(profile) }
+                        if needsCredentialRepair(profile) {
+                            Button("Repair Connection") {
+                                beginRepairingConnection(profile)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            Button("Check for Updates") {
+                                Task { await performSync(profile) }
+                            }
+                            .disabled(isSyncing)
+                        } else {
+                            Button("Check for Updates") {
+                                Task { await performSync(profile) }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(isSyncing)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(isSyncing)
                     }
                     Button("Library Settings") {
                         showingLibrarySettings = true
@@ -345,10 +358,36 @@ struct DevicesView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                if needsCredentialRepair(profile) {
+                    Button("Repair Connection") {
+                        beginRepairingConnection(profile)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
                 Button("Connect to a Different Library") {
+                    connectionInitialAddress = ""
                     showingConnect = true
                 }
             }
+        }
+    }
+
+    private func beginRepairingConnection(_ profile: LibraryProfile) {
+        connectionInitialAddress = profile.baseURL?.absoluteString ?? ""
+        showingConnect = true
+    }
+
+    private func needsCredentialRepair(_ profile: LibraryProfile) -> Bool {
+        guard profile.kind == .remote, let hubID = profile.hubID else {
+            return false
+        }
+        do {
+            return try FileHubCredentialStore().load(
+                hubID: hubID,
+                deviceID: libraryDeviceID
+            ) == nil
+        } catch {
+            return true
         }
     }
 
