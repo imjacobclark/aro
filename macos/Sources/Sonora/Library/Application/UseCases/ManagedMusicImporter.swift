@@ -18,15 +18,6 @@ struct ManagedMusicImporter: Sendable {
                 at: library,
                 withIntermediateDirectories: true
             )
-            let staging = library.appendingPathComponent(
-                ".sonora-import-\(UUID().uuidString)",
-                isDirectory: true
-            )
-            try FileManager.default.createDirectory(
-                at: staging,
-                withIntermediateDirectories: true
-            )
-            defer { try? FileManager.default.removeItem(at: staging) }
 
             let existingHashes = try Self.hashes(in: library)
             var knownHashes = existingHashes
@@ -69,20 +60,20 @@ struct ManagedMusicImporter: Sendable {
                     at: destination.deletingLastPathComponent(),
                     withIntermediateDirectories: true
                 )
-                let staged = staging.appendingPathComponent(
-                    "\(UUID().uuidString)-\(file.lastPathComponent)"
-                )
-                try FileManager.default.copyItem(at: file, to: staged)
-                if FileManager.default.fileExists(atPath: destination.path) {
-                    try Self.replaceAtomically(
-                        destination,
-                        with: staged
+                let staged = destination
+                    .deletingLastPathComponent()
+                    .appendingPathComponent(
+                        ".sonora-import-\(UUID().uuidString)"
                     )
-                } else {
-                    try FileManager.default.moveItem(
-                        at: staged,
-                        to: destination
+                do {
+                    try FileManager.default.copyItem(at: file, to: staged)
+                    try Self.publishAtomically(
+                        staged,
+                        at: destination
                     )
+                } catch {
+                    try? FileManager.default.removeItem(at: staged)
+                    throw error
                 }
                 knownHashes.insert(hash)
                 imported += 1
@@ -114,9 +105,9 @@ struct ManagedMusicImporter: Sendable {
         return hashes
     }
 
-    private static func replaceAtomically(
-        _ destination: URL,
-        with staged: URL
+    private static func publishAtomically(
+        _ staged: URL,
+        at destination: URL
     ) throws {
         let result = staged.path.withCString { sourcePath in
             destination.path.withCString { destinationPath in
