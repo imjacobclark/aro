@@ -123,14 +123,6 @@ struct AroApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
         .defaultSize(width: 900, height: 600)
-        .commands {
-            CommandGroup(replacing: .appSettings) {
-                SettingsLink {
-                    Text("Settings…")
-                }
-                .keyboardShortcut(",", modifiers: .command)
-            }
-        }
 
         Settings {
             TabView {

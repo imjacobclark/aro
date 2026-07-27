@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Security
+import SQLite3
 
 enum LegacyProductMigration {
     private static let legacyName = "Sonora"
@@ -37,27 +38,34 @@ enum LegacyProductMigration {
         )
         let marker = currentRoot.appendingPathComponent(markerName)
 
-        guard !fileManager.fileExists(atPath: marker.path) else { return }
+        if !fileManager.fileExists(atPath: marker.path) {
+            let helperWasEnabled = try stopLegacyProcesses()
+            try migrateDefaults(into: currentDefaults)
+            if helperWasEnabled {
+                currentDefaults.set(true, forKey: restoreBackgroundServiceKey)
+            }
+            try migrateApplicationSupport(
+                from: legacyRoot,
+                to: currentRoot,
+                fileManager: fileManager
+            )
+            try migrateKeychain()
 
-        let helperWasEnabled = try stopLegacyProcesses()
-        try migrateDefaults(into: currentDefaults)
-        if helperWasEnabled {
-            currentDefaults.set(true, forKey: restoreBackgroundServiceKey)
+            try fileManager.createDirectory(
+                at: currentRoot,
+                withIntermediateDirectories: true
+            )
+            try Data("Aro migration complete\n".utf8).write(
+                to: marker,
+                options: .atomic
+            )
         }
-        try migrateApplicationSupport(
-            from: legacyRoot,
-            to: currentRoot,
-            fileManager: fileManager
-        )
-        try migrateKeychain()
 
-        try fileManager.createDirectory(
-            at: currentRoot,
-            withIntermediateDirectories: true
-        )
-        try Data("Aro migration complete\n".utf8).write(
-            to: marker,
-            options: .atomic
+        try repairMigratedDeviceIdentity(defaults: currentDefaults)
+        try repairCurrentState(
+            applicationSupportRoot: currentRoot,
+            defaults: currentDefaults,
+            fileManager: fileManager
         )
         currentDefaults.synchronize()
     }
@@ -134,6 +142,14 @@ enum LegacyProductMigration {
     static func rewrite(_ value: String) -> String {
         value
             .replacingOccurrences(
+                of: "\\/Application Support\\/\(legacyName)\\/",
+                with: "\\/Application Support\\/\(currentName)\\/"
+            )
+            .replacingOccurrences(
+                of: "\\/Application Support\\/\(legacyName)",
+                with: "\\/Application Support\\/\(currentName)"
+            )
+            .replacingOccurrences(
                 of: "/Application Support/\(legacyName)/",
                 with: "/Application Support/\(currentName)/"
             )
@@ -145,7 +161,103 @@ enum LegacyProductMigration {
                 of: "\(legacyName).sqlite3",
                 with: "\(currentName).sqlite3"
             )
+            .replacingOccurrences(
+                of: "https:\\/\\/sonora-",
+                with: "https:\\/\\/aro-"
+            )
+            .replacingOccurrences(
+                of: "https://sonora-",
+                with: "https://aro-"
+            )
             .replacingOccurrences(of: "sonora.toml", with: "aro.toml")
+    }
+
+    static func repairCurrentState(
+        applicationSupportRoot: URL,
+        defaults: UserDefaults,
+        fileManager: FileManager
+    ) throws {
+        for key in [
+            "library.profileRegistry.v1",
+            "sync.host.dataLocation",
+        ] {
+            guard let value = defaults.object(forKey: key) else { continue }
+            defaults.set(rewritePropertyList(value), forKey: key)
+        }
+
+        guard let enumerator = fileManager.enumerator(
+            at: applicationSupportRoot,
+            includingPropertiesForKeys: [.isRegularFileKey]
+        ) else {
+            return
+        }
+        for case let url as URL in enumerator
+        where url.pathExtension == "sqlite3" {
+            try repairMembershipURLs(in: url)
+        }
+    }
+
+    private static func repairMembershipURLs(in url: URL) throws {
+        var connection: OpaquePointer?
+        let openStatus = sqlite3_open_v2(
+            url.path,
+            &connection,
+            SQLITE_OPEN_READWRITE,
+            nil
+        )
+        guard openStatus == SQLITE_OK, let connection else {
+            if let connection {
+                sqlite3_close(connection)
+            }
+            throw MigrationError.database(url.path, openStatus, "open failed")
+        }
+        defer { sqlite3_close(connection) }
+        sqlite3_busy_timeout(connection, 5_000)
+
+        var statement: OpaquePointer?
+        let tableStatus = sqlite3_prepare_v2(
+            connection,
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'hub_memberships'
+            """,
+            -1,
+            &statement,
+            nil
+        )
+        guard tableStatus == SQLITE_OK, let statement else {
+            throw MigrationError.database(
+                url.path,
+                tableStatus,
+                String(cString: sqlite3_errmsg(connection))
+            )
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return }
+
+        let updateStatus = sqlite3_exec(
+            connection,
+            """
+            UPDATE hub_memberships
+            SET base_url = replace(
+                base_url,
+                'https://sonora-',
+                'https://aro-'
+            )
+            WHERE base_url LIKE 'https://sonora-%'
+            """,
+            nil,
+            nil,
+            nil
+        )
+        guard updateStatus == SQLITE_OK else {
+            throw MigrationError.database(
+                url.path,
+                updateStatus,
+                String(cString: sqlite3_errmsg(connection))
+            )
+        }
     }
 
     static func migrateApplicationSupport(
@@ -299,13 +411,21 @@ enum LegacyProductMigration {
                   let data = credentialResult as? Data else {
                 throw MigrationError.keychain(credentialStatus)
             }
-            let destination: [String: Any] = [
+            var destination: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: currentKeychainService,
                 kSecAttrAccount as String: account,
                 kSecValueData as String: data,
             ]
-            let addStatus = SecItemAdd(destination as CFDictionary, nil)
+            if let description =
+                item[kSecAttrDescription as String] as? String
+                ?? legacyDeviceID()?.uuidString {
+                destination[kSecAttrDescription as String] = description
+            }
+            let addStatus = SecItemAdd(
+                destination as CFDictionary,
+                nil
+            )
             guard addStatus == errSecSuccess
                     || addStatus == errSecDuplicateItem else {
                 throw MigrationError.keychain(addStatus)
@@ -321,12 +441,57 @@ enum LegacyProductMigration {
             throw MigrationError.keychain(deleteStatus)
         }
     }
+
+    /// Credentials created by Sonora are bound to Sonora's device UUID. Early
+    /// Aro builds copied the credential but could generate a new UUID before
+    /// using it, causing an otherwise healthy migrated connection to receive
+    /// HTTP 401. A missing Keychain description identifies those copied
+    /// credentials; credentials paired natively in Aro always store one.
+    private static func repairMigratedDeviceIdentity(
+        defaults: UserDefaults
+    ) throws {
+        guard let legacyID = legacyDeviceID() else { return }
+        if defaults.string(forKey: "library.deviceID")
+            .flatMap(UUID.init(uuidString:)) == legacyID {
+            return
+        }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: currentKeychainService,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+        ]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound {
+            return
+        }
+        guard status == errSecSuccess,
+              let items = result as? [[String: Any]] else {
+            throw MigrationError.keychain(status)
+        }
+        let migratedItems = items.filter {
+            $0[kSecAttrDescription as String] == nil
+        }
+        guard !migratedItems.isEmpty else { return }
+
+        defaults.set(legacyID.uuidString, forKey: "library.deviceID")
+    }
+
+    private static func legacyDeviceID() -> UUID? {
+        let legacy = UserDefaults.standard.persistentDomain(
+            forName: legacyBundleID
+        )
+        return (legacy?["library.deviceID"] as? String)
+            .flatMap(UUID.init(uuidString:))
+    }
 }
 
 enum MigrationError: LocalizedError {
     case legacyAppStillRunning
     case destinationConflict(String)
     case keychain(OSStatus)
+    case database(String, Int32, String)
 
     var errorDescription: String? {
         switch self {
@@ -336,6 +501,8 @@ enum MigrationError: LocalizedError {
             "Aro found different legacy and current files at \(path). Neither file was removed."
         case let .keychain(status):
             "Aro could not migrate paired-device credentials (Keychain status \(status))."
+        case let .database(path, status, message):
+            "Aro could not repair the migrated connection database at \(path) (SQLite status \(status): \(message))."
         }
     }
 }

@@ -1,5 +1,6 @@
 #if canImport(XCTest)
 import Foundation
+import SQLite3
 import XCTest
 @testable import Aro
 
@@ -69,6 +70,91 @@ final class LegacyProductMigrationTests: XCTestCase {
         XCTAssertEqual(
             LegacyProductMigration.rewrite("/Music/Sonora/album.flac"),
             "/Music/Sonora/album.flac"
+        )
+        XCTAssertEqual(
+            LegacyProductMigration.rewrite(
+                #"https:\/\/sonora-d7e2db96.local.:4848"#
+            ),
+            #"https:\/\/aro-d7e2db96.local.:4848"#
+        )
+        XCTAssertEqual(
+            LegacyProductMigration.rewrite(
+                #"\/Users\/test\/Library\/Application Support\/Sonora\/Libraries"#
+            ),
+            #"\/Users\/test\/Library\/Application Support\/Aro\/Libraries"#
+        )
+    }
+
+    func testRepairsCurrentProfileAndMembershipURLAfterV1Migration() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let databaseURL = root.appendingPathComponent("Library.sqlite3")
+        var connection: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(databaseURL.path, &connection), SQLITE_OK)
+        let database = try XCTUnwrap(connection)
+        defer { sqlite3_close(database) }
+        XCTAssertEqual(
+            sqlite3_exec(
+                database,
+                """
+                CREATE TABLE hub_memberships (base_url TEXT NOT NULL);
+                INSERT INTO hub_memberships VALUES (
+                    'https://sonora-d7e2db96.local.:4848'
+                );
+                """,
+                nil,
+                nil,
+                nil
+            ),
+            SQLITE_OK
+        )
+
+        let suiteName = "AroMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(
+            Data(
+                #"""
+                {"databasePath":"\/Users\/test\/Library\/Application Support\/Sonora\/Libraries\/Library.sqlite3","baseURL":"https:\/\/sonora-d7e2db96.local.:4848"}
+                """#.utf8
+            ),
+            forKey: "library.profileRegistry.v1"
+        )
+
+        try LegacyProductMigration.repairCurrentState(
+            applicationSupportRoot: root,
+            defaults: defaults,
+            fileManager: .default
+        )
+
+        let repairedData = try XCTUnwrap(
+            defaults.data(forKey: "library.profileRegistry.v1")
+        )
+        let repairedProfile = try XCTUnwrap(
+            String(data: repairedData, encoding: .utf8)
+        )
+        XCTAssertTrue(repairedProfile.contains(#"Support\/Aro\/Libraries"#))
+        XCTAssertTrue(repairedProfile.contains(#"https:\/\/aro-d7e2db96"#))
+        XCTAssertFalse(repairedProfile.contains("Sonora"))
+
+        var statement: OpaquePointer?
+        XCTAssertEqual(
+            sqlite3_prepare_v2(
+                database,
+                "SELECT base_url FROM hub_memberships",
+                -1,
+                &statement,
+                nil
+            ),
+            SQLITE_OK
+        )
+        let query = try XCTUnwrap(statement)
+        defer { sqlite3_finalize(query) }
+        XCTAssertEqual(sqlite3_step(query), SQLITE_ROW)
+        XCTAssertEqual(
+            String(cString: sqlite3_column_text(query, 0)),
+            "https://aro-d7e2db96.local.:4848"
         )
     }
 
