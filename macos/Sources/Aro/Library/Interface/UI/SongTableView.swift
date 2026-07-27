@@ -6,7 +6,7 @@ struct SongTableView: View {
     let songs: [Song]
     let scanState: FolderScanState
     let hasWatchedFolders: Bool
-    @Bindable var playback: PlaybackController
+    let playback: PlaybackController
     let storesLibraryCopy: Bool
     let removeSong: (Song) async throws -> Void
 

@@ -4,7 +4,7 @@ import SwiftUI
 
 struct ContentView: View {
     @Bindable var store: LibraryStore
-    @Bindable var playback: PlaybackController
+    let playback: PlaybackController
     @Bindable var preferences: PlaybackPreferences
     @Bindable var deviceManager: AudioDeviceManager
     @Bindable var profileRegistry: LibraryProfileRegistry
@@ -212,7 +212,7 @@ struct ContentView: View {
         defer { isSynchronizingRemoteLibrary = false }
         syncStore.recordSyncStarted(hubID: hubID)
         do {
-            guard let credential = try KeychainHubCredentialStore().load(
+            guard let credential = try FileHubCredentialStore().load(
                 hubID: hubID,
                 deviceID: libraryDeviceID
             ) else {

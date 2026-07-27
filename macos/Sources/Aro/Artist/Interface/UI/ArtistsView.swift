@@ -3,7 +3,7 @@ import SwiftUI
 
 struct ArtistsView: View {
     let songs: [Song]
-    @Bindable var playback: PlaybackController
+    let playback: PlaybackController
 
     @State private var selectedArtistID: LibraryArtist.ID?
     @State private var searchText = ""
@@ -143,7 +143,7 @@ struct ArtistsView: View {
 
 private struct AlbumRow: View {
     let album: ArtistAlbum
-    @Bindable var playback: PlaybackController
+    let playback: PlaybackController
 
     var body: some View {
         HStack(alignment: .top, spacing: 18) {

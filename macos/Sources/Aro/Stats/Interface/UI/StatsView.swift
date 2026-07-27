@@ -8,7 +8,7 @@ private enum StatsMode: String, CaseIterable {
 }
 
 struct StatsView: View {
-    @Bindable var playback: PlaybackController
+    let playback: PlaybackController
     let loadStatsDashboard: LoadStatsDashboard
 
     @State private var mode: StatsMode = .listening

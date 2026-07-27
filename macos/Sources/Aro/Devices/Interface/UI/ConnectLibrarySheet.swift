@@ -331,7 +331,7 @@ struct ConnectLibrarySheet: View {
                             pinnedTLSFingerprint: completed.tlsFingerprint
                         )
                         let info = try await secureClient.compatibleHubInfo()
-                        try KeychainHubCredentialStore().save(
+                        try FileHubCredentialStore().save(
                             completed.credential,
                             hubID: info.hubID
                         )

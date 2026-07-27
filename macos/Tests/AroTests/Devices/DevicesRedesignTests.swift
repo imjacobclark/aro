@@ -104,6 +104,38 @@ final class DevicesRedesignTests: XCTestCase {
         XCTAssertNotNil(registry.profiles.first { $0.id == remote.id })
     }
 
+    func testRepairingRemoteConnectionReusesReplicaProfile() {
+        let suite = "DevicesRedesignTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let registry = LibraryProfileRegistry(defaults: defaults)
+        let hubID = UUID()
+        let original = registry.createRemote(
+            name: "Mercury",
+            hubID: hubID,
+            baseURL: URL(string: "https://aro-mercury.local:4848")!,
+            policy: .stream
+        )
+
+        let repaired = registry.upsertRemote(
+            name: "Mercury Music",
+            hubID: hubID,
+            baseURL: URL(string: "https://mercury.example:4848")!,
+            policy: .fullLibrary
+        )
+
+        XCTAssertEqual(repaired.id, original.id)
+        XCTAssertEqual(repaired.databasePath, original.databasePath)
+        XCTAssertEqual(repaired.mediaPath, original.mediaPath)
+        XCTAssertEqual(registry.profiles.count, 1)
+        XCTAssertEqual(repaired.name, "Mercury Music")
+        XCTAssertEqual(
+            repaired.baseURL,
+            URL(string: "https://mercury.example:4848")
+        )
+        XCTAssertEqual(repaired.offlinePolicy, .fullLibrary)
+    }
+
     func testRemoteOperationsCreatePlayableAuthoritativeRows() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

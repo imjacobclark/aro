@@ -400,10 +400,14 @@ final class PlaybackController {
         shouldPlay: Bool
     ) {
         do {
+            let decoderQueue = localDecoderRun(startingAt: index)
+            guard !decoderQueue.isEmpty else {
+                throw PrepareSongError.missingLocalFile
+            }
             let engine = resolvedEngine()
             duration = try engine.load(
-                songs: queue,
-                startingAt: index,
+                songs: decoderQueue,
+                startingAt: 0,
                 from: startTime,
                 playbackID: requestedPlaybackID
             )
@@ -424,6 +428,22 @@ final class PlaybackController {
                 fail(error.localizedDescription)
             }
         }
+    }
+
+    /// The audio engine deliberately accepts local files only. Remote songs
+    /// are prepared one at a time, downloaded and hash-verified before they
+    /// enter this run. Keeping later HTTPS URLs out of the engine also makes
+    /// automatic advancement wait for that preparation step.
+    private func localDecoderRun(startingAt index: Int) -> [Song] {
+        guard queue.indices.contains(index) else { return [] }
+        var result: [Song] = []
+        for song in queue[index...] {
+            guard song.url.isFileURL else {
+                break
+            }
+            result.append(song)
+        }
+        return result
     }
 
     private func resume() {

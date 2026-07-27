@@ -186,6 +186,42 @@ final class LibraryProfileRegistry {
         return profile
     }
 
+    /// Repairs or reconnects an existing remote library in place. Pairing
+    /// credentials may be renewed independently of the replica database, so a
+    /// reconnect must not create another sidebar entry or discard downloads.
+    @discardableResult
+    func upsertRemote(
+        name: String,
+        hubID: UUID,
+        baseURL: URL,
+        policy: OfflineDownloadPolicy
+    ) -> LibraryProfile {
+        let matching = profiles.indices.filter {
+            profiles[$0].kind == .remote && profiles[$0].hubID == hubID
+        }
+        let selectedIndex = matching.first {
+            profiles[$0].id == activeProfileID
+        } ?? matching.max {
+            profiles[$0].lastActivatedAt < profiles[$1].lastActivatedAt
+        }
+        guard let selectedIndex else {
+            return createRemote(
+                name: name,
+                hubID: hubID,
+                baseURL: baseURL,
+                policy: policy
+            )
+        }
+
+        profiles[selectedIndex].name = name
+        profiles[selectedIndex].baseURL = baseURL
+        profiles[selectedIndex].offlinePolicy = policy
+        profiles[selectedIndex].lastActivatedAt = .now
+        activeProfileID = profiles[selectedIndex].id
+        save()
+        return profiles[selectedIndex]
+    }
+
     func activate(_ id: UUID) {
         guard let index = profiles.firstIndex(where: { $0.id == id }) else {
             return

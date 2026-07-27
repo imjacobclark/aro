@@ -3,7 +3,7 @@ import SwiftUI
 
 struct AlbumsView: View {
     let songs: [Song]
-    @Bindable var playback: PlaybackController
+    let playback: PlaybackController
 
     @State private var selectedAlbumID: LibraryAlbum.ID?
     @State private var searchText = ""

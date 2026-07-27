@@ -4,7 +4,7 @@ import SwiftUI
 struct OutputRoutePopover: View {
     @Bindable var preferences: PlaybackPreferences
     @Bindable var deviceManager: AudioDeviceManager
-    @Bindable var playback: PlaybackController
+    let playback: PlaybackController
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {

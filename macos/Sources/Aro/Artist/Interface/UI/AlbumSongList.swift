@@ -3,7 +3,7 @@ import SwiftUI
 
 struct AlbumSongList: View {
     let songs: [Song]
-    @Bindable var playback: PlaybackController
+    let playback: PlaybackController
 
     var body: some View {
         VStack(spacing: 0) {

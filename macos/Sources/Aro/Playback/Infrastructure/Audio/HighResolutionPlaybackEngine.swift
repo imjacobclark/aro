@@ -62,6 +62,11 @@ final class HighResolutionPlaybackEngine: NSObject, AudioPlaybackEngine {
         activePlaybackID = playbackID
 
         let firstSong = songs[index]
+        guard firstSong.url.isFileURL,
+              FileManager.default.isReadableFile(atPath: firstSong.url.path)
+        else {
+            throw PlaybackEngineError.invalidAudioFile
+        }
         guard let properties = firstSong.audioProperties,
               let sampleRate = properties.sampleRate,
               sampleRate > 0 else {
@@ -214,7 +219,9 @@ final class HighResolutionPlaybackEngine: NSObject, AudioPlaybackEngine {
 
         for candidateIndex in index..<songs.count {
             let song = songs[candidateIndex]
-            guard song.audioProperties?.sampleRate == sampleRate,
+            guard song.url.isFileURL,
+                  FileManager.default.isReadableFile(atPath: song.url.path),
+                  song.audioProperties?.sampleRate == sampleRate,
                   song.audioProperties?.channelCount == channelCount else {
                 break
             }

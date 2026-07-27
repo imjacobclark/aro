@@ -635,7 +635,7 @@ struct DevicesView: View {
         statusMessage = "Checking for updates…"
         syncStore.recordSyncStarted(hubID: hubID)
         do {
-            guard let credential = try KeychainHubCredentialStore().load(
+            guard let credential = try FileHubCredentialStore().load(
                 hubID: hubID,
                 deviceID: libraryDeviceID
             ) else {
@@ -704,7 +704,7 @@ struct DevicesView: View {
                           let membership = syncStore.membership(
                             baseURL: baseURL
                           ),
-                          let credential = try KeychainHubCredentialStore()
+                          let credential = try FileHubCredentialStore()
                             .load(
                                 hubID: hubID,
                                 deviceID: libraryDeviceID

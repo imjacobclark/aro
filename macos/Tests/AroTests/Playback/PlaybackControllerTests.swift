@@ -185,6 +185,51 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertEqual(controller.state, .playing)
     }
 
+    func testRemoteQueueNeverPassesUnpreparedURLToAudioEngine() async throws {
+        let engine = FakeAudioPlaybackEngine()
+        let cachedURL = URL(fileURLWithPath: "/Cache/verified-first.mp3")
+        let prepare = PrepareSongForPlayback(
+            downloader: FakeRemoteDownloader(url: cachedURL),
+            verifier: FakeMediaVerifier()
+        )
+        let controller = PlaybackController(
+            engine: engine,
+            prepareSong: prepare,
+            mediaLocationResolver: { song in
+                .remote(
+                    RemoteMedia(
+                        trackID: song.libraryID,
+                        contentHash: String(repeating: "b", count: 64),
+                        byteCount: 1,
+                        downloadURL: song.url
+                    )
+                )
+            }
+        )
+        let first = Song(
+            url: URL(string: "https://mercury/v1/blobs/first")!,
+            title: "First",
+            artist: "Artist",
+            duration: 180
+        )
+        let second = Song(
+            url: URL(string: "https://mercury/v1/blobs/second")!,
+            title: "Second",
+            artist: "Artist",
+            duration: 180
+        )
+        defer { controller.stopAndClear() }
+
+        controller.play(song: first, queue: [first, second])
+        for _ in 0 ..< 20 where controller.state != .playing {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(engine.loadedSongs.map(\.url), [cachedURL])
+        XCTAssertTrue(engine.loadedSongs.allSatisfy(\.url.isFileURL))
+        XCTAssertEqual(engine.loadedStartingIndex, 0)
+    }
+
     private func makeSongs(_ titles: [String]) -> [Song] {
         titles.map {
             Song(
@@ -218,6 +263,8 @@ private final class FakeAudioPlaybackEngine: AudioPlaybackEngine {
     var playCount = 0
     var stopCount = 0
     var loadedURL: URL?
+    var loadedSongs: [Song] = []
+    var loadedStartingIndex: Int?
 
     func load(
         songs: [Song],
@@ -226,6 +273,8 @@ private final class FakeAudioPlaybackEngine: AudioPlaybackEngine {
         playbackID: UUID
     ) throws -> TimeInterval {
         self.playbackID = playbackID
+        loadedSongs = songs
+        loadedStartingIndex = index
         loadedURL = songs[index].url
         currentTime = time
         loadedFrom = time

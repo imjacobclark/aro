@@ -39,7 +39,7 @@ final class LibraryRuntime {
             in: .userDomainMask
         )[0].appendingPathComponent("Aro/Media", isDirectory: true)
         let remoteCredential = profile?.hubID.flatMap { hubID in
-            try? KeychainHubCredentialStore().load(
+            try? FileHubCredentialStore().load(
                 hubID: hubID,
                 deviceID: database.deviceID
             )

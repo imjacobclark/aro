@@ -133,6 +133,7 @@ struct AroApp: App {
                         playback: runtime.playbackController,
                         libraryFileManager: runtime.libraryFileManager
                     )
+                    .id(ObjectIdentifier(runtime.playbackController))
                 }
                 Tab("Devices", systemImage: "macbook.and.iphone") {
                     SyncSettingsView(
@@ -145,6 +146,7 @@ struct AroApp: App {
                         registry: profileRegistry,
                         activateProfile: activateProfile
                     )
+                    .id(ObjectIdentifier(runtime))
                 }
             }
             .font(AroFont.body)
@@ -190,7 +192,7 @@ struct AroApp: App {
         tlsFingerprint: String,
         policy: OfflineDownloadPolicy
     ) {
-        let profile = profileRegistry.createRemote(
+        let profile = profileRegistry.upsertRemote(
             name: hub.displayName,
             hubID: hub.hubID,
             baseURL: baseURL,

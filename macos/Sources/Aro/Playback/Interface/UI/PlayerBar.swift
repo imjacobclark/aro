@@ -14,6 +14,7 @@ struct PlayerBar: View {
 
     @State private var isScrubbing = false
     @State private var scrubTime: TimeInterval = 0
+    @State private var displayedVolume: Double = 1
     @State private var isShowingOutputStatus = false
     @State private var isShowingRoutes = false
 
@@ -49,6 +50,23 @@ struct PlayerBar: View {
         }
         .onChange(of: playback.currentSong?.id) {
             scrubTime = playback.elapsedTime
+        }
+        .onChange(of: playback.volume) { _, newValue in
+            guard displayedVolume != newValue else { return }
+            displayedVolume = newValue
+        }
+        .onChange(of: displayedVolume) { _, newValue in
+            guard playback.volume != newValue else { return }
+            playback.setVolume(newValue)
+        }
+        .task(id: ObjectIdentifier(playback)) {
+            displayedVolume = playback.volume
+        }
+        .onDisappear {
+            // Popovers can otherwise outlive the library runtime whose
+            // playback controller supplied their observed values.
+            isShowingOutputStatus = false
+            isShowingRoutes = false
         }
     }
 
@@ -166,15 +184,10 @@ struct PlayerBar: View {
             Image(systemName: volumeSymbol)
                 .foregroundStyle(.secondary)
 
-            Slider(
-                value: Binding(
-                    get: { playback.volume },
-                    set: { newValue in
-                        playback.setVolume(newValue)
-                    }
-                ),
-                in: 0...1
-            )
+            // Bind AppKit's NSSlider bridge only to View-owned state. A
+            // closure Binding that reaches into PlaybackController can be
+            // retained during layout after a library runtime is replaced.
+            Slider(value: $displayedVolume, in: 0...1)
             .accessibilityLabel("Volume")
         }
     }
@@ -249,7 +262,7 @@ struct PlayerBar: View {
     }
 
     private var volumeSymbol: String {
-        switch playback.volume {
+        switch displayedVolume {
         case 0:
             return "speaker.slash.fill"
         case 0..<0.34:

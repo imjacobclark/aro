@@ -1,6 +1,5 @@
 import AppKit
 import Foundation
-import Security
 import SQLite3
 
 enum LegacyProductMigration {
@@ -8,9 +7,6 @@ enum LegacyProductMigration {
     private static let currentName = "Aro"
     private static let legacyBundleID = "com.imjacobclark.sonora"
     private static let legacyHelperID = "com.imjacobclark.sonora.server"
-    private static let legacyKeychainService =
-        "com.imjacobclark.sonora.sync"
-    private static let currentKeychainService = "com.imjacobclark.aro.sync"
     private static let markerName = ".aro-brand-migration-v1"
     static let restoreBackgroundServiceKey =
         "migration.restoreAroBackgroundService"
@@ -49,8 +45,6 @@ enum LegacyProductMigration {
                 to: currentRoot,
                 fileManager: fileManager
             )
-            try migrateKeychain()
-
             try fileManager.createDirectory(
                 at: currentRoot,
                 withIntermediateDirectories: true
@@ -61,7 +55,7 @@ enum LegacyProductMigration {
             )
         }
 
-        try repairMigratedDeviceIdentity(defaults: currentDefaults)
+        repairMigratedDeviceIdentity(defaults: currentDefaults)
         try repairCurrentState(
             applicationSupportRoot: currentRoot,
             defaults: currentDefaults,
@@ -374,107 +368,19 @@ enum LegacyProductMigration {
         }
     }
 
-    private static func migrateKeychain() throws {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: legacyKeychainService,
-            kSecReturnAttributes as String: true,
-            kSecMatchLimit as String: kSecMatchLimitAll,
-        ]
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecItemNotFound {
-            return
-        }
-        guard status == errSecSuccess,
-              let items = result as? [[String: Any]] else {
-            throw MigrationError.keychain(status)
-        }
-
-        for item in items {
-            guard let account = item[kSecAttrAccount as String] as? String else {
-                continue
-            }
-            let credentialQuery: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: legacyKeychainService,
-                kSecAttrAccount as String: account,
-                kSecReturnData as String: true,
-                kSecMatchLimit as String: kSecMatchLimitOne,
-            ]
-            var credentialResult: CFTypeRef?
-            let credentialStatus = SecItemCopyMatching(
-                credentialQuery as CFDictionary,
-                &credentialResult
-            )
-            guard credentialStatus == errSecSuccess,
-                  let data = credentialResult as? Data else {
-                throw MigrationError.keychain(credentialStatus)
-            }
-            var destination: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: currentKeychainService,
-                kSecAttrAccount as String: account,
-                kSecValueData as String: data,
-            ]
-            if let description =
-                item[kSecAttrDescription as String] as? String
-                ?? legacyDeviceID()?.uuidString {
-                destination[kSecAttrDescription as String] = description
-            }
-            let addStatus = SecItemAdd(
-                destination as CFDictionary,
-                nil
-            )
-            guard addStatus == errSecSuccess
-                    || addStatus == errSecDuplicateItem else {
-                throw MigrationError.keychain(addStatus)
-            }
-        }
-
-        let deleteStatus = SecItemDelete([
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: legacyKeychainService,
-        ] as CFDictionary)
-        guard deleteStatus == errSecSuccess
-                || deleteStatus == errSecItemNotFound else {
-            throw MigrationError.keychain(deleteStatus)
-        }
-    }
-
-    /// Credentials created by Sonora are bound to Sonora's device UUID. Early
-    /// Aro builds copied the credential but could generate a new UUID before
-    /// using it, causing an otherwise healthy migrated connection to receive
-    /// HTTP 401. A missing Keychain description identifies those copied
-    /// credentials; credentials paired natively in Aro always store one.
+    /// Preserve the legacy installation's device identity when migration did
+    /// not already copy it. Pairing credentials are intentionally not read
+    /// from Keychain: ad-hoc development signatures can cause macOS to prompt
+    /// for a login password on every build. Aro now stores newly paired
+    /// credentials in its permission-restricted Application Support folder.
     private static func repairMigratedDeviceIdentity(
         defaults: UserDefaults
-    ) throws {
+    ) {
+        guard defaults.string(forKey: "library.deviceID")
+            .flatMap(UUID.init(uuidString:)) == nil else {
+            return
+        }
         guard let legacyID = legacyDeviceID() else { return }
-        if defaults.string(forKey: "library.deviceID")
-            .flatMap(UUID.init(uuidString:)) == legacyID {
-            return
-        }
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: currentKeychainService,
-            kSecReturnAttributes as String: true,
-            kSecMatchLimit as String: kSecMatchLimitAll,
-        ]
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecItemNotFound {
-            return
-        }
-        guard status == errSecSuccess,
-              let items = result as? [[String: Any]] else {
-            throw MigrationError.keychain(status)
-        }
-        let migratedItems = items.filter {
-            $0[kSecAttrDescription as String] == nil
-        }
-        guard !migratedItems.isEmpty else { return }
-
         defaults.set(legacyID.uuidString, forKey: "library.deviceID")
     }
 
@@ -490,7 +396,6 @@ enum LegacyProductMigration {
 enum MigrationError: LocalizedError {
     case legacyAppStillRunning
     case destinationConflict(String)
-    case keychain(OSStatus)
     case database(String, Int32, String)
 
     var errorDescription: String? {
@@ -499,8 +404,6 @@ enum MigrationError: LocalizedError {
             "Close Sonora before opening Aro so your library can be upgraded safely."
         case let .destinationConflict(path):
             "Aro found different legacy and current files at \(path). Neither file was removed."
-        case let .keychain(status):
-            "Aro could not migrate paired-device credentials (Keychain status \(status))."
         case let .database(path, status, message):
             "Aro could not repair the migrated connection database at \(path) (SQLite status \(status): \(message))."
         }
