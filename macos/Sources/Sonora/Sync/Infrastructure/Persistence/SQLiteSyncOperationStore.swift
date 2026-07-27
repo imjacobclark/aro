@@ -418,7 +418,7 @@ struct SQLiteSyncOperationStore {
                             : (
                                 mode == "stored"
                                     ? "The original folder is unavailable. Sonora’s stored copy remains available."
-                                    : "This linked folder is unavailable. Its tracks cannot be served until the folder is online."
+                                    : "This linked folder is unavailable. Its songs cannot be served until the folder is online."
                             )
                     )
                 )

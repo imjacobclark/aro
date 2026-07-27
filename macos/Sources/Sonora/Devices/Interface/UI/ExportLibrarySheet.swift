@@ -27,7 +27,7 @@ struct ExportLibrarySheet: View {
                     .disabled(isExporting)
             }
             Text(
-                "Sonora downloads every active track and every recoverable recently removed track without changing a byte."
+                "Sonora downloads every active song and every recoverable recently removed song without changing a byte."
             )
             .foregroundStyle(.secondary)
 

@@ -176,7 +176,7 @@ struct SyncSettingsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(
-                "Temporary downloads will be removed. Favourites, selected albums, queued music, and the playing track remain protected."
+                "Temporary downloads will be removed. Favourites, selected albums, queued music, and the playing song remain protected."
             )
         }
     }

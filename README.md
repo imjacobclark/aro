@@ -80,7 +80,7 @@ Newly paired devices can play by default. A library owner must explicitly grant
 download preserves the original bytes and SHA-256 identity; Sonora does not
 transcode, retag, recompress, or change the file extension.
 
-**Remove from Sonora** removes the logical track but never deletes an original
+**Remove from Sonora** removes the logical song but never deletes an original
 file. A stored Sonora copy remains recoverable for 30 days, after which
 unreferenced storage can be reclaimed. **Export Entire Library** writes active
 songs to `sonora-library/<Artist>/<Album>/…`, recoverable removed songs to

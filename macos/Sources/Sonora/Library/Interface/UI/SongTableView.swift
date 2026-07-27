@@ -97,7 +97,7 @@ struct SongTableView: View {
             self.selectedSongID = nil
         }
         .confirmationDialog(
-            "Remove \(songPendingRemoval?.title ?? "this track") from Sonora?",
+            "Remove \(songPendingRemoval?.title ?? "this song") from Sonora?",
             isPresented: Binding(
                 get: { songPendingRemoval != nil },
                 set: { if !$0 { songPendingRemoval = nil } }
@@ -120,11 +120,11 @@ struct SongTableView: View {
             Text(
                 storesLibraryCopy
                     ? "Sonora never deletes the original file. Its stored copy remains recoverable for 30 days."
-                    : "Sonora removes the track from its library but never deletes the linked file."
+                    : "Sonora removes the song from its library but never deletes the linked file."
             )
         }
         .alert(
-            "Couldn’t Remove Track",
+            "Couldn’t Remove Song",
             isPresented: Binding(
                 get: { removalError != nil },
                 set: { if !$0 { removalError = nil } }

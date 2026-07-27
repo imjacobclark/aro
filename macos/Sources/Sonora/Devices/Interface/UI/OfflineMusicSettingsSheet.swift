@@ -112,7 +112,7 @@ struct OfflineMusicSettingsSheet: View {
             }
 
             Text(
-                "Favourites, selected albums, queued music, and the playing track are never removed automatically."
+                "Favourites, selected albums, queued music, and the playing song are never removed automatically."
             )
             .font(.footnote)
             .foregroundStyle(.secondary)

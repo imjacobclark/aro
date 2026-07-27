@@ -212,7 +212,7 @@ struct ConnectLibrarySheet: View {
             policyChoice(
                 .fullLibrary,
                 title: "Keep the full library offline",
-                detail: "Downloads every available track to this Mac."
+                detail: "Downloads every available song to this Mac."
             )
             Spacer()
             HStack {
