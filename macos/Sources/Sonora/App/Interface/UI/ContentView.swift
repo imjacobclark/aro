@@ -26,6 +26,7 @@ struct ContentView: View {
     @State private var importStatus: String?
     @State private var managedSourceMonitors: [String: FolderMonitor] = [:]
     @State private var importError: String?
+    @State private var isSynchronizingRemoteLibrary = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -166,6 +167,15 @@ struct ContentView: View {
             playback.reconcileAvailableSongs(store.allSongs)
             startManagedSourceMonitors()
         }
+        .task(id: profileRegistry.activeProfileID) {
+            while !Task.isCancelled {
+                if let profile = profileRegistry.activeProfile,
+                   profile.kind == .remote {
+                    await synchronizeRemoteLibrary(profile)
+                }
+                try? await Task.sleep(for: .seconds(30))
+            }
+        }
         .onChange(of: store.allSongs.map(\.id)) {
             playback.reconcileAvailableSongs(store.allSongs)
         }
@@ -189,6 +199,50 @@ struct ContentView: View {
         } message: {
             Text(importError ?? "Unknown error")
         }
+    }
+
+    private func synchronizeRemoteLibrary(_ profile: LibraryProfile) async {
+        guard !isSynchronizingRemoteLibrary,
+              let hubID = profile.hubID,
+              let baseURL = profile.baseURL,
+              let membership = syncStore.membership(baseURL: baseURL) else {
+            return
+        }
+        isSynchronizingRemoteLibrary = true
+        defer { isSynchronizingRemoteLibrary = false }
+        syncStore.recordSyncStarted(hubID: hubID)
+        do {
+            guard let credential = try KeychainHubCredentialStore().load(
+                hubID: hubID,
+                deviceID: libraryDeviceID
+            ) else {
+                return
+            }
+            let result = try await HubSyncCoordinator(
+                hubID: hubID,
+                client: SonoraSyncClient(
+                    baseURL: baseURL,
+                    pinnedTLSFingerprint: membership.tlsFingerprint
+                ),
+                credential: credential,
+                operations: syncStore,
+                offlineTrackCount: UInt64(mediaCache.downloadedFileCount)
+            ).synchronize()
+            syncStore.recordSyncSucceeded(hubID: hubID, result: result)
+            store.reloadStoredLibrary()
+            await mediaCache.apply(profile.offlinePolicy)
+        } catch {
+            syncStore.recordSyncFailed(
+                hubID: hubID,
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    private var libraryDeviceID: UUID {
+        UserDefaults.standard.string(forKey: "library.deviceID")
+            .flatMap(UUID.init(uuidString:))
+            ?? UUID()
     }
 
     private func chooseFolder() {

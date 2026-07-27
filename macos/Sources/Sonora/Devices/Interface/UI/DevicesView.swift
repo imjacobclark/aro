@@ -122,24 +122,14 @@ struct DevicesView: View {
         }
         .task {
             await refresh()
-            if let profile = registry.activeProfile,
-               profile.kind == .remote {
-                await performSync(profile)
-            }
         }
         .task {
-            var retrySeconds = 30
             while !Task.isCancelled {
                 localServers.refresh()
                 if registry.activeProfile?.kind == .local {
                     await refreshDevices()
-                } else if let profile = registry.activeProfile {
-                    await performSync(profile)
-                    retrySeconds = statusMessage == nil
-                        ? 30
-                        : min(retrySeconds * 2, 300)
                 }
-                try? await Task.sleep(for: .seconds(retrySeconds))
+                try? await Task.sleep(for: .seconds(30))
             }
         }
     }
