@@ -33,6 +33,9 @@ final class LibraryProfileRegistry {
             activeProfileID = snapshot.activeProfileID
             setupDismissed = snapshot.setupDismissed
         }
+        if removeDuplicateRemoteProfiles() {
+            save()
+        }
         if !isIsolatedUITest {
             repairDatabaseLocations()
         }
@@ -218,8 +221,46 @@ final class LibraryProfileRegistry {
         profiles[selectedIndex].offlinePolicy = policy
         profiles[selectedIndex].lastActivatedAt = .now
         activeProfileID = profiles[selectedIndex].id
+        removeDuplicateRemoteProfiles()
         save()
-        return profiles[selectedIndex]
+        return profiles.first {
+            $0.kind == .remote && $0.hubID == hubID
+        }!
+    }
+
+    /// Older builds could register the same remote library more than once.
+    /// Keep the active replica (or the most recently used one) and remove only
+    /// the duplicate registry entries. Their files are deliberately left
+    /// untouched so this migration can never discard downloaded music.
+    @discardableResult
+    private func removeDuplicateRemoteProfiles() -> Bool {
+        let hubIDs = Set(
+            profiles.compactMap { profile in
+                profile.kind == .remote ? profile.hubID : nil
+            }
+        )
+        var changed = false
+        for hubID in hubIDs {
+            let matches = profiles.filter {
+                $0.kind == .remote && $0.hubID == hubID
+            }
+            guard matches.count > 1 else { continue }
+            let kept = matches.first {
+                $0.id == activeProfileID
+            } ?? matches.max {
+                $0.lastActivatedAt < $1.lastActivatedAt
+            }!
+            profiles.removeAll {
+                $0.kind == .remote
+                    && $0.hubID == hubID
+                    && $0.id != kept.id
+            }
+            if matches.contains(where: { $0.id == activeProfileID }) {
+                activeProfileID = kept.id
+            }
+            changed = true
+        }
+        return changed
     }
 
     func activate(_ id: UUID) {

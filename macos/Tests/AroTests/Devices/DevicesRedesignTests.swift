@@ -136,6 +136,37 @@ final class DevicesRedesignTests: XCTestCase {
         XCTAssertEqual(repaired.offlinePolicy, .fullLibrary)
     }
 
+    func testRegistryRepairsDuplicateRemoteProfilesWithoutReplacingActiveReplica() {
+        let suite = "DevicesRedesignTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let hubID = UUID()
+        var activeID: UUID!
+        do {
+            let registry = LibraryProfileRegistry(defaults: defaults)
+            activeID = registry.createRemote(
+                name: "Mercury original",
+                hubID: hubID,
+                baseURL: URL(string: "https://mercury.local:4848")!,
+                policy: .stream
+            ).id
+            _ = registry.createRemote(
+                name: "Mercury duplicate",
+                hubID: hubID,
+                baseURL: URL(string: "https://mercury.local:4848")!,
+                policy: .stream
+            )
+            registry.activate(activeID)
+            XCTAssertEqual(registry.profiles.count, 2)
+        }
+
+        let repaired = LibraryProfileRegistry(defaults: defaults)
+
+        XCTAssertEqual(repaired.profiles.count, 1)
+        XCTAssertEqual(repaired.activeProfileID, activeID)
+        XCTAssertEqual(repaired.activeProfile?.name, "Mercury original")
+    }
+
     func testRemoteOperationsCreatePlayableAuthoritativeRows() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
