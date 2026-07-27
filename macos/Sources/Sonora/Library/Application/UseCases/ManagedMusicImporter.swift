@@ -20,6 +20,9 @@ struct ManagedMusicImporter: Sendable {
             )
 
             let existingHashes = try Self.hashes(in: library)
+            let sourceRoot = source
+                .resolvingSymlinksInPath()
+                .standardizedFileURL
             var knownHashes = existingHashes
             var imported = 0
             var duplicates = 0
@@ -40,10 +43,9 @@ struct ManagedMusicImporter: Sendable {
                     continue
                 }
                 let hash = try Self.sha256(file)
-                let relative = String(
-                    file.path.dropFirst(source.path.count)
-                ).trimmingCharacters(
-                    in: CharacterSet(charactersIn: "/")
+                let relative = try Self.relativePath(
+                    of: file,
+                    under: sourceRoot
                 )
                 let destination = library.appendingPathComponent(relative)
                 if FileManager.default.fileExists(atPath: destination.path),
@@ -103,6 +105,30 @@ struct ManagedMusicImporter: Sendable {
             }
         }
         return hashes
+    }
+
+    private static func relativePath(
+        of file: URL,
+        under source: URL
+    ) throws -> String {
+        let rootComponents = source.pathComponents
+        let fileComponents = file
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+            .pathComponents
+        guard fileComponents.count > rootComponents.count,
+              fileComponents.starts(with: rootComponents) else {
+            throw NSError(
+                domain: NSCocoaErrorDomain,
+                code: CocoaError.fileReadInvalidFileName.rawValue,
+                userInfo: [
+                    NSFilePathErrorKey: file.path,
+                ]
+            )
+        }
+        return fileComponents
+            .dropFirst(rootComponents.count)
+            .joined(separator: "/")
     }
 
     private static func publishAtomically(
