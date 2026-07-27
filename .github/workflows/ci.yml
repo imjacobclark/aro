@@ -79,14 +79,23 @@ jobs:
           wait "${app_pid}" || true
 
   docker:
-    runs-on: ubuntu-24.04
+    name: docker (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
           context: server
           file: server/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: false
