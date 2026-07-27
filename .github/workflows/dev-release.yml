@@ -140,7 +140,9 @@ jobs:
   build-linux-armv7:
     name: Build Linux ARMv7 server
     needs: version
-    runs-on: ubuntu-24.04
+    # Match the oldest supported standalone deployment (Mercury/Ubuntu 22.04)
+    # so the released GNU binary does not require a newer glibc.
+    runs-on: ubuntu-22.04
     timeout-minutes: 45
 
     steps:
