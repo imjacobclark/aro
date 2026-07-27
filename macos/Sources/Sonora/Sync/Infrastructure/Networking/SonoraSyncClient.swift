@@ -631,6 +631,10 @@ private struct SonoraSyncCodingKey: CodingKey {
 extension JSONDecoder {
     static func sonoraSyncProtocol() -> JSONDecoder {
         let decoder = JSONDecoder()
+        // Rust's chrono serializer emits RFC 3339 strings, including
+        // fractional seconds such as `2026-07-27T08:58:08.570370131Z`.
+        // JSONDecoder otherwise expects Date's numeric reference-date format.
+        decoder.dateDecodingStrategy = .iso8601
         decoder.keyDecodingStrategy = .custom { codingPath in
             let source = codingPath.last?.stringValue ?? ""
             if source == "physical_millis" {
