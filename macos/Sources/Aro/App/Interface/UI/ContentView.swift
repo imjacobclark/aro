@@ -216,7 +216,7 @@ struct ContentView: View {
                 hubID: hubID,
                 deviceID: libraryDeviceID
             ) else {
-                return
+                throw HubCredentialError.missingRecord
             }
             let result = try await HubSyncCoordinator(
                 hubID: hubID,

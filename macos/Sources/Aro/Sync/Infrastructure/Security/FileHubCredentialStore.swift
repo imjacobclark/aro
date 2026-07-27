@@ -3,11 +3,14 @@ import Darwin
 import Foundation
 
 enum HubCredentialError: LocalizedError {
+    case missingRecord
     case invalidRecord
     case fileSystem(String)
 
     var errorDescription: String? {
         switch self {
+        case .missingRecord:
+            "This library connection needs to be repaired."
         case .invalidRecord:
             "Aro could not read the saved library credential."
         case .fileSystem(let message):
