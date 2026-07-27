@@ -39,7 +39,10 @@ struct PlaybackSafetyTests {
 
         #expect(controller.state == .playing)
         #expect(engine.loadedSongs.map(\.url) == [cachedURL])
-        #expect(engine.loadedSongs.allSatisfy(\.url.isFileURL))
+        let loadedOnlyLocalFiles = engine.loadedSongs.allSatisfy { song in
+            song.url.isFileURL
+        }
+        #expect(loadedOnlyLocalFiles)
         #expect(engine.loadedStartingIndex == 0)
     }
 
