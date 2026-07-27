@@ -207,6 +207,11 @@ jobs:
           pattern: sonora-v${{ needs.version.outputs.version }}-*
           merge-multiple: true
 
+      - name: Download Linux server
+        uses: actions/download-artifact@v4
+        with:
+          name: sonora-server-v${{ needs.version.outputs.version }}-linux-armv7
+
       - name: Publish GitHub prerelease
         env:
           GH_TOKEN: ${{ github.token }}
