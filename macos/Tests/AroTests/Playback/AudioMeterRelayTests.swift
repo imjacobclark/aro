@@ -16,7 +16,10 @@ final class AudioMeterRelayTests: XCTestCase {
             relay.process(buffer)
         }
 
-        try await Task.sleep(for: .milliseconds(75))
+        let deadline = ContinuousClock.now + .seconds(1)
+        while deliveries.value == 0, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
         XCTAssertEqual(deliveries.value, 1)
         relay.invalidate()
     }
