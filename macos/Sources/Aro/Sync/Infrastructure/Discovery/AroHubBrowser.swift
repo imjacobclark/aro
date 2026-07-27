@@ -157,7 +157,7 @@ final class AroHubBrowser {
                     == .orderedAscending
             }
             self.errorMessage = verified.isEmpty && !candidates.isEmpty
-                ? "Bonjour found a Aro, but its secure connection could "
+                ? "Bonjour found an Aro library, but its secure connection could "
                     + "not be reached. Check macOS Firewall settings on the "
                     + "hosting Mac."
                 : nil

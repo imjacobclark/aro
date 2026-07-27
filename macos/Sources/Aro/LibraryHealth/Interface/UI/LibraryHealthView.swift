@@ -68,10 +68,12 @@ struct LibraryHealthView: View {
             )
             LibraryHealthSummaryCard(
                 label: "Exact savings",
-                value: ByteCountFormatter.string(
-                    fromByteCount: report.exactReclaimableBytes,
-                    countStyle: .file
-                ),
+                value: report.exactReclaimableBytes == 0
+                    ? "0 KB"
+                    : ByteCountFormatter.string(
+                        fromByteCount: report.exactReclaimableBytes,
+                        countStyle: .file
+                    ),
                 symbol: "externaldrive"
             )
             LibraryHealthSummaryCard(

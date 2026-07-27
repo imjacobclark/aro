@@ -11,6 +11,7 @@ struct ConnectLibrarySheet: View {
     ) -> Void
     var willPauseSharing = false
     var initialAddress = ""
+    var excludedHubID: UUID?
 
     @Environment(\.dismiss) private var dismiss
     @State private var browser = AroHubBrowser()
@@ -19,7 +20,8 @@ struct ConnectLibrarySheet: View {
     @State private var code = ""
     @State private var showingManual = false
     @State private var showingScanner = false
-    @State private var status = "Looking for your Aro libraries…"
+    @State private var status =
+        "Choose a library, then enter its six-digit connection code."
     @State private var pairingTask: Task<Void, Never>?
     @State private var completedPairing: CompletedConnection?
     @State private var pairingRequestID: UUID?
@@ -56,7 +58,7 @@ struct ConnectLibrarySheet: View {
             }
         }
         .padding(28)
-        .frame(width: 600, height: 600)
+        .frame(width: 600, height: sheetHeight)
         .onAppear {
             if manualAddress.isEmpty, !initialAddress.isEmpty {
                 manualAddress = initialAddress
@@ -78,11 +80,13 @@ struct ConnectLibrarySheet: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Libraries nearby")
                 .font(.title2.weight(.semibold))
-            if browser.hubs.isEmpty {
+            if visibleHubs.isEmpty {
                 ContentUnavailableView(
                     browser.isSearching
                         ? "Looking for libraries…"
-                        : "No libraries found",
+                        : excludedHubID == nil
+                            ? "No libraries found"
+                            : "No other libraries found",
                     systemImage: browser.isSearching
                         ? "dot.radiowaves.left.and.right"
                         : "wifi.slash",
@@ -93,10 +97,12 @@ struct ConnectLibrarySheet: View {
                     )
                 )
             } else {
-                ForEach(browser.hubs) { hub in
+                ForEach(visibleHubs) { hub in
                     Button {
                         selectedHubID = hub.id
                         manualAddress = hub.address
+                        status =
+                            "Enter the connection code shown by \(hub.name)."
                     } label: {
                         HStack(spacing: 14) {
                             Image(systemName: "macbook.and.iphone")
@@ -238,7 +244,7 @@ struct ConnectLibrarySheet: View {
 
     private var scannerContent: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Scan a Aro Code")
+            Text("Scan an Aro Code")
                 .font(.title)
             PairingCodeScanner { value in
                 guard let url = URL(string: value),
@@ -267,6 +273,17 @@ struct ConnectLibrarySheet: View {
     private var canConnect: Bool {
         code.count == 6 && URL(string: manualAddress)?.scheme == "https"
             && pairingTask == nil
+    }
+
+    private var sheetHeight: CGFloat {
+        if completedPairing != nil || pairingRequestID != nil {
+            return 600
+        }
+        return showingManual ? 580 : 480
+    }
+
+    private var visibleHubs: [HubEndpointCandidate] {
+        browser.hubs.filter { $0.hubID != excludedHubID }
     }
 
     private func policyChoice(

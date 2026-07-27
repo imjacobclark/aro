@@ -28,7 +28,7 @@ struct ArtistsView: View {
                     "No Artists Found",
                     systemImage: "music.mic",
                     description: Text(
-                        "Add a watched folder containing music to browse artists and albums."
+                        "Add a music folder to browse artists and albums."
                     )
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)

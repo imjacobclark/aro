@@ -20,21 +20,24 @@ struct LibrarySetupView: View {
     @State private var errorMessage: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            progress
-            switch step {
-            case .choice:
-                choice
-            case .storage:
-                storage
-            case .sharing:
-                sharing
-            case .complete(let profile):
-                complete(profile)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                progress
+                switch step {
+                case .choice:
+                    choice
+                case .storage:
+                    storage
+                case .sharing:
+                    sharing
+                case .complete(let profile):
+                    complete(profile)
+                }
             }
+            .padding(36)
+            .frame(maxWidth: 760, minHeight: 520, alignment: .topLeading)
+            .frame(maxWidth: .infinity)
         }
-        .padding(36)
-        .frame(maxWidth: 760, maxHeight: 620)
         .sheet(isPresented: $showingConnect) {
             ConnectLibrarySheet(
                 completeConnection: completeRemoteConnection
@@ -81,7 +84,7 @@ struct LibrarySetupView: View {
             setupCard(
                 icon: "rectangle.connected.to.line.below",
                 title: "Connect to an existing library",
-                detail: "Use a Aro library already running elsewhere.",
+                detail: "Use an Aro library already running elsewhere.",
                 button: "Connect to a Library"
             ) {
                 showingConnect = true
@@ -94,7 +97,7 @@ struct LibrarySetupView: View {
     }
 
     private var storage: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 14) {
             Text("Choose how Aro stores your music")
                 .font(.title2)
             selectionCard(
@@ -141,7 +144,6 @@ struct LibrarySetupView: View {
                 }
             }
 
-            Spacer()
             navigationButtons(primary: "Continue") {
                 guard storageChoice == .stored || selectedFolder != nil else {
                     errorMessage = "Choose the folder containing your music."
@@ -170,7 +172,6 @@ struct LibrarySetupView: View {
             .toggleStyle(.switch)
             .padding()
             .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
-            Spacer()
             navigationButtons(
                 primary: sharingEnabled ? "Enable Sharing" : "Create Library"
             ) {
@@ -190,7 +191,6 @@ struct LibrarySetupView: View {
                         : "\(profile.name) is stored on this Mac."
                 )
             }
-            Spacer()
             HStack {
                 Spacer()
                 Button("Go to My Library") {

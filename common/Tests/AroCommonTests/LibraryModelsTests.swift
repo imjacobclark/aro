@@ -124,7 +124,7 @@ final class LibraryModelsTests: XCTestCase {
 
         XCTAssertEqual(
             LibrarySummary(songs: songs).formatted,
-            "2 songs, 5 mins, 1.5 gb"
+            "2 songs, 5 mins, 1.5 GB"
         )
     }
 
@@ -133,7 +133,7 @@ final class LibraryModelsTests: XCTestCase {
             songs: [makeSong(duration: 60, fileSizeBytes: 1_200_000_000_000)]
         )
 
-        XCTAssertEqual(summary.formatted, "1 song, 1 mins, 1.2 tb")
+        XCTAssertEqual(summary.formatted, "1 song, 1 min, 1.2 TB")
     }
 
     func testNormalizationGainIsCappedByPeakCeiling() {

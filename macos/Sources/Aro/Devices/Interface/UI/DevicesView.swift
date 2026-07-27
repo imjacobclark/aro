@@ -56,7 +56,10 @@ struct DevicesView: View {
                 completeConnection: completeRemoteConnection,
                 willPauseSharing: registry.activeProfile?.kind == .local
                     && sharingIsAvailable,
-                initialAddress: connectionInitialAddress
+                initialAddress: connectionInitialAddress,
+                excludedHubID: connectionInitialAddress.isEmpty
+                    ? registry.activeProfile?.hubID
+                    : nil
             )
         }
         .sheet(isPresented: $showingOfflineSettings) {
@@ -83,7 +86,8 @@ struct DevicesView: View {
                 libraryFiles: libraryFiles,
                 activeProfile: registry.activeProfile,
                 registry: registry,
-                activateProfile: activateProfile
+                activateProfile: activateProfile,
+                showsDismissButton: true
             )
         }
         .confirmationDialog(
@@ -161,14 +165,32 @@ struct DevicesView: View {
     }
 
     private var header: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Devices")
-                    .font(.largeTitle.weight(.semibold))
-                Text("Your libraries, connected devices, and offline music")
-                    .foregroundStyle(.secondary)
+        ViewThatFits(in: .horizontal) {
+            HStack {
+                headerTitle
+                    .fixedSize(horizontal: true, vertical: false)
+                Spacer()
+                headerActions
+                    .fixedSize()
             }
-            Spacer()
+            VStack(alignment: .leading, spacing: 12) {
+                headerTitle
+                headerActions
+            }
+        }
+    }
+
+    private var headerTitle: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("Devices")
+                .font(.largeTitle.weight(.semibold))
+            Text("Your libraries, connected devices, and offline music")
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var headerActions: some View {
+        HStack {
             Button {
                 showingConnect = true
             } label: {
@@ -208,9 +230,9 @@ struct DevicesView: View {
                     .frame(width: 48, height: 48)
                     .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
                 VStack(alignment: .leading, spacing: 7) {
-                    HStack {
-                        Text(profile.name)
-                            .font(.title2.weight(.semibold))
+                    Text(profile.name)
+                        .font(.title2.weight(.semibold))
+                    HStack(spacing: 7) {
                         roleBadge(
                             profile.kind == .local
                                 ? "Library stored here"
@@ -525,7 +547,7 @@ struct DevicesView: View {
                 Label("Choose a music library", systemImage: "music.note.house")
             } description: {
                 Text(
-                    "Keep music on this Mac or connect to a Aro library elsewhere."
+                    "Keep music on this Mac or connect to an Aro library elsewhere."
                 )
             } actions: {
                 Button("Create a Library") {

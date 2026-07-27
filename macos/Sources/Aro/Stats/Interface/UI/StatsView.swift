@@ -86,7 +86,9 @@ struct StatsView: View {
                 StatCard(
                     label: "Last 30 days",
                     value: compactDuration(listening.last30DaysSeconds),
-                    detail: "\(listening.currentStreak)-day streak"
+                    detail: listening.currentStreak == 0
+                        ? "No listening streak yet"
+                        : "\(listening.currentStreak)-day streak"
                 )
                 StatCard(
                     label: "Songs played",
@@ -101,33 +103,47 @@ struct StatsView: View {
                 Text("Daily Listening — Last 30 Days")
                     .font(AroFont.headline)
 
-                Chart(listening.daily) { day in
-                    BarMark(
-                        x: .value("Day", day.date),
-                        y: .value("Minutes", day.seconds / 60)
-                    )
-                    .foregroundStyle(
-                        LinearGradient(
-                            gradient: AroTheme.orbitGradient,
-                            startPoint: .bottom,
-                            endPoint: .top
+                if listening.daily.allSatisfy({ $0.seconds == 0 }) {
+                    ContentUnavailableView(
+                        "No Listening Yet",
+                        systemImage: "waveform",
+                        description: Text(
+                            "Your daily listening history will appear here."
                         )
                     )
-                    .cornerRadius(3)
-                }
-                .chartXAxis {
-                    AxisMarks(values: .automatic(desiredCount: 5)) {
-                        AxisGridLine(stroke: StrokeStyle(dash: [2, 3]))
-                        AxisValueLabel(format: .dateTime.day().month(.abbreviated))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 180)
+                } else {
+                    Chart(listening.daily) { day in
+                        BarMark(
+                            x: .value("Day", day.date),
+                            y: .value("Minutes", day.seconds / 60)
+                        )
+                        .foregroundStyle(
+                            LinearGradient(
+                                gradient: AroTheme.orbitGradient,
+                                startPoint: .bottom,
+                                endPoint: .top
+                            )
+                        )
+                        .cornerRadius(3)
                     }
-                }
-                .chartYAxis {
-                    AxisMarks(position: .leading) {
-                        AxisGridLine()
-                        AxisValueLabel()
+                    .chartXAxis {
+                        AxisMarks(values: .automatic(desiredCount: 5)) {
+                            AxisGridLine(stroke: StrokeStyle(dash: [2, 3]))
+                            AxisValueLabel(
+                                format: .dateTime.day().month(.abbreviated)
+                            )
+                        }
                     }
+                    .chartYAxis {
+                        AxisMarks(position: .leading) {
+                            AxisGridLine()
+                            AxisValueLabel()
+                        }
+                    }
+                    .frame(height: 180)
                 }
-                .frame(height: 180)
             }
 
             Divider()
@@ -273,7 +289,8 @@ struct StatsView: View {
     }
 
     private func formattedBytes(_ bytes: Int64) -> String {
-        ByteCountFormatter.string(
+        guard bytes > 0 else { return "0 KB" }
+        return ByteCountFormatter.string(
             fromByteCount: bytes,
             countStyle: .file
         )

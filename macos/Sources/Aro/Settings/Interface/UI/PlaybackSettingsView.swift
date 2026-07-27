@@ -101,7 +101,7 @@ struct PlaybackSettingsView<
         }
         .formStyle(.grouped)
         .padding()
-        .frame(width: 520, height: 380)
+        .frame(width: 520, height: 430)
         .onAppear {
             deviceManager.refresh()
         }

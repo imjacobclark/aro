@@ -33,7 +33,7 @@ struct AlbumsView: View {
                     "No Albums Found",
                     systemImage: "square.stack",
                     description: Text(
-                        "Add a watched folder containing music to browse albums."
+                        "Add a music folder to browse albums."
                     )
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -103,25 +103,27 @@ struct AlbumsView: View {
                 header(title: album.name, subtitle: album.summary)
 
                 ScrollView {
-                    HStack(alignment: .top, spacing: 22) {
-                        VStack(alignment: .leading, spacing: 12) {
-                            AlbumArtworkView(data: album.artworkData)
-                                .frame(width: 180, height: 180)
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .top, spacing: 22) {
+                            albumIdentity(album, artworkSize: 180)
 
-                            Text(album.artistName)
-                                .font(AroFont.headline)
-                                .lineLimit(2)
-                                .help(album.artistName)
+                            Divider()
+
+                            AlbumSongList(
+                                songs: album.songs,
+                                playback: playback
+                            )
+                            .frame(minWidth: 300, maxWidth: .infinity)
                         }
-                        .frame(width: 180, alignment: .leading)
-
-                        Divider()
-
-                        AlbumSongList(
-                            songs: album.songs,
-                            playback: playback
-                        )
-                        .frame(maxWidth: .infinity)
+                        VStack(alignment: .leading, spacing: 16) {
+                            albumIdentity(album, artworkSize: 120)
+                            Divider()
+                            AlbumSongList(
+                                songs: album.songs,
+                                playback: playback
+                            )
+                            .frame(maxWidth: .infinity)
+                        }
                     }
                     .padding(16)
                     .background(
@@ -143,6 +145,22 @@ struct AlbumsView: View {
                 }
             }
         }
+    }
+
+    private func albumIdentity(
+        _ album: LibraryAlbum,
+        artworkSize: CGFloat
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            AlbumArtworkView(data: album.artworkData)
+                .frame(width: artworkSize, height: artworkSize)
+
+            Text(album.artistName)
+                .font(AroFont.headline)
+                .lineLimit(2)
+                .help(album.artistName)
+        }
+        .frame(width: artworkSize, alignment: .leading)
     }
 
     private func header(title: String, subtitle: String) -> some View {

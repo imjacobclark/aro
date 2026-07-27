@@ -49,7 +49,10 @@ struct SongTableView: View {
                     .background(.bar)
             }
 
-            ZStack {
+            if songs.isEmpty {
+                emptyState
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
                 Table(songs, selection: $selectedSongID) {
                     TableColumn("Title") { song in
                         HStack(spacing: 6) {
@@ -82,10 +85,6 @@ struct SongTableView: View {
                     .disabled(selectedIDs.isEmpty)
                 } primaryAction: { selectedIDs in
                     playFirstSong(in: selectedIDs)
-                }
-
-                if songs.isEmpty {
-                    emptyState
                 }
             }
         }

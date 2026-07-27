@@ -115,40 +115,56 @@ struct AddDeviceSheet: View {
             }
             .toggleStyle(.switch)
             ForEach(requests) { request in
-                HStack(spacing: 14) {
-                    Image(systemName: "laptopcomputer")
-                        .font(.title)
-                        .frame(width: 42, height: 42)
-                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(request.deviceName)
-                            .font(.headline)
-                        Text(
-                            "\(request.deviceType ?? "Device") · On your local network"
-                        )
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 14) {
+                        Image(systemName: "laptopcomputer")
+                            .font(.title)
+                            .frame(width: 42, height: 42)
+                            .background(
+                                .quaternary,
+                                in: RoundedRectangle(cornerRadius: 10)
+                            )
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(request.deviceName)
+                                .font(.headline)
+                            Text(
+                                "\(request.deviceType ?? "Device") · On your local network"
+                            )
                             .font(.footnote)
                             .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                    }
+
+                    HStack(spacing: 8) {
                         Text(request.requestID.uuidString)
                             .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
                             .textSelection(.enabled)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(
+                                request.requestID.uuidString,
+                                forType: .string
+                            )
+                        } label: {
+                            Label("Copy ID", systemImage: "doc.on.doc")
+                        }
                     }
-                    Spacer()
-                    Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(
-                            request.requestID.uuidString,
-                            forType: .string
-                        )
-                    } label: {
-                        Label("Copy ID", systemImage: "doc.on.doc")
+
+                    HStack {
+                        Spacer()
+                        Button("Deny", role: .destructive) {
+                            approve(request, allowed: false)
+                        }
+                        Button("Allow") {
+                            approve(request, allowed: true)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
                     }
-                    Button("Deny", role: .destructive) {
-                        approve(request, allowed: false)
-                    }
-                    Button("Allow") {
-                        approve(request, allowed: true)
-                    }
-                    .keyboardShortcut(.defaultAction)
                 }
                 .padding()
                 .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))

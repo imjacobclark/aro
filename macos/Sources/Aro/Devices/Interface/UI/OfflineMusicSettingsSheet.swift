@@ -127,7 +127,10 @@ struct OfflineMusicSettingsSheet: View {
             }
         }
         .padding(28)
-        .frame(width: 560, height: 570)
+        .frame(
+            width: 560,
+            height: policyKind.wrappedValue == .albums ? 570 : 410
+        )
     }
 
     private var policyKind: Binding<PolicyKind> {

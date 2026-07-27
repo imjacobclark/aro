@@ -60,7 +60,8 @@ public struct LibrarySummary: Equatable, Sendable {
 
     public var formatted: String {
         "\(songCount) \(songCount == 1 ? "song" : "songs"), "
-            + "\(durationMinutes) mins, \(formattedFileSize)"
+            + "\(durationMinutes) \(durationMinutes == 1 ? "min" : "mins"), "
+            + formattedFileSize
     }
 
     private var formattedFileSize: String {
@@ -68,13 +69,13 @@ public struct LibrarySummary: Equatable, Sendable {
         let divisor: Double
 
         if fileSizeBytes >= 1_000_000_000_000 {
-            unit = "tb"
+            unit = "TB"
             divisor = 1_000_000_000_000
         } else if fileSizeBytes >= 1_000_000_000 {
-            unit = "gb"
+            unit = "GB"
             divisor = 1_000_000_000
         } else {
-            unit = "mb"
+            unit = "MB"
             divisor = 1_000_000
         }
 

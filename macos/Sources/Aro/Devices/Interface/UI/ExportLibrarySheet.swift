@@ -36,7 +36,7 @@ struct ExportLibrarySheet: View {
                     Label("Export complete", systemImage: "checkmark.circle.fill")
                 } description: {
                     Text(
-                        "\(result.exportedTracks) files downloaded and \(result.unchangedTracks) matching files kept."
+                        "\(result.exportedTracks) songs downloaded and \(result.unchangedTracks) matching songs kept."
                     )
                 } actions: {
                     Button("Show in Finder") {
@@ -90,7 +90,14 @@ struct ExportLibrarySheet: View {
             }
         }
         .padding(28)
-        .frame(width: 620, height: 440)
+        .frame(width: 620, height: sheetHeight)
+    }
+
+    private var sheetHeight: CGFloat {
+        if result != nil || progress != nil || errorMessage != nil {
+            return 440
+        }
+        return 330
     }
 
     private func chooseDestination() {

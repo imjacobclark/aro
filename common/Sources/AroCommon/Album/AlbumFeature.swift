@@ -38,9 +38,10 @@ public struct LibraryAlbum: Identifiable, Hashable, Sendable {
             return "\(days) \(days == 1 ? "day" : "days"), \(hours) hrs"
         }
         if hours > 0 {
-            return "\(hours) \(hours == 1 ? "hr" : "hrs"), \(minutes) mins"
+            return "\(hours) \(hours == 1 ? "hr" : "hrs"), "
+                + "\(minutes) \(minutes == 1 ? "min" : "mins")"
         }
-        return "\(totalMinutes) mins"
+        return "\(totalMinutes) \(totalMinutes == 1 ? "min" : "mins")"
     }
 }
 
