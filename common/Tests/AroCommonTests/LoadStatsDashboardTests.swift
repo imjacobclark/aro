@@ -26,9 +26,9 @@ struct LoadStatsDashboardTests {
     }
 
     @Test("Loads both read models through the application port")
-    func loadsDashboard() {
+    func loadsDashboard() async {
         let now = Date(timeIntervalSince1970: 1_722_470_400)
-        let dashboard = LoadStatsDashboard(
+        let dashboard = await LoadStatsDashboard(
             stats: StubStatsQuery(now: now)
         ).execute(now: now)
 

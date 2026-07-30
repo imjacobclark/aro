@@ -28,6 +28,7 @@ let package = Package(
         .executableTarget(
             name: "Aro",
             dependencies: [
+                "AroStreamingInput",
                 .product(
                     name: "AroCommon",
                     package: "common"
@@ -48,10 +49,21 @@ let package = Package(
                 .linkedLibrary("sqlite3")
             ]
         ),
+        .target(
+            name: "AroStreamingInput",
+            dependencies: [
+                .product(
+                    name: "SFBAudioEngine",
+                    package: "SFBAudioEngine"
+                )
+            ],
+            publicHeadersPath: "include"
+        ),
         .testTarget(
             name: "AroTests",
             dependencies: [
                 "Aro",
+                "AroStreamingInput",
                 .product(
                     name: "AroCommon",
                     package: "common"

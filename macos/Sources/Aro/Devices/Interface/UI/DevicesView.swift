@@ -1,7 +1,7 @@
 import AroCommon
 import SwiftUI
 
-struct DevicesView: View {
+struct LibrarySettingsView: View {
     @Bindable var library: LibraryStore
     @Bindable var registry: LibraryProfileRegistry
     @Bindable var service: AroHubService
@@ -10,6 +10,7 @@ struct DevicesView: View {
     let syncStore: SQLiteSyncOperationStore
     let libraryFiles: any LibraryFileManaging
     let activateProfile: (LibraryProfile) -> Void
+    let forgetProfile: (LibraryProfile) -> Void
     let completeRemoteConnection: (
         AroHubInfo,
         URL,
@@ -25,13 +26,11 @@ struct DevicesView: View {
     @State private var connectionInitialAddress = ""
     @State private var showingOfflineSettings = false
     @State private var deviceToRemove: ControlledHubDevice?
+    @State private var profileToForget: LibraryProfile?
     @State private var statusMessage: String?
-    @State private var recentActivity: [StoredSyncActivity] = []
     @State private var isSyncing = false
     @State private var exportSession: LibraryExportSession?
     @State private var exportStartedService = false
-    @State private var sourceWarnings: [String] = []
-    @State private var showingLibrarySettings = false
 
     var body: some View {
         Group {
@@ -77,18 +76,14 @@ struct DevicesView: View {
         .sheet(item: $exportSession, onDismiss: finishExportSession) { session in
             ExportLibrarySheet(session: session)
         }
-        .sheet(isPresented: $showingLibrarySettings) {
-            SyncSettingsView(
-                service: service,
-                preferences: preferences,
-                mediaCache: mediaCache,
-                syncStore: syncStore,
-                libraryFiles: libraryFiles,
-                activeProfile: registry.activeProfile,
-                registry: registry,
-                activateProfile: activateProfile,
-                showsDismissButton: true
-            )
+        .onChange(of: mediaCache.errorMessage) {
+            // OfflineMusicSettingsSheet fires MediaCacheController.apply(...)
+            // as a Task and dismisses immediately, so a failure can only be
+            // known after the sheet has already closed — surface it here,
+            // in the status line the user returns to.
+            if let error = mediaCache.errorMessage {
+                statusMessage = error
+            }
         }
         .confirmationDialog(
             "Remove \(deviceToRemove?.name ?? "this device")?",
@@ -109,6 +104,25 @@ struct DevicesView: View {
                 "It will lose access to this library. Downloaded music will be removed the next time Aro opens on that device."
             )
         }
+        .confirmationDialog(
+            "Forget \(profileToForget?.name ?? "this library")?",
+            isPresented: Binding(
+                get: { profileToForget != nil },
+                set: { if !$0 { profileToForget = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Forget Library", role: .destructive) {
+                if let profileToForget {
+                    forgetProfile(profileToForget)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "Aro will remove its local copy and downloaded music for this library on this Mac only. The library itself, and any other device connected to it, is unaffected."
+            )
+        }
         .alert(
             "Unable to Add a Device",
             isPresented: Binding(
@@ -117,9 +131,6 @@ struct DevicesView: View {
             )
         ) {
             Button("OK", role: .cancel) {}
-            SettingsLink {
-                Text("Open Advanced Settings")
-            }
         } message: {
             Text(
                 addDeviceError
@@ -148,12 +159,9 @@ struct DevicesView: View {
                     libraryCard(profile)
                     if profile.kind == .local {
                         connectedDevicesCard(profile)
-                    } else {
-                        remoteLibraryCard(profile)
                     }
                     offlineMusicCard(profile)
-                    activityCard(profile)
-                    advancedCard
+                    advancedSettings
                 } else {
                     unconfiguredState
                 }
@@ -165,64 +173,23 @@ struct DevicesView: View {
     }
 
     private var header: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack {
-                headerTitle
-                    .fixedSize(horizontal: true, vertical: false)
-                Spacer()
-                headerActions
-                    .fixedSize()
-            }
-            VStack(alignment: .leading, spacing: 12) {
-                headerTitle
-                headerActions
-            }
-        }
+        headerTitle
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var headerTitle: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text("Devices")
+            Text("Settings")
                 .font(.largeTitle.weight(.semibold))
-            Text("Your libraries, connected devices, and offline music")
+            Text(
+                "Your libraries, connected devices, storage, and service controls"
+            )
                 .foregroundStyle(.secondary)
         }
     }
 
-    private var headerActions: some View {
-        HStack {
-            Button {
-                showingConnect = true
-            } label: {
-                Label(
-                    registry.activeProfile?.kind == .remote
-                        ? "Connect to Different Library"
-                        : "Connect to Another Library",
-                    systemImage: "network"
-                )
-            }
-            if registry.profiles.count > 1 {
-                Menu {
-                    ForEach(registry.profiles) { profile in
-                        Button {
-                            activateProfile(profile)
-                        } label: {
-                            if profile.id == registry.activeProfileID {
-                                Label(profile.name, systemImage: "checkmark")
-                            } else {
-                                Text(profile.name)
-                            }
-                        }
-                    }
-                } label: {
-                    Label("Switch Library", systemImage: "arrow.left.arrow.right")
-                }
-            }
-        }
-    }
-
     private func libraryCard(_ profile: LibraryProfile) -> some View {
-        DevicesCard {
+        SettingsCard {
             HStack(alignment: .top, spacing: 16) {
                 Image(systemName: profile.kind == .local ? "desktopcomputer" : "music.note.house")
                     .font(.system(size: 30))
@@ -236,10 +203,11 @@ struct DevicesView: View {
                         roleBadge(
                             profile.kind == .local
                                 ? "Library stored here"
-                                : "Connected library"
+                                : "Remote library",
+                            systemImage: profile.kind == .local ? nil : "network"
                         )
                         if profile.kind == .local, sharingIsAvailable {
-                            roleBadge("Sharing enabled")
+                            roleBadge("Sharing enabled", systemImage: nil)
                         }
                     }
                     Label(
@@ -247,29 +215,32 @@ struct DevicesView: View {
                         systemImage: primaryStatusIcon(profile)
                     )
                     .foregroundStyle(primaryStatusColor(profile))
-                    Text(
-                        "\(library.allSongs.count) songs · Last updated just now"
-                    )
-                    .foregroundStyle(.secondary)
-                    Text(libraryDescription(profile))
-                        .font(.footnote)
+                    HStack(spacing: 8) {
+                        Text(
+                            "\(library.allSongs.count) songs · Last updated just now"
+                        )
                         .foregroundStyle(.secondary)
+                    }
+                    if profile.kind == .remote, let baseURL = profile.baseURL {
+                        Text(connectionDetail(baseURL))
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    } else if profile.kind == .local {
+                        Text(libraryDescription(profile))
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    if profile.kind == .local,
+                       let localServersError = localServers.errorMessage {
+                        Label(localServersError, systemImage: "exclamationmark.triangle")
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                    }
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 10) {
-                    Button("Export Entire Library") {
-                        beginExport(profile)
-                    }
                     if profile.kind == .local {
-                        if sharingIsAvailable {
-                            Button("Add Device") {
-                                beginAddingDevice()
-                            }
-                            .buttonStyle(.borderedProminent)
-                            Button("Stop Sharing", role: .destructive) {
-                                stopSharing(profile)
-                            }
-                        } else {
+                        if !sharingIsAvailable {
                             Button("Enable Sharing") {
                                 enableSharing()
                             }
@@ -281,28 +252,68 @@ struct DevicesView: View {
                                 beginRepairingConnection(profile)
                             }
                             .buttonStyle(.borderedProminent)
-                            Button("Check for Updates") {
-                                Task { await performSync(profile) }
-                            }
-                            .disabled(isSyncing)
                         } else {
                             Button("Check for Updates") {
                                 Task { await performSync(profile) }
                             }
-                            .buttonStyle(.borderedProminent)
                             .disabled(isSyncing)
                         }
                     }
-                    Button("Library Settings") {
-                        showingLibrarySettings = true
-                    }
+                    libraryManagementMenu(profile)
                 }
             }
         }
     }
 
+    private func libraryManagementMenu(
+        _ activeProfile: LibraryProfile
+    ) -> some View {
+        Menu {
+            if registry.profiles.count > 1 {
+                Section("Switch Library") {
+                    ForEach(registry.profiles) { profile in
+                        Button {
+                            activateProfile(profile)
+                        } label: {
+                            if profile.id == registry.activeProfileID {
+                                Label(profile.name, systemImage: "checkmark")
+                            } else {
+                                Text(profile.name)
+                            }
+                        }
+                    }
+                }
+            }
+
+            Button("Connect to Another Library…") {
+                connectionInitialAddress = ""
+                showingConnect = true
+            }
+
+            Divider()
+
+            Button("Export Library…") {
+                beginExport(activeProfile)
+            }
+
+            if activeProfile.kind == .local, sharingIsAvailable {
+                Button("Stop Sharing", role: .destructive) {
+                    stopSharing(activeProfile)
+                }
+            }
+
+            if activeProfile.kind == .remote, registry.profiles.count > 1 {
+                Button("Forget This Library", role: .destructive) {
+                    profileToForget = activeProfile
+                }
+            }
+        } label: {
+            Label("Manage Libraries", systemImage: "ellipsis.circle")
+        }
+    }
+
     private func connectedDevicesCard(_ profile: LibraryProfile) -> some View {
-        DevicesCard(title: "Connected Devices") {
+        SettingsCard(title: "Connected Devices") {
             if pairedDevices.isEmpty {
                 ContentUnavailableView {
                     Label(
@@ -356,6 +367,7 @@ struct DevicesView: View {
                             Image(systemName: "ellipsis.circle")
                         }
                         .menuStyle(.borderlessButton)
+                        .accessibilityLabel("More options for \(device.name)")
                     }
                     if device.id != pairedDevices.last?.id {
                         Divider()
@@ -365,33 +377,14 @@ struct DevicesView: View {
         }
     }
 
-    private func remoteLibraryCard(_ profile: LibraryProfile) -> some View {
-        DevicesCard(title: "Library Host") {
-            HStack(spacing: 14) {
-                Image(systemName: "desktopcomputer")
-                    .font(.title2)
-                    .frame(width: 42, height: 42)
-                    .background(Color.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(profile.name)
-                        .font(.headline)
-                    Text(statusMessage ?? "Connected · Library is up to date")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                if needsCredentialRepair(profile) {
-                    Button("Repair Connection") {
-                        beginRepairingConnection(profile)
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-                Button("Connect to a Different Library") {
-                    connectionInitialAddress = ""
-                    showingConnect = true
-                }
-            }
+    private func connectionDetail(_ url: URL) -> String {
+        guard let host = url.host else {
+            return url.absoluteString
         }
+        guard let port = url.port else {
+            return host
+        }
+        return "\(host):\(port)"
     }
 
     private func beginRepairingConnection(_ profile: LibraryProfile) {
@@ -414,7 +407,7 @@ struct DevicesView: View {
     }
 
     private func offlineMusicCard(_ profile: LibraryProfile) -> some View {
-        DevicesCard(title: "Offline Music") {
+        SettingsCard(title: "Streaming & Storage") {
             if profile.kind == .local {
                 HStack(spacing: 14) {
                     Image(systemName: "internaldrive")
@@ -429,29 +422,55 @@ struct DevicesView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(policyTitle(profile.offlinePolicy))
-                                .font(.headline)
-                            Text(
-                                "\(formattedBytes(mediaCache.usedBytes)) used of \(formattedBytes(storageLimit(profile)))"
-                            )
+                            HStack(spacing: 7) {
+                                if profile.offlinePolicy == .streamOnly {
+                                    Image(
+                                        systemName:
+                                            "dot.radiowaves.left.and.right"
+                                    )
+                                }
+                                Text(policyTitle(profile.offlinePolicy))
+                            }
+                            .font(.headline)
+                            Text(profile.offlinePolicy == .streamOnly
+                                ? "Nothing is retained on this Mac"
+                                : "\(formattedBytes(mediaCache.usedBytes)) used, "
+                                    + "\(mediaCache.downloadedFileCount) stored files")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Button("Manage Offline Music") {
-                            showingOfflineSettings = true
-                        }
-                        Button("Change Limit") {
+                        Button("Manage Storage") {
                             showingOfflineSettings = true
                         }
                     }
-                    ProgressView(
-                        value: min(
-                            Double(mediaCache.usedBytes),
-                            Double(storageLimit(profile))
-                        ),
-                        total: Double(max(1, storageLimit(profile)))
-                    )
+                    HStack(spacing: 16) {
+                        Label(
+                            "\(mediaCache.downloadedFileCount) downloaded",
+                            systemImage: "arrow.down.circle"
+                        )
+                        Label(
+                            formattedBytes(mediaCache.usedBytes),
+                            systemImage: "internaldrive"
+                        )
+                    }
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    if profile.offlinePolicy != .streamOnly,
+                       !isResilient(profile.offlinePolicy) {
+                        ProgressView(
+                            value: min(
+                                Double(mediaCache.usedBytes),
+                                Double(storageLimit(profile))
+                            ),
+                            total: Double(max(1, storageLimit(profile)))
+                        )
+                        .accessibilityLabel("Offline storage used")
+                        .accessibilityValue(
+                            "\(formattedBytes(mediaCache.usedBytes)) of "
+                                + formattedBytes(storageLimit(profile))
+                        )
+                    }
                     if let progress = mediaCache.downloadProgress {
                         ProgressView(
                             value: Double(progress.completed),
@@ -462,87 +481,30 @@ struct DevicesView: View {
                             )
                         }
                     }
-                    Text(
-                        "\(mediaCache.downloadedFileCount) downloaded files. Protected music is never removed automatically."
-                    )
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
                 }
             }
         }
     }
 
-    private func activityCard(_ profile: LibraryProfile) -> some View {
-        DevicesCard(title: "Activity") {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 14) {
-                    Image(systemName: statusMessage == nil ? "checkmark.circle.fill" : "arrow.triangle.2.circlepath")
-                        .font(.title2)
-                        .foregroundStyle(
-                            statusMessage == nil
-                                ? Color.green
-                                : AroTheme.violet
-                        )
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(statusMessage ?? "Everything is up to date")
-                            .font(.headline)
-                        Text(
-                            profile.kind == .local
-                                ? (
-                                    sharingIsAvailable
-                                        ? "Your library is ready for approved devices."
-                                        : "Your music remains available on this Mac."
-                                )
-                                : "Aro checks for changes automatically."
-                        )
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    }
-                }
-                ForEach(recentActivity) { activity in
-                    Divider()
-                    HStack {
-                        Image(
-                            systemName: activity.state == "error"
-                                ? "exclamationmark.circle"
-                                : "checkmark.circle"
-                        )
-                        .foregroundStyle(
-                            activity.state == "error" ? .orange : .secondary
-                        )
-                        Text(activity.message)
-                        Spacer()
-                        Text(activity.createdAt, style: .relative)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                ForEach(sourceWarnings, id: \.self) { warning in
-                    Divider()
-                    Label(warning, systemImage: "externaldrive.badge.exclamationmark")
-                        .foregroundStyle(.orange)
-                }
-            }
-        }
+    private func isResilient(_ policy: OfflineDownloadPolicy) -> Bool {
+        policy == .fullLibrary
     }
 
-    private var advancedCard: some View {
-        DevicesCard(title: "Advanced") {
-            HStack {
-                Text(
-                    "Network access, manual connections, diagnostics, and storage maintenance."
-                )
-                .foregroundStyle(.secondary)
-                Spacer()
-                SettingsLink {
-                    Text("Show Advanced Settings")
-                }
-            }
-        }
+    private var advancedSettings: some View {
+        SyncSettingsView(
+            service: service,
+            preferences: preferences,
+            mediaCache: mediaCache,
+            syncStore: syncStore,
+            libraryFiles: libraryFiles,
+            activeProfile: registry.activeProfile,
+            registry: registry,
+            activateProfile: activateProfile
+        )
     }
 
     private var unconfiguredState: some View {
-        DevicesCard {
+        SettingsCard {
             ContentUnavailableView {
                 Label("Choose a music library", systemImage: "music.note.house")
             } description: {
@@ -592,7 +554,7 @@ struct DevicesView: View {
         localServers.refresh()
         guard let controlClient else {
             addDeviceError = "Aro cannot find the connection for this library service. "
-                + "Restart sharing in Advanced Settings, then try again."
+                + "Restart sharing in Library Service & Storage below, then try again."
             return
         }
         pairingSession = PairingSession(client: controlClient)
@@ -601,19 +563,9 @@ struct DevicesView: View {
     private func refresh() async {
         localServers.refresh()
         mediaCache.refreshSummary()
-        recentActivity = syncStore.recentActivity(
-            hubID: registry.activeProfile?.hubID
-        )
         if let hubID = registry.activeProfile?.hubID,
            let syncStatus = syncStore.syncStatus(hubID: hubID) {
             statusMessage = syncStatus.lastError
-        }
-        if let profile = registry.activeProfile, profile.kind == .local {
-            let mode = profile.managedMusicPath == nil
-                ? "linked"
-                : "stored"
-            sourceWarnings = syncStore.sourceHealthReports(mode: mode)
-                .compactMap(\.warning)
         }
         await refreshDevices()
     }
@@ -649,15 +601,29 @@ struct DevicesView: View {
                 ? .referenced
                 : .managed
             preferences.importMode = mode
+            var failedFolderCount = 0
             for path in syncStore.activeWatchedFolderPaths {
-                _ = try? await controlClient?.importFolder(
-                    path: path,
-                    mode: mode
-                )
+                do {
+                    _ = try await controlClient?.importFolder(
+                        path: path,
+                        mode: mode
+                    )
+                } catch {
+                    failedFolderCount += 1
+                }
             }
             localServers.refresh()
-            statusMessage = service.errorMessage
-            if openPairingAfterStart, service.errorMessage == nil {
+            if let errorMessage = service.errorMessage {
+                statusMessage = errorMessage
+            } else if failedFolderCount > 0 {
+                statusMessage = failedFolderCount == 1
+                    ? "1 watched folder could not be shared."
+                    : "\(failedFolderCount) watched folders could not be shared."
+            } else {
+                statusMessage = nil
+            }
+            if openPairingAfterStart, service.errorMessage == nil,
+               failedFolderCount == 0 {
                 beginAddingDevice()
             }
         }
@@ -713,23 +679,24 @@ struct DevicesView: View {
                 operations: syncStore,
                 offlineTrackCount: UInt64(
                     mediaCache.downloadedFileCount
-                )
+                ),
+                sourceMode: profile.managedMusicPath == nil
+                    ? "referenced"
+                    : "managed"
             ).synchronize()
-            sourceWarnings = try await client.sourceHealth(
-                credential: credential
-            ).compactMap(\.warning)
             syncStore.recordSyncSucceeded(hubID: hubID, result: result)
             library.reloadStoredLibrary()
-            await mediaCache.apply(profile.offlinePolicy)
+            await mediaCache.apply(
+                profile.offlinePolicy,
+                storageLimitBytes: profile.storageLimitBytes
+            )
             statusMessage = nil
-            recentActivity = syncStore.recentActivity(hubID: hubID)
         } catch {
             statusMessage = error.localizedDescription
             syncStore.recordSyncFailed(
                 hubID: hubID,
                 message: error.localizedDescription
             )
-            recentActivity = syncStore.recentActivity(hubID: hubID)
         }
     }
 
@@ -778,7 +745,9 @@ struct DevicesView: View {
                             pinnedTLSFingerprint:
                                 membership.tlsFingerprint
                         ),
-                        credential: credential
+                        credential: credential,
+                        localSongs: library.allSongs,
+                        localMediaCache: mediaCache.blobCache
                     )
                 }
                 exportSession = LibraryExportSession(exporter: exporter)
@@ -815,7 +784,7 @@ struct DevicesView: View {
         if profile.kind == .local {
             return sharingIsAvailable ? "Library available" : "Stored on this Mac"
         }
-        return statusMessage == nil ? "Up to date" : statusMessage!
+        return statusMessage == nil ? "Connected, up to date" : statusMessage!
     }
 
     private func primaryStatusIcon(_ profile: LibraryProfile) -> String {
@@ -830,28 +799,32 @@ struct DevicesView: View {
     }
 
     private func libraryDescription(_ profile: LibraryProfile) -> String {
-        if profile.kind == .remote {
-            return "This Mac uses the library stored on \(profile.name)."
-        }
-        return sharingIsAvailable
+        sharingIsAvailable
             ? "Approved devices can use this library while this Aro library is online."
             : "Turn on sharing when you want to use this library on another device."
     }
 
-    private func roleBadge(_ title: String) -> some View {
-        Text(title)
-            .font(.caption)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
-            .background(Color.accentColor.opacity(0.13), in: Capsule())
+    private func roleBadge(_ title: String, systemImage: String?) -> some View {
+        Group {
+            if let systemImage {
+                Label(title, systemImage: systemImage)
+            } else {
+                Text(title)
+            }
+        }
+        .font(.caption)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(Color.accentColor.opacity(0.13), in: Capsule())
     }
 
     private func policyTitle(_ policy: OfflineDownloadPolicy) -> String {
         switch policy {
-        case .stream: "Stream music as needed"
-        case .favourites: "Favourites stay offline"
-        case .selectedAlbums: "Selected albums stay offline"
-        case .fullLibrary: "Full library stays offline"
+        case .streamOnly: "Stream only"
+        case .stream: "Keep recently played"
+        case .favourites, .selectedAlbums:
+            "Keep favourite albums or songs"
+        case .fullLibrary: "Resilient — full library mirrored here"
         }
     }
 
@@ -920,7 +893,7 @@ struct DevicesView: View {
     }
 }
 
-private struct DevicesCard<Content: View>: View {
+struct SettingsCard<Content: View>: View {
     var title: String?
     @ViewBuilder let content: Content
 

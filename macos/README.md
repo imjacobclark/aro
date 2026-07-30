@@ -21,6 +21,7 @@ library updated as files change.
 - Task-oriented Devices dashboard with secure QR/code pairing
 - Isolated local and remote library profiles with one active library at a time
 - Streaming, favourites, selected-album, and full-library offline policies
+- Progressive range streaming with resumable caching and adaptive queue prefetch
 
 ## Repository layout
 

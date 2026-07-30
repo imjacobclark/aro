@@ -25,5 +25,6 @@ public protocol FolderMonitorCreating: Sendable {
 
 public protocol TrackStateRepository: Sendable {
     func setHidden(trackID: UUID, hidden: Bool) throws
+    func setFavourite(trackID: UUID, favourite: Bool) throws
     func tombstone(trackID: UUID) throws
 }

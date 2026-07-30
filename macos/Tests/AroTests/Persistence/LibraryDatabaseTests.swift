@@ -233,6 +233,61 @@ final class LibraryDatabaseTests: XCTestCase {
         )
     }
 
+    func testFavouritePersistsAndCreatesSyncOperation() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let databaseURL = directory.appendingPathComponent("Library.sqlite3")
+        let folderID = UUID()
+        let database = LibraryDatabase(url: databaseURL)
+        database.save(
+            folder: WatchedFolder(
+                id: folderID,
+                url: directory,
+                displayName: "Music",
+                bookmarkData: nil,
+                isAccessible: true,
+                didStartSecurityScope: false
+            )
+        )
+        let stored = try XCTUnwrap(
+            database.reconcile(
+                songs: [
+                    makeSong(
+                        path: directory
+                            .appendingPathComponent("Favourite.flac").path,
+                        contentHash: "favourite-track"
+                    ),
+                ],
+                folderID: folderID
+            ).first
+        )
+
+        try SQLiteTrackStateRepository(database: database).setFavourite(
+            trackID: stored.libraryID,
+            favourite: true
+        )
+
+        let reopened = LibraryDatabase(url: databaseURL)
+        XCTAssertTrue(
+            try XCTUnwrap(
+                reopened.songs(folderID: folderID).first
+            ).isFavourite
+        )
+        let favouriteOperation = SQLiteSyncOperationStore(
+            database: reopened
+        ).pending().last {
+            $0.entityID == stored.libraryID.uuidString
+                && $0.operation == "favourite"
+        }
+        XCTAssertEqual(favouriteOperation?.payload, "{\"favourite\":true}")
+    }
+
     private func makeSong(path: String, contentHash: String) -> Song {
         Song(
             url: URL(fileURLWithPath: path),

@@ -19,7 +19,7 @@ struct ExportLibrarySheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             HStack {
-                Text("Export Entire Library")
+                Text("Export Library")
                     .font(.largeTitle)
                 Spacer()
                 Button("Done") { dismiss() }

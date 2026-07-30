@@ -9,8 +9,10 @@ struct LibraryHealthRecommendationCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            Divider()
-            copies
+            if !recommendation.copies.isEmpty {
+                Divider()
+                copies
+            }
         }
         .background(
             Color.primary.opacity(0.035),
@@ -178,6 +180,8 @@ struct LibraryHealthRecommendationCard: View {
             "arrow.triangle.swap"
         case .missing:
             "questionmark.folder.fill"
+        case .fragmentedFolder:
+            "square.stack.3d.up.slash"
         }
     }
 
@@ -191,6 +195,8 @@ struct LibraryHealthRecommendationCard: View {
             AroTheme.coral
         case .missing:
             AroTheme.amber
+        case .fragmentedFolder:
+            AroTheme.navy
         }
     }
 }

@@ -5,6 +5,7 @@ struct SyncRunResult: Sendable {
     let uploadedOperations: Int
     let appliedOperations: Int
     let cursor: UInt64
+    let canContribute: Bool
 }
 
 actor HubSyncCoordinator {
@@ -13,19 +14,22 @@ actor HubSyncCoordinator {
     private let credential: HubDeviceCredential
     private let operations: SQLiteSyncOperationStore
     private let offlineTrackCount: UInt64?
+    private let sourceMode: String
 
     init(
         hubID: UUID,
         client: AroSyncClient,
         credential: HubDeviceCredential,
         operations: SQLiteSyncOperationStore,
-        offlineTrackCount: UInt64? = nil
+        offlineTrackCount: UInt64? = nil,
+        sourceMode: String = "referenced"
     ) {
         self.hubID = hubID
         self.client = client
         self.credential = credential
         self.operations = operations
         self.offlineTrackCount = offlineTrackCount
+        self.sourceMode = sourceMode
     }
 
     func synchronize() async throws -> SyncRunResult {
@@ -72,7 +76,7 @@ actor HubSyncCoordinator {
                 )
                 outgoing.append(contribution.operation)
             }
-            sources = operations.sourceHealthReports(mode: "stored")
+            sources = operations.sourceHealthReports(mode: sourceMode)
         }
         var cursor = operations.serverCursor(hubID: hubID)
         var uploaded = 0
@@ -122,7 +126,8 @@ actor HubSyncCoordinator {
         return SyncRunResult(
             uploadedOperations: uploaded,
             appliedOperations: applied,
-            cursor: cursor
+            cursor: cursor,
+            canContribute: access.canContribute
         )
     }
 }

@@ -25,6 +25,7 @@ struct LibraryHealthTrackMapper: Sendable {
             contentHash: record.contentHash,
             title: record.title ?? "Unknown Song",
             artist: record.artist ?? "Unknown Artist",
+            album: record.album,
             duration: record.duration,
             copies: copies
         )

@@ -464,7 +464,7 @@ struct SQLiteSyncOperationStore {
                         warning: available
                             ? nil
                             : (
-                                mode == "stored"
+                                mode == "managed"
                                     ? "The original folder is unavailable. Aro’s stored copy remains available."
                                     : "This linked folder is unavailable. Its songs cannot be served until the folder is online."
                             )
@@ -1378,8 +1378,8 @@ struct SQLiteSyncOperationStore {
             INSERT INTO scan_metadata
                 (track_id, title, artist, duration, codec, sample_rate,
                  bit_depth, channel_count, bitrate, scanned_at, album, genre,
-                 release_year)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 release_year, artwork_url)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(track_id) DO UPDATE SET
                 title = COALESCE(excluded.title, title),
                 artist = COALESCE(excluded.artist, artist),
@@ -1398,7 +1398,8 @@ struct SQLiteSyncOperationStore {
                 release_year = COALESCE(
                     excluded.release_year,
                     release_year
-                )
+                ),
+                artwork_url = COALESCE(excluded.artwork_url, artwork_url)
             """,
             connection
         ) {
@@ -1415,6 +1416,7 @@ struct SQLiteSyncOperationStore {
             bindOptional(string(payload["album"]), $0, 11)
             bindOptional(string(payload["genre"]), $0, 12)
             bindOptional(integer(payload["release_year"]), $0, 13)
+            bindOptional(string(payload["artwork_url"]), $0, 14)
         }
         try run(
             """
@@ -1461,9 +1463,10 @@ struct SQLiteSyncOperationStore {
                         (id, track_id, device_id, folder_id, path, file_size,
                          available, last_seen_token, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
-                    ON CONFLICT(device_id, path) DO UPDATE SET
+                    ON CONFLICT(id) DO UPDATE SET
                         track_id = excluded.track_id,
                         folder_id = excluded.folder_id,
+                        path = excluded.path,
                         file_size = excluded.file_size,
                         available = 1,
                         last_seen_token = excluded.last_seen_token,
@@ -1784,12 +1787,12 @@ struct SQLiteSyncOperationStore {
             nil
         ) == SQLITE_OK,
               let statement else {
-            throw LibraryDatabaseError.unavailable
+            throw sqliteError(connection)
         }
         defer { sqlite3_finalize(statement) }
         bindings(statement)
         guard sqlite3_step(statement) == SQLITE_DONE else {
-            throw LibraryDatabaseError.unavailable
+            throw sqliteError(connection)
         }
     }
 
@@ -1798,8 +1801,21 @@ struct SQLiteSyncOperationStore {
         _ connection: OpaquePointer
     ) throws {
         guard sqlite3_exec(connection, sql, nil, nil, nil) == SQLITE_OK else {
-            throw LibraryDatabaseError.unavailable
+            throw sqliteError(connection)
         }
+    }
+
+    /// `LibraryDatabaseError.unavailable` means "no connection at all" — using it
+    /// for every SQL failure (constraint violations, malformed statements, busy
+    /// locks) was actively misleading: it told users their whole database was
+    /// unreachable when the connection was fine and one specific statement had
+    /// failed for a real, diagnosable reason. Surfacing `sqlite3_errmsg` instead
+    /// keeps that reason visible instead of discarding it.
+    private func sqliteError(_ connection: OpaquePointer) -> Error {
+        guard let message = sqlite3_errmsg(connection) else {
+            return LibraryDatabaseError.unavailable
+        }
+        return LibraryDatabaseError.sqlite(String(cString: message))
     }
 
     private func bind(

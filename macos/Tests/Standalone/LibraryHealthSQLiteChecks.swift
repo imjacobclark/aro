@@ -2,14 +2,14 @@ import Foundation
 
 @main
 enum LibraryHealthSQLiteChecks {
-    static func main() throws {
-        try sqliteQueryMapsRecordsAndPreservesRecommendations()
+    static func main() async throws {
+        try await sqliteQueryMapsRecordsAndPreservesRecommendations()
         mapperRejectsInvalidIdentity()
         print("Library health SQLite checks passed")
     }
 
     private static func sqliteQueryMapsRecordsAndPreservesRecommendations()
-        throws
+        async throws
     {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -35,8 +35,8 @@ enum LibraryHealthSQLiteChecks {
         )
 
         let firstScan = [
-            song("Exact A.flac", "Exact", "exact-hash", "FLAC", 24),
-            song("Exact B.flac", "Exact", "exact-hash", "FLAC", 24),
+            song("Exact A.flac", "Exact", "exact-hash", "FLAC", 24, album: "Exact Album"),
+            song("Exact B.flac", "Exact", "exact-hash", "FLAC", 24, album: "Exact Album"),
             song("Mix.flac", "Mix", "flac-hash", "FLAC", 24),
             song("Mix.mp3", "Mix", "mp3-hash", "MP3", nil),
             song("Old/Moved.flac", "Moved", "moved-hash", "FLAC", 24),
@@ -59,8 +59,16 @@ enum LibraryHealthSQLiteChecks {
             tracks.count == 5,
             "SQLite query did not map the expected stable tracks"
         )
+        precondition(
+            tracks.first(where: { $0.title == "Exact" })?.album == "Exact Album",
+            "SQLite query did not map scan_metadata.album onto LibraryHealthTrack.album"
+        )
+        precondition(
+            tracks.first(where: { $0.title == "Missing" })?.album == nil,
+            "An unset album should map to nil, not an empty string or placeholder"
+        )
 
-        let report = ReviewLibraryHealth(tracks: trackQuery).execute()
+        let report = await ReviewLibraryHealth(tracks: trackQuery).execute()
         precondition(
             report.exactDuplicates.count == 1,
             "Exact duplicate classification changed"
@@ -85,6 +93,7 @@ enum LibraryHealthSQLiteChecks {
             contentHash: nil,
             title: "Track",
             artist: "Artist",
+            album: nil,
             duration: 180,
             copies: []
         )
@@ -99,7 +108,8 @@ enum LibraryHealthSQLiteChecks {
         _ title: String,
         _ contentHash: String,
         _ codec: String,
-        _ bitDepth: Int?
+        _ bitDepth: Int?,
+        album: String? = nil
     ) -> Song {
         let url = URL(fileURLWithPath: "/tmp")
             .appendingPathComponent(relativePath)
@@ -108,6 +118,7 @@ enum LibraryHealthSQLiteChecks {
             url: url,
             title: title,
             artist: "Artist",
+            album: album,
             duration: 180,
             fileSizeBytes: fileSize,
             audioProperties: AudioFileProperties(

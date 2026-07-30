@@ -72,8 +72,37 @@ struct ControlledSourceFolder: Identifiable, Codable, Sendable {
     var id: UUID { sourceID }
 }
 
+struct IdentificationStatus: Codable, Sendable {
+    let queued: UInt64
+    let inFlight: Bool
+    let processed: UInt64
+    let failed: UInt64
+    let lastError: String?
+}
+
+/// A file to (re-)identify, addressed by content hash and its absolute on-disk path
+/// — not a track id. `aro-server`'s own `hub_track_id`s and this app's local track
+/// ids are generated independently and never coincide; content hash and a real path
+/// are the only things the server needs to fingerprint and identify a file it may
+/// never have seen before.
+struct IdentificationTarget: Sendable {
+    let contentHash: String
+    let path: String
+}
+
+struct IdentificationResult: Codable, Sendable {
+    let contentHash: String
+    let title: String?
+    let artist: String?
+    let album: String?
+    let artworkURL: String?
+    let musicbrainzRecordingID: String?
+    let acoustidID: String?
+    let identifiedAt: Int64
+}
+
 struct HubControlClient: Sendable {
-    static let controlProtocolVersion = 5
+    static let controlProtocolVersion = 6
 
     let socketURL: URL
 
@@ -200,6 +229,87 @@ struct HubControlClient: Sendable {
             "command": "remove_folder",
             "source_id": sourceID.uuidString,
         ])
+    }
+
+    /// Enqueues one or more files for background (re-)identification against
+    /// AcoustID/MusicBrainz. Used for both "Sync Track Data" (one file) and "Sync
+    /// Album Data" (every file in the album) — the server has no album grouping of
+    /// its own, so the full set is resolved client-side.
+    func identifyTracks(_ targets: [IdentificationTarget]) async throws {
+        _ = try await send([
+            "command": "identify_tracks",
+            "tracks": targets.map {
+                ["content_hash": $0.contentHash, "path": $0.path]
+            },
+        ])
+    }
+
+    func identificationStatus() async throws -> IdentificationStatus {
+        let result = try await sendValue(["command": "identification_status"])
+        let data = try JSONSerialization.data(withJSONObject: result)
+        return try JSONDecoder.aroSyncProtocol().decode(IdentificationStatus.self, from: data)
+    }
+
+    /// Results recorded after `after` (exclusive), oldest first. `after` should be
+    /// the `identifiedAt` of the last result already applied — pass `0` to fetch
+    /// everything the server has ever identified.
+    func identificationResults(after: Int64) async throws -> [IdentificationResult] {
+        let result = try await sendValue([
+            "command": "identification_results",
+            "after": after,
+        ])
+        let data = try JSONSerialization.data(withJSONObject: result)
+        return try JSONDecoder.aroSyncProtocol().decode([IdentificationResult].self, from: data)
+    }
+
+    func setSetting(key: String, value: Bool) async throws {
+        _ = try await send([
+            "command": "set_setting",
+            "key": key,
+            "value": value,
+        ])
+    }
+
+    func boolSetting(key: String) async throws -> Bool? {
+        let result = try await send([
+            "command": "setting",
+            "key": key,
+        ])
+        return result["value"] as? Bool
+    }
+
+    func setSetting(key: String, value: String) async throws {
+        _ = try await send([
+            "command": "set_setting",
+            "key": key,
+            "value": value,
+        ])
+    }
+
+    func stringSetting(key: String) async throws -> String? {
+        let result = try await send([
+            "command": "setting",
+            "key": key,
+        ])
+        return result["value"] as? String
+    }
+
+    /// Reads a blob's bytes off the local hub's own store over the control
+    /// socket — used for cached artwork (`IdentificationResult.artworkURL`
+    /// points at `/v1/blobs/{hash}` since aro-track-id started caching Cover
+    /// Art Archive images server-side) when this Mac is running the hub whose
+    /// results it just pulled, so no HTTP round-trip or device credential is
+    /// needed for data it already has local filesystem access to.
+    func blob(hash: String) async throws -> Data {
+        let result = try await send([
+            "command": "blob",
+            "hash": hash,
+        ])
+        guard let base64 = result["data_base64"] as? String,
+              let data = Data(base64Encoded: base64) else {
+            throw HubControlError.invalidResponse
+        }
+        return data
     }
 
     private func send(

@@ -4,9 +4,11 @@ import SwiftUI
 struct ArtistsView: View {
     let songs: [Song]
     let playback: PlaybackController
+    let syncTrackData: (Song) async -> Void
 
     @State private var selectedArtistID: LibraryArtist.ID?
     @State private var searchText = ""
+    @FocusState private var isBrowserFocused: Bool
 
     private var artists: [LibraryArtist] {
         ArtistLibrary.artists(from: songs)
@@ -21,56 +23,82 @@ struct ArtistsView: View {
     }
 
     var body: some View {
-        if artists.isEmpty {
-            VStack(spacing: 0) {
-                header(title: "Artists", subtitle: "0 artists")
-                ContentUnavailableView(
-                    "No Artists Found",
-                    systemImage: "music.mic",
-                    description: Text(
-                        "Add a music folder to browse artists and albums."
-                    )
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        } else {
-            HStack(spacing: 0) {
-                artistList
-                Divider()
-                artistDetail
-            }
-            .task {
-                selectFirstArtistIfNeeded()
-            }
-            .onChange(of: artists.map(\.id)) {
-                selectFirstArtistIfNeeded()
-            }
+        HStack(spacing: 0) {
+            artistList
+
+            Rectangle()
+                .fill(AroTheme.hairline)
+                .frame(width: 1)
+
+            artistDetail
+        }
+        .task {
+            selectFirstArtistIfNeeded()
+        }
+        .onChange(of: artists.map(\.id)) {
+            selectFirstArtistIfNeeded()
+        }
+        .onChange(of: filteredArtists.map(\.id)) {
+            selectFirstFilteredArtistIfNeeded()
         }
     }
 
     private var artistList: some View {
-        VStack(spacing: 0) {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Artists")
+                .font(AroFont.fixed(23, weight: .bold))
+                .padding(.horizontal, 20)
+                .padding(.top, 24)
+
             LibrarySearchField(
                 prompt: "Search Artists",
                 text: $searchText
             )
 
-            Divider()
+            ScrollView {
+                LazyVStack(spacing: 4) {
+                    ForEach(filteredArtists) { artist in
+                        Button {
+                            selectedArtistID = artist.id
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(artist.name)
+                                    .font(AroFont.fixed(14, weight: .semibold))
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
 
-            List(filteredArtists, selection: $selectedArtistID) { artist in
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(artist.name)
-                        .font(AroFont.headline)
-                        .lineLimit(1)
-                    Text("\(artist.albums.count) albums · \(artist.songs.count) songs")
-                        .font(AroFont.caption)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
+                                Text(
+                                    "\(artist.albums.count) albums · "
+                                        + "\(artist.songs.count) songs"
+                                )
+                                .font(AroFont.fixed(12))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
+                            .background(
+                                selectedArtistID == artist.id
+                                    ? AroTheme.selectedTint
+                                    : Color.clear,
+                                in: RoundedRectangle(
+                                    cornerRadius: 9,
+                                    style: .continuous
+                                )
+                            )
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(
+                            selectedArtistID == artist.id
+                                ? .isSelected
+                                : []
+                        )
+                    }
                 }
-                .padding(.vertical, 3)
-                .tag(artist.id)
+                .padding(.horizontal, 12)
             }
-            .listStyle(.sidebar)
             .overlay {
                 if filteredArtists.isEmpty {
                     ContentUnavailableView(
@@ -81,7 +109,13 @@ struct ArtistsView: View {
                 }
             }
         }
-        .frame(minWidth: 180, idealWidth: 210, maxWidth: 240)
+        .padding(.bottom, 12)
+        .background(AroTheme.browserSurface)
+        .frame(minWidth: 240, idealWidth: 272, maxWidth: 288)
+        .focusable()
+        .focusEffectDisabled()
+        .focused($isBrowserFocused)
+        .onMoveCommand(perform: moveBrowserSelection)
     }
 
     @ViewBuilder
@@ -93,16 +127,31 @@ struct ArtistsView: View {
                 ScrollView {
                     LazyVStack(spacing: 16) {
                         ForEach(artist.albums) { album in
-                            AlbumRow(
-                                album: album,
-                                playback: playback
+                            LibraryAlbumSection(
+                                name: album.name,
+                                artistName: nil,
+                                artworkData: album.artworkData,
+                                songs: album.songs,
+                                playback: playback,
+                                syncTrackData: syncTrackData
                             )
                         }
                     }
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 20)
+                    .padding(.horizontal, 28)
+                    .padding(.bottom, 24)
                 }
             }
+            .background(AroTheme.contentSurface)
+        } else {
+            ContentUnavailableView(
+                "No Artists Found",
+                systemImage: "music.mic",
+                description: Text(
+                    "Add a music folder to browse artists and albums."
+                )
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(AroTheme.contentSurface)
         }
     }
 
@@ -110,24 +159,23 @@ struct ArtistsView: View {
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
-                    .font(AroFont.largeTitle)
+                    .font(AroFont.fixed(34, weight: .bold))
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .help(title)
 
                 Text(subtitle)
-                    .font(AroFont.subheadline)
+                    .font(AroFont.fixed(14))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
 
             Spacer(minLength: 12)
-            AppSettingsButton()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 20)
-        .padding(.top, 8)
-        .padding(.bottom, 14)
+        .padding(.horizontal, 28)
+        .padding(.top, 24)
+        .padding(.bottom, 20)
     }
 
     private func selectFirstArtistIfNeeded() {
@@ -139,43 +187,27 @@ struct ArtistsView: View {
             selectedArtistID = artists.first?.id
         }
     }
-}
 
-private struct AlbumRow: View {
-    let album: ArtistAlbum
-    let playback: PlaybackController
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 18) {
-            VStack(alignment: .leading, spacing: 10) {
-                AlbumArtworkView(data: album.artworkData)
-                    .frame(width: 132, height: 132)
-
-                Text(album.name)
-                    .font(AroFont.headline)
-                    .lineLimit(2)
-                    .help(album.name)
-
-                Text("\(album.songs.count) \(album.songs.count == 1 ? "song" : "songs")")
-                    .font(AroFont.caption)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
-            .frame(width: 132, alignment: .leading)
-
-            Divider()
-
-            AlbumSongList(songs: album.songs, playback: playback)
-            .frame(maxWidth: .infinity)
+    private func selectFirstFilteredArtistIfNeeded() {
+        guard !filteredArtists.isEmpty else { return }
+        if !filteredArtists.contains(where: { $0.id == selectedArtistID }) {
+            selectedArtistID = filteredArtists.first?.id
         }
-        .padding(14)
-        .background(
-            Color.primary.opacity(0.045),
-            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+    }
+
+    private func moveBrowserSelection(_ direction: MoveCommandDirection) {
+        guard direction == .up || direction == .down,
+              !filteredArtists.isEmpty else {
+            return
+        }
+        let current = filteredArtists.firstIndex {
+            $0.id == selectedArtistID
+        } ?? 0
+        let offset = direction == .down ? 1 : -1
+        let next = min(
+            max(current + offset, filteredArtists.startIndex),
+            filteredArtists.index(before: filteredArtists.endIndex)
         )
-        .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.primary.opacity(0.06))
-        }
+        selectedArtistID = filteredArtists[next].id
     }
 }

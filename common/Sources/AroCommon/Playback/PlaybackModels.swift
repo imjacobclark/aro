@@ -94,6 +94,23 @@ public enum PlaybackMode: String, CaseIterable, Codable, Sendable {
     }
 }
 
+public enum PlaybackRepeatMode: String, CaseIterable, Codable, Sendable {
+    case off
+    case all
+    case one
+
+    public var displayName: String {
+        switch self {
+        case .off:
+            return "Repeat Off"
+        case .all:
+            return "Repeat All"
+        case .one:
+            return "Repeat One"
+        }
+    }
+}
+
 public struct PlaybackOutputStatus: Equatable, Sendable {
     public var mode: PlaybackMode
     public var transport: AudioOutputTransport
@@ -140,6 +157,7 @@ public struct PlaybackOutputStatus: Equatable, Sendable {
 public enum PlaybackState: Equatable, Sendable {
     case idle
     case loading
+    case buffering
     case playing
     case paused
     case failed(String)

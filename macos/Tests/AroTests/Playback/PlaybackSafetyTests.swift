@@ -67,11 +67,12 @@ private final class SafetyAudioEngine: AudioPlaybackEngine {
     var loadedStartingIndex: Int?
 
     func load(
-        songs: [Song],
+        items: [PlaybackQueueItem],
         startingAt index: Int,
         from time: TimeInterval,
         playbackID: UUID
     ) throws -> TimeInterval {
+        let songs = items.map(\.song)
         loadedSongs = songs
         loadedStartingIndex = index
         currentTime = time

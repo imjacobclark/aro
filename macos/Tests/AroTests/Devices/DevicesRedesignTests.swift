@@ -20,7 +20,7 @@ final class DevicesRedesignTests: XCTestCase {
         )
 
         XCTAssertEqual(
-            DevicesView.controlDataLocation(
+            LibrarySettingsView.controlDataLocation(
                 preferred: "/tmp/stale-preference",
                 servers: [server]
             ),
@@ -30,7 +30,7 @@ final class DevicesRedesignTests: XCTestCase {
 
     func testAddDeviceFallsBackToConfiguredLibraryService() {
         XCTAssertEqual(
-            DevicesView.controlDataLocation(
+            LibrarySettingsView.controlDataLocation(
                 preferred: "/tmp/configured-library",
                 servers: []
             ),
@@ -102,6 +102,55 @@ final class DevicesRedesignTests: XCTestCase {
         registry.activate(local.id)
         XCTAssertEqual(registry.activeProfileID, local.id)
         XCTAssertNotNil(registry.profiles.first { $0.id == remote.id })
+    }
+
+    func testRemovingActiveProfileReassignsActiveIDToLocalProfile() {
+        let suite = "DevicesRedesignTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let registry = LibraryProfileRegistry(defaults: defaults)
+        let local = registry.createLocal(
+            name: "Local Library",
+            managedMusicPath: "/tmp/local",
+            sharingEnabled: true
+        )
+        let remote = registry.createRemote(
+            name: "Mercury",
+            hubID: UUID(),
+            baseURL: URL(string: "https://aro-mercury.local:4848")!,
+            policy: .stream
+        )
+
+        XCTAssertEqual(registry.activeProfileID, remote.id)
+        registry.remove(remote.id)
+
+        XCTAssertEqual(registry.profiles.count, 1)
+        XCTAssertNil(registry.profiles.first { $0.id == remote.id })
+        XCTAssertEqual(registry.activeProfileID, local.id)
+    }
+
+    func testRemovingInactiveProfileLeavesActiveProfileUntouched() {
+        let suite = "DevicesRedesignTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let registry = LibraryProfileRegistry(defaults: defaults)
+        let local = registry.createLocal(
+            name: "Local Library",
+            managedMusicPath: "/tmp/local",
+            sharingEnabled: true
+        )
+        let remote = registry.createRemote(
+            name: "Mercury",
+            hubID: UUID(),
+            baseURL: URL(string: "https://aro-mercury.local:4848")!,
+            policy: .stream
+        )
+        registry.activate(local.id)
+
+        registry.remove(remote.id)
+
+        XCTAssertEqual(registry.profiles, [local])
+        XCTAssertEqual(registry.activeProfileID, local.id)
     }
 
     func testRepairingRemoteConnectionReusesReplicaProfile() {
@@ -226,6 +275,29 @@ final class DevicesRedesignTests: XCTestCase {
 
         XCTAssertTrue(applied)
         XCTAssertEqual(database.watchedFolders().map(\.id), [hubID])
+        XCTAssertTrue(
+            database.songs(folderID: hubID).isEmpty,
+            "remote tracks remain hidden until server loudness arrives"
+        )
+        _ = try store.applyRemote(
+            SequencedSyncOperation(
+                sequence: 2,
+                operationID: UUID(),
+                deviceID: UUID(),
+                entityType: "loudness",
+                entityID: String(repeating: "b", count: 64) + ":2",
+                kind: "upsert",
+                payload: .object([
+                    "content_hash": .string(String(repeating: "b", count: 64)),
+                    "algorithm_version": .number(2),
+                    "integrated_lufs": .number(-14),
+                    "peak_amplitude": .number(0.8),
+                    "analyzed_at": .number(1),
+                ]),
+                fieldVersions: [:]
+            ),
+            hubID: hubID
+        )
         let song = try XCTUnwrap(database.songs(folderID: hubID).first)
         XCTAssertEqual(song.title, "A Song")
         XCTAssertEqual(
@@ -280,6 +352,25 @@ final class DevicesRedesignTests: XCTestCase {
                     "artist": .string("An Artist"),
                     "content_hash": .string(contentHash),
                     "byte_count": .number(42),
+                ]),
+                fieldVersions: [:]
+            ),
+            hubID: hubID
+        )
+        _ = try store.applyRemote(
+            SequencedSyncOperation(
+                sequence: 2,
+                operationID: UUID(),
+                deviceID: UUID(),
+                entityType: "loudness",
+                entityID: contentHash + ":2",
+                kind: "upsert",
+                payload: .object([
+                    "content_hash": .string(contentHash),
+                    "algorithm_version": .number(2),
+                    "integrated_lufs": .number(-14),
+                    "peak_amplitude": .number(0.8),
+                    "analyzed_at": .number(1),
                 ]),
                 fieldVersions: [:]
             ),

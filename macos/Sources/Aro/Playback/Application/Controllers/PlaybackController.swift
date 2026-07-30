@@ -1,34 +1,62 @@
 import Foundation
 import AroCommon
 import Observation
+import OSLog
 
 @MainActor
 @Observable
 final class PlaybackController {
+    private static let logger = Logger(
+        subsystem: "com.othyn.aro",
+        category: "Playback"
+    )
+    /// Ticks (at 250ms each) of zero playback progress before a stall is
+    /// treated as terminal rather than ordinary buffering. Measured
+    /// independent of `isWaitingForData`, since a permanently failed
+    /// streaming resource stops reporting itself as waiting once its reader
+    /// gives up — without this, playback could sit at `.buffering` forever
+    /// with no further signal that anything had gone wrong.
+    private static let stallTimeoutTicks = 40
+    private static let maxStallRetries = 1
+
     private(set) var state: PlaybackState = .idle
     private(set) var currentSong: Song?
     private(set) var elapsedTime: TimeInterval = 0
     private(set) var duration: TimeInterval = 0
+    private(set) var bufferedFraction: Double = 1
     private(set) var queue: [Song] = []
     private(set) var currentIndex: Int?
     private(set) var volume: Double = 1
     private(set) var outputStatus = PlaybackOutputStatus()
     private(set) var visualizerLevels = Array(repeating: 0.0, count: 9)
+    private(set) var isShuffleEnabled: Bool
+    private(set) var repeatMode: PlaybackRepeatMode
 
     @ObservationIgnored private var engine: (any AudioPlaybackEngine)?
     @ObservationIgnored private let engineFactory: @MainActor () -> any AudioPlaybackEngine
     @ObservationIgnored private let preferences: PlaybackPreferences
     @ObservationIgnored private let loudnessService: any LoudnessAnalyzing
     @ObservationIgnored private let listeningSession: ListeningSessionTracker
+    @ObservationIgnored private let nowPlayingPublisher: any NowPlayingPublishing
     @ObservationIgnored private let queuePolicy: PlaybackQueuePolicy
     @ObservationIgnored private let visualizerSmoother: VisualizerLevelSmoother
     @ObservationIgnored private let effectiveModeResolver: @MainActor () -> PlaybackMode
     @ObservationIgnored private let prepareSong: PrepareSongForPlayback?
     @ObservationIgnored private let mediaLocationResolver:
         (@MainActor (Song) -> PlaybackMediaLocation?)?
+    @ObservationIgnored private let progressivePlaybackEligibility:
+        @MainActor (Song) -> Bool
+    @ObservationIgnored private let progressiveDownloadFallbackAllowed:
+        @MainActor () -> Bool
     @ObservationIgnored private var playbackID = UUID()
     @ObservationIgnored private var progressTask: Task<Void, Never>?
     @ObservationIgnored private var preparationTask: Task<Void, Never>?
+    @ObservationIgnored private var progressiveFallbackPlaybackIDs =
+        Set<UUID>()
+    @ObservationIgnored private var playbackRequestedAt = Date()
+    @ObservationIgnored private var firstPCMPlaybackID: UUID?
+    @ObservationIgnored private var canonicalQueue: [Song] = []
+    @ObservationIgnored private var stallRetryCount = 0
 
     init(
         engine: (any AudioPlaybackEngine)? = nil,
@@ -36,6 +64,8 @@ final class PlaybackController {
         loudnessService: any LoudnessAnalyzing = NoOpLoudnessAnalyzer(),
         listeningHistory: any ListeningHistoryRecording =
             NoOpListeningHistoryRecorder(),
+        nowPlayingPublisher: any NowPlayingPublishing =
+            NoOpNowPlayingPublisher(),
         queuePolicy: PlaybackQueuePolicy = PlaybackQueuePolicy(),
         visualizerSmoother: VisualizerLevelSmoother =
             VisualizerLevelSmoother(),
@@ -43,19 +73,29 @@ final class PlaybackController {
         prepareSong: PrepareSongForPlayback? = nil,
         mediaLocationResolver:
             (@MainActor (Song) -> PlaybackMediaLocation?)? = nil,
+        progressivePlaybackEligibility:
+            @escaping @MainActor (Song) -> Bool = { _ in false },
+        progressiveDownloadFallbackAllowed:
+            @escaping @MainActor () -> Bool = { true },
         engineFactory: @escaping @MainActor () -> any AudioPlaybackEngine = {
             UnavailableAudioPlaybackEngine()
         }
     ) {
         self.engine = engine
         self.preferences = preferences
+        isShuffleEnabled = preferences.shuffleEnabled
+        repeatMode = preferences.repeatMode
         self.loudnessService = loudnessService
         listeningSession = ListeningSessionTracker(history: listeningHistory)
+        self.nowPlayingPublisher = nowPlayingPublisher
         self.queuePolicy = queuePolicy
         self.visualizerSmoother = visualizerSmoother
         self.effectiveModeResolver = effectiveModeResolver ?? { [preferences] in preferences.mode }
         self.prepareSong = prepareSong
         self.mediaLocationResolver = mediaLocationResolver
+        self.progressivePlaybackEligibility = progressivePlaybackEligibility
+        self.progressiveDownloadFallbackAllowed =
+            progressiveDownloadFallbackAllowed
         self.engineFactory = engineFactory
 
         if let engine {
@@ -64,7 +104,7 @@ final class PlaybackController {
     }
 
     var isPlaying: Bool {
-        state == .playing
+        state == .playing || state == .buffering
     }
 
     var canTogglePlayback: Bool {
@@ -83,6 +123,7 @@ final class PlaybackController {
             return false
         }
         return currentIndex + 1 < queue.count
+            || (repeatMode == .all && !queue.isEmpty)
     }
 
     var errorMessage: String? {
@@ -97,13 +138,65 @@ final class PlaybackController {
             selectedSong: song,
             requestedQueue: requestedQueue
         )
-        queue = prepared.songs
-        startSong(at: prepared.selectedIndex, skippingFailures: false)
+        canonicalQueue = prepared.songs
+        if isShuffleEnabled {
+            let remaining = prepared.songs
+                .filter { $0.id != song.id }
+                .shuffled()
+            queue = [song] + remaining
+            startSong(at: 0, skippingFailures: false)
+        } else {
+            queue = prepared.songs
+            startSong(at: prepared.selectedIndex, skippingFailures: false)
+        }
+    }
+
+    func toggleShuffle() {
+        isShuffleEnabled.toggle()
+        preferences.shuffleEnabled = isShuffleEnabled
+
+        guard let currentIndex, queue.indices.contains(currentIndex) else {
+            return
+        }
+        let played = Array(queue[...currentIndex])
+        let playedIDs = Set(played.map(\.id))
+        let remaining: [Song]
+        if isShuffleEnabled {
+            remaining = Array(queue.dropFirst(currentIndex + 1)).shuffled()
+        } else {
+            remaining = canonicalQueue.filter { !playedIDs.contains($0.id) }
+        }
+        queue = played + remaining
+        restartCurrentSongAfterQueueChange()
+    }
+
+    func cycleRepeatMode() {
+        switch repeatMode {
+        case .off:
+            repeatMode = .all
+        case .all:
+            repeatMode = .one
+        case .one:
+            repeatMode = .off
+        }
+        preferences.repeatMode = repeatMode
+
+        // The engine normally pre-enqueues a compatible run. Entering
+        // repeat-one reloads the current song at the same position so no
+        // already-enqueued successor can bypass the new mode.
+        if repeatMode == .one {
+            restartCurrentSongAfterQueueChange()
+        }
+    }
+
+    func playQueuedSong(at index: Int) {
+        guard queue.indices.contains(index) else { return }
+        startSong(at: index, skippingFailures: false)
     }
 
     func togglePlayPause() {
         switch state {
-        case .playing:
+        case .playing, .buffering:
             guard let engine else {
                 return
             }
@@ -112,6 +205,7 @@ final class PlaybackController {
             elapsedTime = engine.currentTime
             state = .paused
             stopProgressUpdates()
+            publishNowPlayingInfo()
         case .paused:
             if duration > 0, elapsedTime >= duration {
                 seek(to: 0)
@@ -136,18 +230,27 @@ final class PlaybackController {
             return
         }
 
-        guard let currentIndex, currentIndex > 0 else {
+        guard let currentIndex else {
             return
         }
-        startSong(at: currentIndex - 1, skippingFailures: true)
+        if currentIndex > 0 {
+            startSong(at: currentIndex - 1, skippingFailures: true)
+        } else if repeatMode == .all, !queue.isEmpty {
+            startSong(at: queue.count - 1, skippingFailures: true)
+        }
     }
 
     func next() {
-        guard let currentIndex, currentIndex + 1 < queue.count else {
-            finishQueue()
+        guard let currentIndex else {
             return
         }
-        startSong(at: currentIndex + 1, skippingFailures: true)
+        if currentIndex + 1 < queue.count {
+            startSong(at: currentIndex + 1, skippingFailures: true)
+        } else if repeatMode == .all, !queue.isEmpty {
+            startSong(at: 0, skippingFailures: true)
+        } else {
+            finishQueue()
+        }
     }
 
     func seek(to requestedTime: TimeInterval) {
@@ -156,7 +259,7 @@ final class PlaybackController {
         }
 
         let clampedTime = min(max(requestedTime, 0), duration)
-        let shouldPlay = state == .playing
+        let shouldPlay = state == .playing || state == .buffering
         playbackID = UUID()
 
         do {
@@ -173,6 +276,7 @@ final class PlaybackController {
             if shouldPlay {
                 startProgressUpdates()
             }
+            publishNowPlayingInfo()
         } catch {
             fail(error.localizedDescription)
         }
@@ -194,14 +298,13 @@ final class PlaybackController {
     }
 
     func restartForPlaybackSettingsChange() {
-        if effectiveModeResolver() == .bitPerfect {
-            volume = 1
-        }
+        setVolume(volume)
         guard currentSong != nil, let currentIndex else {
             return
         }
         let restartTime = elapsedTime
-        let shouldResume = state == .playing || state == .loading
+        let shouldResume =
+            state == .playing || state == .buffering || state == .loading
         startSong(
             at: currentIndex,
             skippingFailures: false,
@@ -217,6 +320,12 @@ final class PlaybackController {
             availableSongs: availableSongs
         )
         queue = reconciled.songs
+        let availableByID = Dictionary(
+            uniqueKeysWithValues: availableSongs.map { ($0.id, $0) }
+        )
+        canonicalQueue = canonicalQueue.compactMap {
+            availableByID[$0.id]
+        }
 
         guard currentSong != nil else {
             return
@@ -238,24 +347,32 @@ final class PlaybackController {
         preparationTask?.cancel()
         preparationTask = nil
         playbackID = UUID()
+        progressiveFallbackPlaybackIDs.removeAll()
         state = .idle
         currentSong = nil
         elapsedTime = 0
         duration = 0
+        bufferedFraction = 1
         queue = []
+        canonicalQueue = []
         currentIndex = nil
         visualizerLevels = Array(repeating: 0, count: 9)
+        publishNowPlayingInfo()
     }
 
     private func startSong(
         at index: Int,
         skippingFailures: Bool,
         from requestedTime: TimeInterval = 0,
-        shouldPlay: Bool = true
+        shouldPlay: Bool = true,
+        isStallRetry: Bool = false
     ) {
         guard queue.indices.contains(index) else {
             finishQueue()
             return
+        }
+        if !isStallRetry {
+            stallRetryCount = 0
         }
 
         listeningSession.end()
@@ -268,11 +385,16 @@ final class PlaybackController {
         duration = queue[index].duration ?? 0
         let startTime = min(max(requestedTime, 0), duration)
         elapsedTime = startTime
+        bufferedFraction = queue[index].url.isFileURL ? 1 : 0
         playbackID = UUID()
+        playbackRequestedAt = Date()
+        firstPCMPlaybackID = nil
         let requestedPlaybackID = playbackID
+        progressiveFallbackPlaybackIDs.removeAll()
 
         if let prepareSong,
-           let location = mediaLocationResolver?(queue[index]) {
+           let location = mediaLocationResolver?(queue[index]),
+           !shouldProgressivelyStream(queue[index], location: location) {
             preparationTask = Task { [weak self] in
                 guard let self else { return }
                 do {
@@ -301,37 +423,13 @@ final class PlaybackController {
             return
         }
 
-        if effectiveModeResolver() == .normalized {
-            preparationTask = Task { [weak self] in
-                guard let self else {
-                    return
-                }
-                await self.prepareLoudnessRun(
-                    startingAt: index,
-                    playbackID: requestedPlaybackID
-                )
-                guard !Task.isCancelled,
-                      requestedPlaybackID == self.playbackID else {
-                    return
-                }
-                self.startPreparedSong(
-                    at: index,
-                    playbackID: requestedPlaybackID,
-                    skippingFailures: skippingFailures,
-                    from: startTime,
-                    shouldPlay: shouldPlay
-                )
-                self.preparationTask = nil
-            }
-        } else {
-            startPreparedSong(
-                at: index,
-                playbackID: requestedPlaybackID,
-                skippingFailures: skippingFailures,
-                from: startTime,
-                shouldPlay: shouldPlay
-            )
-        }
+        startPreparedSong(
+            at: index,
+            playbackID: requestedPlaybackID,
+            skippingFailures: skippingFailures,
+            from: startTime,
+            shouldPlay: shouldPlay
+        )
     }
 
     private func prepareLoudnessAndStart(
@@ -400,13 +498,13 @@ final class PlaybackController {
         shouldPlay: Bool
     ) {
         do {
-            let decoderQueue = localDecoderRun(startingAt: index)
+            let decoderQueue = playbackItemRun(startingAt: index)
             guard !decoderQueue.isEmpty else {
                 throw PrepareSongError.missingLocalFile
             }
             let engine = resolvedEngine()
             duration = try engine.load(
-                songs: decoderQueue,
+                items: decoderQueue,
                 startingAt: 0,
                 from: startTime,
                 playbackID: requestedPlaybackID
@@ -421,7 +519,19 @@ final class PlaybackController {
             } else {
                 state = .paused
             }
+            publishNowPlayingInfo()
         } catch {
+            if case .progressiveStreamingFailed(let message) = error
+                    as? PlaybackEngineError,
+               beginProgressiveFallback(
+                    at: index,
+                    playbackID: requestedPlaybackID,
+                    from: startTime,
+                    shouldPlay: shouldPlay,
+                    streamingMessage: message
+               ) {
+                return
+            }
             if skippingFailures, index + 1 < queue.count {
                 startSong(at: index + 1, skippingFailures: true)
             } else {
@@ -430,20 +540,40 @@ final class PlaybackController {
         }
     }
 
-    /// The audio engine deliberately accepts local files only. Remote songs
-    /// are prepared one at a time, downloaded and hash-verified before they
-    /// enter this run. Keeping later HTTPS URLs out of the engine also makes
-    /// automatic advancement wait for that preparation step.
-    private func localDecoderRun(startingAt index: Int) -> [Song] {
+    private func playbackItemRun(
+        startingAt index: Int
+    ) -> [PlaybackQueueItem] {
         guard queue.indices.contains(index) else { return [] }
-        var result: [Song] = []
+        var result: [PlaybackQueueItem] = []
         for song in queue[index...] {
-            guard song.url.isFileURL else {
+            let location = mediaLocationResolver?(song)
+                ?? (song.url.isFileURL ? .local(song.url) : nil)
+            guard let location else {
                 break
             }
-            result.append(song)
+            if case .remote = location,
+               !shouldProgressivelyStream(song, location: location) {
+                break
+            }
+            result.append(
+                PlaybackQueueItem(song: song, location: location)
+            )
+            if repeatMode == .one {
+                break
+            }
         }
         return result
+    }
+
+    private func shouldProgressivelyStream(
+        _ song: Song,
+        location: PlaybackMediaLocation
+    ) -> Bool {
+        guard case .remote = location,
+              progressivePlaybackEligibility(song) else {
+            return false
+        }
+        return true
     }
 
     private func resume() {
@@ -455,6 +585,7 @@ final class PlaybackController {
             state = .playing
             beginListeningSession()
             startProgressUpdates()
+            publishNowPlayingInfo()
         } catch {
             fail(error.localizedDescription)
         }
@@ -466,6 +597,7 @@ final class PlaybackController {
         stopProgressUpdates()
         elapsedTime = duration
         state = currentSong == nil ? .idle : .paused
+        publishNowPlayingInfo()
     }
 
     private func handle(_ event: PlaybackEngineEvent) {
@@ -488,17 +620,120 @@ final class PlaybackController {
             if let engine {
                 outputStatus = engine.outputStatus
             }
-            if !isReloadingCurrentSong, state == .playing {
+            let decoderMilliseconds = Int(
+                Date().timeIntervalSince(playbackRequestedAt) * 1_000
+            )
+            Self.logger.info(
+                "Decoder started after \(decoderMilliseconds, privacy: .public) ms"
+            )
+            if !isReloadingCurrentSong,
+               state == .playing || state == .buffering {
                 beginListeningSession()
             }
+            publishNowPlayingInfo()
         case .finished(let completedID):
             guard completedID == playbackID else {
                 return
             }
-            next()
+            if repeatMode == .one, let currentIndex {
+                startSong(at: currentIndex, skippingFailures: false)
+            } else {
+                next()
+            }
         case .failed(let message):
             fail(message)
+        case .progressiveStreamingFailed(let failedID, let message):
+            guard failedID == playbackID,
+                  let currentIndex else {
+                return
+            }
+            guard !progressiveFallbackPlaybackIDs.contains(failedID) else {
+                return
+            }
+            let resumeTime = max(
+                elapsedTime,
+                min(engine?.currentTime ?? elapsedTime, duration)
+            )
+            let shouldPlay = state == .playing
+                || state == .buffering
+                || state == .loading
+            if !beginProgressiveFallback(
+                at: currentIndex,
+                playbackID: failedID,
+                from: resumeTime,
+                shouldPlay: shouldPlay,
+                streamingMessage: message
+            ) {
+                fail(message)
+            }
         }
+    }
+
+    @discardableResult
+    private func beginProgressiveFallback(
+        at index: Int,
+        playbackID requestedPlaybackID: UUID,
+        from requestedTime: TimeInterval,
+        shouldPlay: Bool,
+        streamingMessage: String
+    ) -> Bool {
+        guard requestedPlaybackID == playbackID,
+              queue.indices.contains(index),
+              !progressiveFallbackPlaybackIDs.contains(requestedPlaybackID),
+              progressiveDownloadFallbackAllowed(),
+              let prepareSong,
+              let location = mediaLocationResolver?(queue[index]),
+              case .remote = location else {
+            return false
+        }
+
+        progressiveFallbackPlaybackIDs.insert(requestedPlaybackID)
+        Self.logger.warning(
+            "Progressive playback failed; downloading verified song instead: \(streamingMessage, privacy: .public)"
+        )
+        listeningSession.end()
+        engine?.stop()
+        stopProgressUpdates()
+        preparationTask?.cancel()
+        state = .loading
+        elapsedTime = min(max(requestedTime, 0), duration)
+
+        preparationTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let localURL = try await prepareSong.execute(location)
+                guard !Task.isCancelled,
+                      requestedPlaybackID == self.playbackID,
+                      self.queue.indices.contains(index) else {
+                    return
+                }
+                let prepared = self.queue[index].replacingURL(localURL)
+                self.queue[index] = prepared
+                self.currentSong = prepared
+                self.bufferedFraction = 1
+                Self.logger.info(
+                    "Verified download fallback completed"
+                )
+                await self.prepareLoudnessAndStart(
+                    at: index,
+                    playbackID: requestedPlaybackID,
+                    skippingFailures: false,
+                    from: self.elapsedTime,
+                    shouldPlay: shouldPlay
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                Self.logger.error(
+                    "Verified download fallback failed: \(error.localizedDescription, privacy: .public)"
+                )
+                self.fail(
+                    "Streaming failed: \(streamingMessage) Download fallback failed: \(error.localizedDescription)"
+                )
+            }
+            self.preparationTask = nil
+        }
+        return true
     }
 
     private func fail(_ message: String) {
@@ -511,19 +746,72 @@ final class PlaybackController {
     private func startProgressUpdates() {
         stopProgressUpdates()
         progressTask = Task { [weak self] in
+            var stationaryTicks = 0
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(250))
-                guard !Task.isCancelled, let self, self.state == .playing else {
+                guard !Task.isCancelled, let self,
+                      self.state == .playing || self.state == .buffering else {
                     return
                 }
 
                 guard let engine = self.engine else {
                     return
                 }
-                self.elapsedTime = min(engine.currentTime, self.duration)
+                let updatedTime = min(engine.currentTime, self.duration)
+                if updatedTime > self.elapsedTime + 0.01 {
+                    stationaryTicks = 0
+                    self.stallRetryCount = 0
+                    if self.state == .buffering {
+                        self.state = .playing
+                    }
+                } else {
+                    // Tracked regardless of `isWaitingForData`: a streaming
+                    // resource that has permanently failed stops reporting
+                    // itself as waiting once its reader gives up, so relying
+                    // on that flag alone would let a stall go undetected.
+                    stationaryTicks += 1
+                    if engine.isWaitingForData, stationaryTicks >= 4 {
+                        self.state = .buffering
+                    }
+                    if stationaryTicks >= Self.stallTimeoutTicks {
+                        self.handleStall()
+                        return
+                    }
+                }
+                self.elapsedTime = updatedTime
+                self.bufferedFraction = engine.bufferedFraction
                 self.listeningSession.heartbeatIfNeeded()
             }
         }
+    }
+
+    /// Called after `stallTimeoutTicks` (10s) of zero playback progress.
+    /// Retries once from the current position — enough to recover from a
+    /// transient network hiccup — then surfaces a clear failure instead of
+    /// leaving playback stuck at "Buffering" indefinitely.
+    private func handleStall() {
+        guard let currentIndex else {
+            fail("Playback stalled. Check your connection and try again.")
+            return
+        }
+        guard stallRetryCount < Self.maxStallRetries else {
+            Self.logger.error(
+                "Playback stalled with no progress and no fix after retrying"
+            )
+            fail("Playback stalled. Check your connection and try again.")
+            return
+        }
+        stallRetryCount += 1
+        Self.logger.warning(
+            "Playback stalled with no progress; retrying from \(self.elapsedTime, privacy: .public)s"
+        )
+        startSong(
+            at: currentIndex,
+            skippingFailures: false,
+            from: elapsedTime,
+            shouldPlay: true,
+            isStallRetry: true
+        )
     }
 
     private func stopProgressUpdates() {
@@ -554,9 +842,28 @@ final class PlaybackController {
     }
 
     private func updateVisualizerLevels(with incomingLevels: [Double]) {
+        if firstPCMPlaybackID != playbackID,
+           incomingLevels.contains(where: { $0 > 0.000_1 }) {
+            firstPCMPlaybackID = playbackID
+            let pcmMilliseconds = Int(
+                Date().timeIntervalSince(playbackRequestedAt) * 1_000
+            )
+            Self.logger.info(
+                "First rendered PCM after \(pcmMilliseconds, privacy: .public) ms"
+            )
+        }
         visualizerLevels = visualizerSmoother.update(
             current: visualizerLevels,
             incoming: incomingLevels
+        )
+    }
+
+    private func publishNowPlayingInfo() {
+        nowPlayingPublisher.publish(
+            song: currentSong,
+            elapsedTime: elapsedTime,
+            duration: duration,
+            isPlaying: isPlaying
         )
     }
 
@@ -565,5 +872,18 @@ final class PlaybackController {
             return
         }
         listeningSession.begin(trackID: currentSong.libraryID)
+    }
+
+    private func restartCurrentSongAfterQueueChange() {
+        guard currentSong != nil, let currentIndex else { return }
+        let restartTime = elapsedTime
+        let shouldResume =
+            state == .playing || state == .buffering || state == .loading
+        startSong(
+            at: currentIndex,
+            skippingFailures: false,
+            from: restartTime,
+            shouldPlay: shouldResume
+        )
     }
 }

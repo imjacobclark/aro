@@ -1,6 +1,7 @@
 import AppKit
 import AroCommon
 @preconcurrency import AVKit
+import CoreAudio
 import SwiftUI
 
 /// macOS gives apps no way to enumerate AirPlay device names directly (`AVRouteDetector`
@@ -103,6 +104,7 @@ private struct AirPlayRoutePickerHost: NSViewRepresentable {
         let detector = AVRouteDetector()
         let player = AVPlayer()
         var currentURL: URL?
+        var defaultOutputDeviceIDBeforePresenting: AudioObjectID?
         let routeAvailabilityDidChange: @MainActor (Bool) -> Void
         let routeSelectionDidFinish: @MainActor () -> Void
 
@@ -129,10 +131,17 @@ private struct AirPlayRoutePickerHost: NSViewRepresentable {
         func routePickerViewDidEndPresentingRoutes(
             _ routePickerView: AVRoutePickerView
         ) {
-            // The selected AirPlay endpoint is promoted into Core Audio after
-            // the system popover closes. Refresh on the next run-loop turn,
-            // then let Aro follow the new system-default route.
+            // AVKit calls this every time the popover closes, whether or not
+            // the user actually picked a different route (dismissing with
+            // Escape or a click-away fires it too). Only follow the new
+            // system-default route if Core Audio's default output actually
+            // changed as a result — otherwise this silently discards
+            // whatever specific device the user had explicitly selected.
+            let deviceIDBeforePresenting = defaultOutputDeviceIDBeforePresenting
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [routeSelectionDidFinish] in
+                guard Self.currentDefaultOutputDeviceID() != deviceIDBeforePresenting else {
+                    return
+                }
                 routeSelectionDidFinish()
             }
         }
@@ -140,7 +149,29 @@ private struct AirPlayRoutePickerHost: NSViewRepresentable {
         func routePickerViewWillBeginPresentingRoutes(
             _ routePickerView: AVRoutePickerView
         ) {
+            defaultOutputDeviceIDBeforePresenting = Self.currentDefaultOutputDeviceID()
             routeAvailabilityDidChange(detector.multipleRoutesDetected)
+        }
+
+        private static func currentDefaultOutputDeviceID() -> AudioObjectID {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            var deviceID = AudioObjectID(0)
+            var size = UInt32(MemoryLayout<AudioObjectID>.size)
+            guard AudioObjectGetPropertyData(
+                AudioObjectID(kAudioObjectSystemObject),
+                &address,
+                0,
+                nil,
+                &size,
+                &deviceID
+            ) == noErr else {
+                return 0
+            }
+            return deviceID
         }
     }
 

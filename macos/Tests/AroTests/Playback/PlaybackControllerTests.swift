@@ -146,6 +146,79 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertEqual(engine.playCount, 3)
     }
 
+    func testRestartRoundTripKeepsEngineVolumeInSyncWithControllerVolume() {
+        let preferences = PlaybackPreferences(
+            store: InMemoryPlaybackPreferenceStore()
+        )
+        preferences.mode = .normalized
+        let engine = FakeAudioPlaybackEngine()
+        let controller = PlaybackController(
+            engine: engine,
+            preferences: preferences
+        )
+        let song = makeSongs(["Alpha"])[0]
+        defer { controller.stopAndClear() }
+
+        controller.play(song: song, queue: [song])
+        controller.setVolume(0.3)
+        XCTAssertEqual(controller.volume, 0.3, accuracy: 0.0001)
+        XCTAssertEqual(engine.volume, 0.3, accuracy: 0.0001)
+
+        preferences.mode = .bitPerfect
+        controller.restartForPlaybackSettingsChange()
+        XCTAssertEqual(controller.volume, 1)
+        XCTAssertEqual(engine.volume, 1)
+
+        preferences.mode = .normalized
+        controller.restartForPlaybackSettingsChange()
+        XCTAssertEqual(
+            controller.volume,
+            Double(engine.volume),
+            accuracy: 0.0001,
+            "controller.volume must stay in sync with engine.volume after a restart"
+        )
+    }
+
+    func testWirelessAwareResolverAvoidsForcingBitPerfectVolumeBehavior() {
+        let preferences = PlaybackPreferences(
+            store: InMemoryPlaybackPreferenceStore()
+        )
+        preferences.mode = .bitPerfect
+        let deviceManager = FakeWirelessAudioDeviceManager()
+        let engine = FakeAudioPlaybackEngine()
+
+        // Mirrors how LibraryRuntime wires PlaybackController in production:
+        // the resolver must account for the wireless device forcing
+        // normalized mode, not just echo `preferences.mode` like the
+        // controller's own default resolver does.
+        let controller = PlaybackController(
+            engine: engine,
+            preferences: preferences,
+            effectiveModeResolver: {
+                PlaybackRoutePolicy().effectiveMode(
+                    preferredMode: preferences.mode,
+                    device: deviceManager.selectedDevice(
+                        for: preferences.outputDeviceUID
+                    )
+                )
+            }
+        )
+        let song = makeSongs(["Alpha"])[0]
+        defer { controller.stopAndClear() }
+
+        controller.play(song: song, queue: [song])
+        controller.setVolume(0.5)
+
+        XCTAssertEqual(
+            controller.volume,
+            0.5,
+            "a wireless device forces normalized mode, so volume should " +
+                "follow the requested value rather than being clamped to " +
+                "1 as it would under bit-perfect"
+        )
+        XCTAssertEqual(Double(engine.volume), 0.5, accuracy: 0.0001)
+    }
+
     func testRemoteTrackIsPreparedBeforeEngineLoad() async throws {
         let engine = FakeAudioPlaybackEngine()
         let cachedURL = URL(fileURLWithPath: "/Cache/verified.flac")
@@ -230,6 +303,352 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertEqual(engine.loadedStartingIndex, 0)
     }
 
+    func testEligibleRemoteTrackStartsWithProgressiveLocation() {
+        let engine = FakeAudioPlaybackEngine()
+        let hash = String(repeating: "c", count: 64)
+        let song = Song(
+            url: URL(string: "https://hub/v1/blobs/\(hash)")!,
+            title: "Progressive",
+            artist: "Artist",
+            duration: 180,
+            fileSizeBytes: 12_000_000,
+            audioProperties: AudioFileProperties(
+                codec: "flac",
+                sampleRate: 96_000,
+                bitDepth: 24,
+                channelCount: 2,
+                bitrate: 800_000
+            ),
+            contentHash: hash
+        )
+        let controller = PlaybackController(
+            engine: engine,
+            mediaLocationResolver: { song in
+                .remote(
+                    RemoteMedia(
+                        trackID: song.libraryID,
+                        contentHash: hash,
+                        byteCount: 12_000_000,
+                        downloadURL: song.url
+                    )
+                )
+            },
+            progressivePlaybackEligibility: { _ in true }
+        )
+        defer { controller.stopAndClear() }
+
+        controller.play(song: song, queue: [song])
+
+        guard case .remote(let media) = engine.loadedItems.first?.location else {
+            return XCTFail("Expected a progressive remote playback item")
+        }
+        XCTAssertEqual(media.contentHash, hash)
+        XCTAssertEqual(controller.currentSong?.url, song.url)
+        XCTAssertEqual(controller.state, .playing)
+    }
+
+    func testNormalizedRemoteTrackNeverDownloadsBeforeStreaming() {
+        let engine = FakeAudioPlaybackEngine()
+        let preferences = PlaybackPreferences(
+            store: InMemoryPlaybackPreferenceStore()
+        )
+        preferences.mode = .normalized
+        let hash = String(repeating: "9", count: 64)
+        let song = Song(
+            url: URL(string: "https://hub/v1/blobs/\(hash)")!,
+            title: "Server Analyzed",
+            artist: "Artist",
+            duration: 180,
+            fileSizeBytes: 12_000_000,
+            audioProperties: AudioFileProperties(
+                codec: "m4a",
+                sampleRate: 44_100,
+                bitDepth: 16,
+                channelCount: 2,
+                bitrate: 900_000
+            ),
+            contentHash: hash
+        )
+        let controller = PlaybackController(
+            engine: engine,
+            preferences: preferences,
+            effectiveModeResolver: { .normalized },
+            prepareSong: PrepareSongForPlayback(
+                downloader: FailingRemoteDownloader(),
+                verifier: FakeMediaVerifier()
+            ),
+            mediaLocationResolver: { candidate in
+                .remote(
+                    RemoteMedia(
+                        trackID: candidate.libraryID,
+                        contentHash: hash,
+                        byteCount: 12_000_000,
+                        downloadURL: candidate.url
+                    )
+                )
+            },
+            progressivePlaybackEligibility: { _ in true }
+        )
+        defer { controller.stopAndClear() }
+
+        controller.play(song: song, queue: [song])
+
+        guard case .remote = engine.loadedItems.first?.location else {
+            return XCTFail("Normalized playback must enter streaming directly")
+        }
+        XCTAssertEqual(controller.state, .playing)
+        XCTAssertNil(controller.errorMessage)
+    }
+
+    func testProgressiveFailureDownloadsAndResumesVerifiedSong() async throws {
+        let engine = FakeAudioPlaybackEngine()
+        let cachedURL = URL(fileURLWithPath: "/Cache/fallback.flac")
+        let prepare = PrepareSongForPlayback(
+            downloader: FakeRemoteDownloader(url: cachedURL),
+            verifier: FakeMediaVerifier()
+        )
+        let hash = String(repeating: "d", count: 64)
+        let song = Song(
+            url: URL(string: "https://hub/v1/blobs/\(hash)")!,
+            title: "Fallback",
+            artist: "Artist",
+            duration: 180,
+            fileSizeBytes: 12_000_000,
+            audioProperties: AudioFileProperties(
+                codec: "flac",
+                sampleRate: 44_100,
+                bitDepth: 16,
+                channelCount: 2,
+                bitrate: 900_000
+            ),
+            contentHash: hash
+        )
+        let controller = PlaybackController(
+            engine: engine,
+            prepareSong: prepare,
+            mediaLocationResolver: { candidate in
+                if candidate.url.isFileURL {
+                    return .local(candidate.url)
+                }
+                return .remote(
+                    RemoteMedia(
+                        trackID: candidate.libraryID,
+                        contentHash: hash,
+                        byteCount: 12_000_000,
+                        downloadURL: candidate.url
+                    )
+                )
+            },
+            progressivePlaybackEligibility: { _ in true }
+        )
+        defer { controller.stopAndClear() }
+
+        controller.play(song: song, queue: [song])
+        let playbackID = try XCTUnwrap(engine.playbackID)
+        engine.currentTime = 42
+        engine.failProgressive(
+            playbackID: playbackID,
+            message: "range connection lost"
+        )
+        for _ in 0..<100 where engine.loadedURL != cachedURL {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(engine.loadedURL, cachedURL)
+        XCTAssertEqual(engine.loadedFrom, 42)
+        XCTAssertEqual(controller.currentSong?.url, cachedURL)
+        XCTAssertEqual(controller.state, .playing)
+    }
+
+    func testDuplicateProgressiveFailureDoesNotCancelActiveFallback()
+        async throws {
+        let engine = FakeAudioPlaybackEngine()
+        let cachedURL = URL(fileURLWithPath: "/Cache/fallback.mp3")
+        let prepare = PrepareSongForPlayback(
+            downloader: FakeRemoteDownloader(url: cachedURL),
+            verifier: FakeMediaVerifier()
+        )
+        let hash = String(repeating: "e", count: 64)
+        let song = Song(
+            url: URL(string: "https://hub/v1/blobs/\(hash)")!,
+            title: "Fallback",
+            artist: "Artist",
+            duration: 180,
+            fileSizeBytes: 8_000_000,
+            audioProperties: AudioFileProperties(
+                codec: "mp3",
+                sampleRate: 44_100,
+                bitDepth: 16,
+                channelCount: 2,
+                bitrate: 320_000
+            ),
+            contentHash: hash
+        )
+        let controller = PlaybackController(
+            engine: engine,
+            prepareSong: prepare,
+            mediaLocationResolver: { candidate in
+                candidate.url.isFileURL
+                    ? .local(candidate.url)
+                    : .remote(
+                        RemoteMedia(
+                            trackID: candidate.libraryID,
+                            contentHash: hash,
+                            byteCount: 8_000_000,
+                            downloadURL: candidate.url
+                        )
+                    )
+            },
+            progressivePlaybackEligibility: { _ in true }
+        )
+        defer { controller.stopAndClear() }
+
+        controller.play(song: song, queue: [song])
+        let playbackID = try XCTUnwrap(engine.playbackID)
+        engine.failProgressive(
+            playbackID: playbackID,
+            message: "first failure"
+        )
+        engine.failProgressive(
+            playbackID: playbackID,
+            message: "duplicate failure"
+        )
+        for _ in 0..<100 where engine.loadedURL != cachedURL {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(engine.loadedURL, cachedURL)
+        XCTAssertEqual(controller.state, .playing)
+    }
+
+    func testFailedDownloadFallbackReportsBothCauses() async throws {
+        let engine = FakeAudioPlaybackEngine()
+        let prepare = PrepareSongForPlayback(
+            downloader: FailingRemoteDownloader(),
+            verifier: FakeMediaVerifier()
+        )
+        let hash = String(repeating: "f", count: 64)
+        let song = Song(
+            url: URL(string: "https://hub/v1/blobs/\(hash)")!,
+            title: "Unavailable",
+            artist: "Artist",
+            duration: 180,
+            fileSizeBytes: 4_000_000,
+            audioProperties: AudioFileProperties(
+                codec: "m4a",
+                sampleRate: 44_100,
+                bitDepth: 16,
+                channelCount: 2,
+                bitrate: 256_000
+            ),
+            contentHash: hash
+        )
+        let controller = PlaybackController(
+            engine: engine,
+            prepareSong: prepare,
+            mediaLocationResolver: { candidate in
+                .remote(
+                    RemoteMedia(
+                        trackID: candidate.libraryID,
+                        contentHash: hash,
+                        byteCount: 4_000_000,
+                        downloadURL: candidate.url
+                    )
+                )
+            },
+            progressivePlaybackEligibility: { _ in true }
+        )
+        defer { controller.stopAndClear() }
+
+        controller.play(song: song, queue: [song])
+        let playbackID = try XCTUnwrap(engine.playbackID)
+        engine.failProgressive(
+            playbackID: playbackID,
+            message: "decoder stopped"
+        )
+        for _ in 0..<100 where controller.errorMessage == nil {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(controller.state, .failed(
+            "Streaming failed: decoder stopped Download fallback failed: download unavailable"
+        ))
+    }
+
+    func testShuffleKeepsRequestedSongFirstAndPersistsPreference() {
+        let preferencesStore = InMemoryPlaybackPreferenceStore(
+            values: PlaybackPreferenceValues(shuffleEnabled: true)
+        )
+        let preferences = PlaybackPreferences(store: preferencesStore)
+        let engine = FakeAudioPlaybackEngine()
+        let controller = PlaybackController(
+            engine: engine,
+            preferences: preferences
+        )
+        let songs = makeSongs(["Alpha", "Beta", "Gamma", "Delta"])
+        defer { controller.stopAndClear() }
+
+        controller.play(song: songs[1], queue: songs)
+
+        XCTAssertEqual(controller.currentSong, songs[1])
+        XCTAssertEqual(controller.currentIndex, 0)
+        XCTAssertEqual(Set(controller.queue), Set(songs))
+        XCTAssertTrue(controller.isShuffleEnabled)
+
+        controller.toggleShuffle()
+        XCTAssertFalse(controller.isShuffleEnabled)
+        XCTAssertFalse(preferencesStore.load().shuffleEnabled)
+    }
+
+    func testRepeatOneReloadsOnlyCurrentSongAndManualNextAdvances() throws {
+        let preferences = PlaybackPreferences(
+            store: InMemoryPlaybackPreferenceStore(
+                values: PlaybackPreferenceValues(repeatMode: .one)
+            )
+        )
+        let engine = FakeAudioPlaybackEngine()
+        let controller = PlaybackController(
+            engine: engine,
+            preferences: preferences
+        )
+        let songs = makeSongs(["Alpha", "Beta"])
+        defer { controller.stopAndClear() }
+
+        controller.play(song: songs[0], queue: songs)
+        XCTAssertEqual(engine.loadedItems.map(\.song), [songs[0]])
+
+        let firstPlaybackID = try XCTUnwrap(engine.playbackID)
+        engine.finish(playbackID: firstPlaybackID)
+        XCTAssertEqual(controller.currentSong, songs[0])
+        XCTAssertEqual(controller.state, .playing)
+
+        controller.next()
+        XCTAssertEqual(controller.currentSong, songs[1])
+    }
+
+    func testRepeatAllWrapsAtEndOfQueue() throws {
+        let preferences = PlaybackPreferences(
+            store: InMemoryPlaybackPreferenceStore(
+                values: PlaybackPreferenceValues(repeatMode: .all)
+            )
+        )
+        let engine = FakeAudioPlaybackEngine()
+        let controller = PlaybackController(
+            engine: engine,
+            preferences: preferences
+        )
+        let songs = makeSongs(["Alpha", "Beta"])
+        defer { controller.stopAndClear() }
+
+        controller.play(song: songs[1], queue: songs)
+        let playbackID = try XCTUnwrap(engine.playbackID)
+        engine.finish(playbackID: playbackID)
+
+        XCTAssertEqual(controller.currentSong, songs[0])
+        XCTAssertEqual(controller.currentIndex, 0)
+        XCTAssertEqual(controller.state, .playing)
+    }
+
     private func makeSongs(_ titles: [String]) -> [Song] {
         titles.map {
             Song(
@@ -264,14 +683,17 @@ private final class FakeAudioPlaybackEngine: AudioPlaybackEngine {
     var stopCount = 0
     var loadedURL: URL?
     var loadedSongs: [Song] = []
+    var loadedItems: [PlaybackQueueItem] = []
     var loadedStartingIndex: Int?
 
     func load(
-        songs: [Song],
+        items: [PlaybackQueueItem],
         startingAt index: Int,
         from time: TimeInterval,
         playbackID: UUID
     ) throws -> TimeInterval {
+        let songs = items.map(\.song)
+        loadedItems = items
         self.playbackID = playbackID
         loadedSongs = songs
         loadedStartingIndex = index
@@ -305,6 +727,36 @@ private final class FakeAudioPlaybackEngine: AudioPlaybackEngine {
     func finish(playbackID: UUID) {
         eventHandler?(.finished(playbackID))
     }
+
+    func failProgressive(playbackID: UUID, message: String) {
+        eventHandler?(
+            .progressiveStreamingFailed(playbackID, message)
+        )
+    }
+}
+
+@MainActor
+private final class FakeWirelessAudioDeviceManager: AudioDeviceManaging {
+    let wirelessDevice = AudioOutputDevice(
+        id: 99,
+        uid: "wireless",
+        name: "Wireless Speaker",
+        sampleRateRanges: [],
+        transport: .bluetooth
+    )
+    var devices: [AudioOutputDevice] { [wirelessDevice] }
+    var lastWarning: String?
+
+    func refresh() {}
+    func selectedDevice(for uid: String?) -> AudioOutputDevice? { wirelessDevice }
+    func device(withID id: UInt32) -> AudioOutputDevice? { wirelessDevice }
+    func nominalSampleRate(for device: AudioOutputDevice) -> Double? { nil }
+    func configure(
+        device: AudioOutputDevice,
+        sampleRate: Double,
+        acquireHogMode: Bool
+    ) throws -> Bool { false }
+    func releaseHogMode(for device: AudioOutputDevice?) {}
 }
 
 private struct FakeRemoteDownloader: RemoteMediaDownloading {
@@ -313,6 +765,16 @@ private struct FakeRemoteDownloader: RemoteMediaDownloading {
     func download(_ media: RemoteMedia) async throws -> URL {
         url
     }
+}
+
+private struct FailingRemoteDownloader: RemoteMediaDownloading {
+    func download(_ media: RemoteMedia) async throws -> URL {
+        throw FailingDownloadError()
+    }
+}
+
+private struct FailingDownloadError: LocalizedError {
+    var errorDescription: String? { "download unavailable" }
 }
 
 private struct FakeMediaVerifier: MediaHashVerifying {

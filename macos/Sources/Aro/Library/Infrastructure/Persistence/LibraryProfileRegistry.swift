@@ -1,10 +1,16 @@
 import Foundation
 import Observation
+import OSLog
 import AroCommon
 
 @MainActor
 @Observable
 final class LibraryProfileRegistry {
+    private static let logger = Logger(
+        subsystem: "com.othyn.aro",
+        category: "LibraryProfileRegistry"
+    )
+
     private enum Key {
         static let snapshot = "library.profileRegistry.v1"
     }
@@ -24,14 +30,20 @@ final class LibraryProfileRegistry {
         if !isIsolatedUITest {
             LibraryDatabase.prepareDefaultStore()
         }
-        if let data = defaults.data(forKey: Key.snapshot),
-           let snapshot = try? JSONDecoder().decode(
-            LibraryProfileSnapshot.self,
-            from: data
-           ) {
-            profiles = snapshot.profiles
-            activeProfileID = snapshot.activeProfileID
-            setupDismissed = snapshot.setupDismissed
+        if let data = defaults.data(forKey: Key.snapshot) {
+            do {
+                let snapshot = try JSONDecoder().decode(
+                    LibraryProfileSnapshot.self,
+                    from: data
+                )
+                profiles = snapshot.profiles
+                activeProfileID = snapshot.activeProfileID
+                setupDismissed = snapshot.setupDismissed
+            } catch {
+                Self.logger.error(
+                    "Could not decode saved library profiles; starting from an empty list: \(error.localizedDescription, privacy: .public)"
+                )
+            }
         }
         if removeDuplicateRemoteProfiles() {
             save()
@@ -286,6 +298,25 @@ final class LibraryProfileRegistry {
         setupDismissed = true
     }
 
+    /// Forgets a profile's registry entry, reassigning `activeProfileID` if it
+    /// was the active one. Callers are responsible for switching any live
+    /// runtime off this profile *before* calling this (see
+    /// `AroApp.forgetProfile`) and for deleting its on-disk database/media —
+    /// this only removes the pairing record itself.
+    func remove(_ id: UUID) {
+        guard let index = profiles.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        profiles.remove(at: index)
+        if activeProfileID == id {
+            activeProfileID = profiles.first(where: { $0.kind == .local })?.id
+                ?? profiles.max(by: {
+                    $0.lastActivatedAt < $1.lastActivatedAt
+                })?.id
+        }
+        save()
+    }
+
     private func addAndActivate(_ profile: LibraryProfile) {
         profiles.append(profile)
         activeProfileID = profile.id
@@ -343,6 +374,16 @@ final class LibraryProfileRegistry {
         }
     }
 
+    /// The per-profile root directory containing that profile's database
+    /// (plus WAL/SHM sidecars) and its `Media` cache — everything a "forget
+    /// this library" action needs to delete for a remote profile. Not valid
+    /// for `.local` profiles, which use the single shared default database
+    /// instead (see `createLocal`).
+    static func profileDirectory(profileID: UUID) -> URL {
+        profileRoots()
+            .appendingPathComponent(profileID.uuidString, isDirectory: true)
+    }
+
     private static func profileRoots() -> URL {
         FileManager.default.urls(
             for: .applicationSupportDirectory,
@@ -351,8 +392,7 @@ final class LibraryProfileRegistry {
     }
 
     private static func databaseURL(profileID: UUID) -> URL {
-        profileRoots()
-            .appendingPathComponent(profileID.uuidString, isDirectory: true)
+        profileDirectory(profileID: profileID)
             .appendingPathComponent("Library.sqlite3")
     }
 }

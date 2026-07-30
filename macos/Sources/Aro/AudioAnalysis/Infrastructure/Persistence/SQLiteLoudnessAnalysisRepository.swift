@@ -44,6 +44,44 @@ struct SQLiteLoudnessAnalysisRepository: LoudnessAnalysisRepository {
         } ?? nil
     }
 
+    func analyses(
+        fingerprints: [String],
+        algorithmVersion: Int
+    ) -> [String: LoudnessAnalysis] {
+        guard !fingerprints.isEmpty else { return [:] }
+        return database.withReadConnection { connection in
+            let placeholders = fingerprints.map { _ in "?" }.joined(separator: ", ")
+            guard let statement = prepare(
+                """
+                SELECT fingerprint, integrated_lufs, peak_amplitude, analyzed_at
+                FROM loudness_analysis
+                WHERE algorithm_version = ? AND fingerprint IN (\(placeholders))
+                """,
+                connection: connection
+            ) else {
+                return [:]
+            }
+            defer { sqlite3_finalize(statement) }
+            sqlite3_bind_int(statement, 1, Int32(algorithmVersion))
+            for (offset, fingerprint) in fingerprints.enumerated() {
+                bind(fingerprint, to: statement, at: Int32(offset + 2))
+            }
+            var results: [String: LoudnessAnalysis] = [:]
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let fingerprint = text(statement, 0) else { continue }
+                results[fingerprint] = LoudnessAnalysis(
+                    integratedLUFS: sqlite3_column_double(statement, 1),
+                    peakAmplitude: sqlite3_column_double(statement, 2),
+                    analyzedAt: Date(
+                        timeIntervalSince1970: sqlite3_column_double(statement, 3)
+                    ),
+                    algorithmVersion: algorithmVersion
+                )
+            }
+            return results
+        } ?? [:]
+    }
+
     func save(
         _ analysis: LoudnessAnalysis,
         fingerprint: String
@@ -157,5 +195,16 @@ struct SQLiteLoudnessAnalysisRepository: LoudnessAnalysisRepository {
 
     private var sqliteTransient: sqlite3_destructor_type {
         unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+    }
+
+    private func text(
+        _ statement: OpaquePointer,
+        _ column: Int32
+    ) -> String? {
+        guard sqlite3_column_type(statement, column) != SQLITE_NULL,
+              let value = sqlite3_column_text(statement, column) else {
+            return nil
+        }
+        return String(cString: value)
     }
 }

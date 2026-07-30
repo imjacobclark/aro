@@ -60,6 +60,13 @@ private struct EmptyLoudnessRepository: LoudnessAnalysisRepository {
         nil
     }
 
+    func analyses(
+        fingerprints: [String],
+        algorithmVersion: Int
+    ) -> [String: LoudnessAnalysis] {
+        [:]
+    }
+
     func save(_ analysis: LoudnessAnalysis, fingerprint: String) {}
 }
 #endif

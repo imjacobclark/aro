@@ -46,7 +46,7 @@ final class LibraryStore {
         switch selection {
         case .folder(let id):
             return songsByFolder[id] ?? []
-        case .songs, .artists, .albums, .stats, .libraryHealth, .devices, .none:
+        case .songs, .artists, .albums, .stats, .libraryHealth, .settings, .metadata, .none:
             return SongLibrary.aggregate(songsByFolder)
         }
     }
@@ -73,8 +73,10 @@ final class LibraryStore {
             return "Albums"
         case .libraryHealth:
             return "Library Health"
-        case .devices:
-            return "Devices"
+        case .settings:
+            return "Settings"
+        case .metadata:
+            return "Metadata"
         case .songs, .none:
             return "Songs"
         }
@@ -84,7 +86,7 @@ final class LibraryStore {
         switch selection {
         case .folder(let id):
             return scanStates[id] ?? .idle
-        case .songs, .artists, .albums, .stats, .libraryHealth, .devices, .none:
+        case .songs, .artists, .albums, .stats, .libraryHealth, .settings, .metadata, .none:
             if scanStates.values.contains(.scanning) {
                 return .scanning
             }
@@ -122,6 +124,111 @@ final class LibraryStore {
                 folderID: folder.id
             )
         }
+    }
+
+    /// Merges background AcoustID/MusicBrainz identification results (pulled from
+    /// `aro-server`'s control socket, keyed by content hash) into the local catalog,
+    /// then reloads so Songs/Artists/Albums reflect them. Artwork is a reference on
+    /// the wire rather than embedded bytes, so it's fetched here — best-effort; a
+    /// failed or missing download just means no artwork this round, not a failed
+    /// identification. `resolveBlobHash` fetches a hub-cached artwork blob (see
+    /// `downloadArtwork` below) — the caller supplies it since this class doesn't
+    /// own a control-socket client itself.
+    func applyIdentificationResults(
+        _ results: [IdentificationResult],
+        resolveBlobHash: (String) async -> Data?
+    ) async {
+        guard !results.isEmpty else { return }
+        let manageFolders = manageFolders
+        var appliedAny = false
+        for result in results {
+            let artworkData = await Self.downloadArtwork(
+                result.artworkURL,
+                resolveBlobHash: resolveBlobHash
+            )
+            // Hops the SQLite write off the main actor — this loop can run
+            // over many results per poll and would otherwise block the UI.
+            let applied = await Task.detached(priority: .utility) {
+                manageFolders.applyIdentification(
+                    contentHash: result.contentHash,
+                    title: result.title,
+                    artist: result.artist,
+                    album: result.album,
+                    musicbrainzRecordingID: result.musicbrainzRecordingID,
+                    acoustidID: result.acoustidID,
+                    artworkData: artworkData
+                )
+            }.value
+            appliedAny = appliedAny || applied
+        }
+        if appliedAny {
+            reloadStoredLibrary()
+        }
+    }
+
+    /// Fills in artwork bytes for tracks that learned an artwork reference through
+    /// a *synced track operation* rather than the identification-results
+    /// control-socket pull. That pull only ever has data on a machine actually
+    /// running identification (a host with its own `aro-server`); a pure remote
+    /// client only ever learns title/artist/album/artwork through normal CRDT
+    /// sync, which is why this exists as a separate path from
+    /// `applyIdentificationResults` above. `resolveBlobHash` here is expected to
+    /// fetch from the *remote* hub (authenticated, pinned-TLS) rather than a local
+    /// control socket — see `downloadArtwork`.
+    func downloadPendingArtwork(resolveBlobHash: (String) async -> Data?) async {
+        let manageFolders = manageFolders
+        let pending = await Task.detached(priority: .utility) {
+            manageFolders.pendingArtworkDownloads(limit: 20)
+        }.value
+        guard !pending.isEmpty else { return }
+        var downloadedAny = false
+        for item in pending {
+            guard let data = await Self.downloadArtwork(
+                item.artworkURL,
+                resolveBlobHash: resolveBlobHash
+            ) else { continue }
+            // Hops the SQLite write off the main actor — this loop can run
+            // over many items per poll and would otherwise block the UI.
+            await Task.detached(priority: .utility) {
+                manageFolders.storeArtwork(trackID: item.trackID, data: data)
+            }.value
+            downloadedAny = true
+        }
+        if downloadedAny {
+            reloadStoredLibrary()
+        }
+    }
+
+    /// `artworkURL` is either a hub-relative blob reference (`/v1/blobs/{hash}` —
+    /// aro-server caches Cover Art Archive images into its own content-addressed
+    /// blob store rather than clients hitting the archive directly) resolved via
+    /// `resolveBlobHash`, or — for identification results predating that caching —
+    /// a plain fetchable URL (historically Cover Art Archive), fetched directly.
+    private static func downloadArtwork(
+        _ urlString: String?,
+        resolveBlobHash: (String) async -> Data?
+    ) async -> Data? {
+        guard let urlString else { return nil }
+        if let hash = blobHash(from: urlString) {
+            return await resolveBlobHash(hash)
+        }
+        guard let url = URL(string: urlString) else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode),
+              !data.isEmpty else {
+            return nil
+        }
+        return data
+    }
+
+    private static let blobURLPrefix = "/v1/blobs/"
+
+    private static func blobHash(from urlString: String) -> String? {
+        guard urlString.hasPrefix(blobURLPrefix) else { return nil }
+        return String(urlString.dropFirst(blobURLPrefix.count))
     }
 
     func addFolder(_ selectedURL: URL) {

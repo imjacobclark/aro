@@ -1,0 +1,34 @@
+{
+  "artist-credit": [
+    {
+      "name": "Neck Deep"
+    },
+    {
+      "name": "Chris Carrabba"
+    }
+  ],
+  "id": "33cab056-bba2-44da-bf42-600edd146587",
+  "releases": [
+    {
+      "id": "0f96c37c-6e17-42c0-8bcc-59d72e643808",
+      "release-group": {
+        "id": "01e2bc1d-f8c8-4c7c-bd25-8246c706c8fa",
+        "primary-type": "Single",
+        "secondary-types": []
+      },
+      "status": "Official",
+      "title": "December"
+    },
+    {
+      "id": "930fe0ba-d553-4c8f-a64b-a21b218c6f49",
+      "release-group": {
+        "id": "01e2bc1d-f8c8-4c7c-bd25-8246c706c8fa",
+        "primary-type": "Single",
+        "secondary-types": []
+      },
+      "status": "Official",
+      "title": "December"
+    }
+  ],
+  "title": "December"
+}

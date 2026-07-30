@@ -65,6 +65,24 @@ ditto "$helper" "$staged_macos/aro-server"
 ditto "$project_dir/../server/packaging/com.aro.server.plist" \
     "$staged_launch_agents/com.aro.server.plist"
 
+# aro-track-id links libchromaprint dynamically (LGPLv2.1 — see its src/fingerprint.rs
+# for why static linking isn't used). The linker records an absolute build-machine
+# path (e.g. /opt/homebrew/opt/chromaprint/...); that won't exist on an end user's
+# Mac, so the real dylib is bundled here and aro-server's dependency is repointed at
+# it via an rpath, the same pattern already used for the main app's .frameworks.
+chromaprint_dylib=$(otool -L "$staged_macos/aro-server" \
+    | awk '/libchromaprint/{print $1}')
+if [[ -z "$chromaprint_dylib" ]]; then
+    print -u2 "aro-server does not link libchromaprint — expected a dynamic dependency"
+    exit 1
+fi
+chromaprint_dylib_real=$(readlink -f "$chromaprint_dylib" 2>/dev/null || echo "$chromaprint_dylib")
+ditto "$chromaprint_dylib_real" "$staged_frameworks/${chromaprint_dylib:t}"
+install_name_tool -change "$chromaprint_dylib" \
+    "@rpath/${chromaprint_dylib:t}" "$staged_macos/aro-server"
+install_name_tool -add_rpath "@executable_path/../Frameworks" \
+    "$staged_macos/aro-server"
+
 # App bundles expose resources through Contents/Resources. Bundle.module still
 # resolves the SwiftPM bundle when running the executable directly in builds.
 ditto "$resource_bundle/Montserrat-Variable.ttf" \

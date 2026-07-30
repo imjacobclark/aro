@@ -31,6 +31,27 @@ struct SQLiteTrackStateRepository: TrackStateRepository {
         }
     }
 
+    func setFavourite(trackID: UUID, favourite: Bool) throws {
+        try mutate(
+            trackID: trackID,
+            operation: "favourite",
+            payload: "{\"favourite\":\(favourite)}"
+        ) { connection, now in
+            try run(
+                """
+                UPDATE track_state
+                SET favourite = ?, updated_at = ?
+                WHERE track_id = ?
+                """,
+                connection: connection
+            ) {
+                sqlite3_bind_int($0, 1, favourite ? 1 : 0)
+                sqlite3_bind_double($0, 2, now)
+                bind(trackID.uuidString, to: $0, at: 3)
+            }
+        }
+    }
+
     func tombstone(trackID: UUID) throws {
         let now = Date().timeIntervalSince1970
         try mutate(

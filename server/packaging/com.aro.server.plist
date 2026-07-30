@@ -17,5 +17,9 @@
     <true/>
     <key>ProcessType</key>
     <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>/tmp/aro-server.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/aro-server.log</string>
 </dict>
 </plist>

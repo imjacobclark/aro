@@ -18,14 +18,25 @@ public struct PlaybackRoutePolicy: Sendable {
         guard let device, device.transport.isWireless else { return nil }
         return "Wireless output uses shared normalized playback and may introduce latency."
     }
+
+    public func loudnessGateError(
+        effectiveMode: PlaybackMode,
+        leadSongLoudness: LoudnessAnalysis?
+    ) -> PlaybackEngineError? {
+        guard effectiveMode == .normalized, leadSongLoudness == nil else {
+            return nil
+        }
+        return .missingLoudnessAnalysis
+    }
 }
 
-public enum PlaybackEngineError: LocalizedError, Sendable {
+public enum PlaybackEngineError: LocalizedError, Sendable, Equatable {
     case invalidAudioFile
     case missingAudioProperties
     case missingLoudnessAnalysis
     case outputDeviceMismatch(requested: String, actual: String)
     case engineFailedToStart(String)
+    case progressiveStreamingFailed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -39,6 +50,8 @@ public enum PlaybackEngineError: LocalizedError, Sendable {
             return "The selected output could not route playback to \(requested). The active output is \(actual)."
         case .engineFailedToStart(let message):
             return "The audio engine could not start: \(message)"
+        case .progressiveStreamingFailed(let message):
+            return "Progressive streaming could not start: \(message)"
         }
     }
 }
@@ -47,6 +60,17 @@ public enum PlaybackEngineEvent: Sendable {
     case started(UUID, URL, TimeInterval)
     case finished(UUID)
     case failed(String)
+    case progressiveStreamingFailed(UUID, String)
+}
+
+public struct PlaybackQueueItem: Hashable, Sendable {
+    public let song: Song
+    public let location: PlaybackMediaLocation
+
+    public init(song: Song, location: PlaybackMediaLocation) {
+        self.song = song
+        self.location = location
+    }
 }
 
 public struct PreparedPlaybackQueue: Sendable {
@@ -102,12 +126,24 @@ public protocol AudioPlaybackEngine: AnyObject {
     var currentTime: TimeInterval { get }
     var volume: Float { get set }
     var outputStatus: PlaybackOutputStatus { get }
+    var bufferedFraction: Double { get }
+    var isWaitingForData: Bool { get }
 
-    func load(songs: [Song], startingAt index: Int, from time: TimeInterval, playbackID: UUID) throws -> TimeInterval
+    func load(
+        items: [PlaybackQueueItem],
+        startingAt index: Int,
+        from time: TimeInterval,
+        playbackID: UUID
+    ) throws -> TimeInterval
     func play() throws
     func pause()
     func seek(to time: TimeInterval, playbackID: UUID, shouldPlay: Bool) throws
     func stop()
+}
+
+public extension AudioPlaybackEngine {
+    var bufferedFraction: Double { 1 }
+    var isWaitingForData: Bool { false }
 }
 
 public protocol ListeningHistoryRecording: Sendable {
@@ -124,17 +160,48 @@ public struct NoOpListeningHistoryRecorder: ListeningHistoryRecording, Sendable 
     public func endSession(sessionID: UUID, completed: Bool) {}
 }
 
+public protocol NowPlayingPublishing: Sendable {
+    func publish(
+        song: Song?,
+        elapsedTime: TimeInterval,
+        duration: TimeInterval,
+        isPlaying: Bool
+    )
+}
+
+public struct NoOpNowPlayingPublisher: NowPlayingPublishing, Sendable {
+    public init() {}
+
+    public func publish(
+        song: Song?,
+        elapsedTime: TimeInterval,
+        duration: TimeInterval,
+        isPlaying: Bool
+    ) {}
+}
+
 public struct PlaybackPreferenceValues: Sendable {
     public var mode: PlaybackMode = .bitPerfect
     public var outputDeviceUID: String?
     public var hogModeEnabled = false
     public var targetLUFS = -14.0
+    public var shuffleEnabled = false
+    public var repeatMode: PlaybackRepeatMode = .off
 
-    public init(mode: PlaybackMode = .bitPerfect, outputDeviceUID: String? = nil, hogModeEnabled: Bool = false, targetLUFS: Double = -14.0) {
+    public init(
+        mode: PlaybackMode = .bitPerfect,
+        outputDeviceUID: String? = nil,
+        hogModeEnabled: Bool = false,
+        targetLUFS: Double = -14.0,
+        shuffleEnabled: Bool = false,
+        repeatMode: PlaybackRepeatMode = .off
+    ) {
         self.mode = mode
         self.outputDeviceUID = outputDeviceUID
         self.hogModeEnabled = hogModeEnabled
         self.targetLUFS = targetLUFS
+        self.shuffleEnabled = shuffleEnabled
+        self.repeatMode = repeatMode
     }
 }
 

@@ -14,6 +14,8 @@ final class LibraryRuntime {
     let libraryFileManager: any LibraryFileManaging
     let syncOperationStore: SQLiteSyncOperationStore
     private let trackStateRepository: SQLiteTrackStateRepository
+    private let offlinePolicy: OfflineDownloadPolicy
+    private let storageLimitBytes: Int64?
 
     init(
         databaseURL: URL,
@@ -24,6 +26,8 @@ final class LibraryRuntime {
     ) {
         let database = LibraryDatabase(url: databaseURL)
         self.database = database
+        offlinePolicy = profile?.offlinePolicy ?? .stream
+        storageLimitBytes = profile?.storageLimitBytes
         let operationStore = SQLiteSyncOperationStore(database: database)
         syncOperationStore = operationStore
         trackStateRepository = SQLiteTrackStateRepository(database: database)
@@ -47,6 +51,10 @@ final class LibraryRuntime {
         let remoteTLSFingerprint = profile?.baseURL.flatMap {
             operationStore.membership(baseURL: $0)?.tlsFingerprint
         }
+        let mediaCache = SQLiteMediaCache(database: database)
+        let storagePolicyState = MediaStoragePolicyState(
+            profile?.offlinePolicy ?? .stream
+        )
         let prepareSong = PrepareSongForPlayback(
             downloader: URLSessionMediaDownloader(
                 cacheDirectory: cacheDirectory,
@@ -54,12 +62,37 @@ final class LibraryRuntime {
                 pinnedTLSFingerprint: remoteTLSFingerprint
             ),
             verifier: CachingSHA256MediaVerifier(
-                cache: SQLiteMediaCache(database: database)
+                cache: mediaCache,
+                shouldCache: { hash in
+                    mediaCache.shouldRetainStreamedMedia(
+                        hash: hash,
+                        policy: storagePolicyState.policy
+                    )
+                }
             )
         )
+        let streamingCoordinator = ProgressiveMediaCoordinator(
+            cacheDirectory: cacheDirectory,
+            credential: remoteCredential,
+            pinnedTLSFingerprint: remoteTLSFingerprint,
+            shouldRetain: { media in
+                mediaCache.shouldRetainStreamedMedia(
+                    hash: media.contentHash,
+                    policy: storagePolicyState.policy
+                )
+            }
+        ) { hash, url, byteCount in
+            mediaCache.register(
+                hash: hash,
+                localURL: url,
+                byteCount: byteCount
+            )
+        }
         mediaCacheController = MediaCacheController(
             database: database,
-            prepare: prepareSong
+            prepare: prepareSong,
+            cacheDirectory: cacheDirectory,
+            storagePolicyState: storagePolicyState
         )
         libraryFileManager = SQLiteLibraryFileManager(database: database)
         let libraryCatalog = SQLiteLibraryCatalogRepository(
@@ -95,6 +128,7 @@ final class LibraryRuntime {
             listeningHistory: SQLiteListeningHistoryRecorder(
                 database: database
             ),
+            nowPlayingPublisher: MPNowPlayingPublisher(),
             effectiveModeResolver: {
                 PlaybackRoutePolicy().effectiveMode(
                     preferredMode: playbackPreferences.mode,
@@ -105,8 +139,13 @@ final class LibraryRuntime {
             },
             prepareSong: prepareSong,
             mediaLocationResolver: { song in
+                if storagePolicyState.policy != .streamOnly,
+                   let hash = song.contentHash,
+                   let cachedURL = mediaCache.localURL(hash: hash) {
+                    return .local(cachedURL)
+                }
                 guard !song.url.isFileURL,
-                      let hash = song.fileFingerprint?.contentHash,
+                      let hash = song.contentHash,
                       let byteCount = song.fileSizeBytes else {
                     return nil
                 }
@@ -119,10 +158,25 @@ final class LibraryRuntime {
                     )
                 )
             },
+            progressivePlaybackEligibility: { song in
+                switch song.audioProperties?.codec.lowercased() {
+                case "flac", "ogg", "oga", "vorbis", "ogg vorbis",
+                     "mp3", "mpeg", "mpeg-1 layer 3", "m4a", "mp4",
+                     "aac", "alac", "apple lossless", "wav", "wave",
+                     "aif", "aiff":
+                    true
+                default:
+                    false
+                }
+            },
+            progressiveDownloadFallbackAllowed: {
+                storagePolicyState.policy != .streamOnly
+            },
             engineFactory: {
                 HighResolutionPlaybackEngine(
                     preferences: playbackPreferences,
-                    deviceManager: audioDeviceManager
+                    deviceManager: audioDeviceManager,
+                    streamingCoordinator: streamingCoordinator
                 )
             }
         )
@@ -131,5 +185,18 @@ final class LibraryRuntime {
     func removeFromLibrary(trackID: UUID) throws {
         try trackStateRepository.tombstone(trackID: trackID)
         libraryStore.reloadStoredLibrary()
+    }
+
+    func setFavourite(trackID: UUID, favourite: Bool) async throws {
+        try trackStateRepository.setFavourite(
+            trackID: trackID,
+            favourite: favourite
+        )
+        libraryStore.reloadStoredLibrary()
+        playbackController.reconcileAvailableSongs(libraryStore.allSongs)
+        await mediaCacheController.apply(
+            offlinePolicy,
+            storageLimitBytes: storageLimitBytes
+        )
     }
 }

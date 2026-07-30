@@ -1,0 +1,311 @@
+{
+  "artist-credit": [
+    {
+      "name": "The Beatles"
+    }
+  ],
+  "id": "00c47ea6-3a10-4a32-b1f1-990ac756c6a0",
+  "releases": [
+    {
+      "id": "e2d754fd-36d6-455a-8531-769fb1fdf2b9",
+      "release-group": {
+        "id": "2af04578-5f1e-4c4c-bc75-72aa9d085bde",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Compilation"
+        ]
+      },
+      "status": "Official",
+      "title": "The Beatles’ Greatest"
+    },
+    {
+      "id": "40825ca0-0568-3de0-bbe7-d5e07ed9a191",
+      "release-group": {
+        "id": "0d44e1cb-c6e0-3453-8b68-4d2082f05421",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Soundtrack"
+        ]
+      },
+      "status": "Official",
+      "title": "Help!"
+    },
+    {
+      "id": "0a9bf7a3-b0f2-357b-830b-425966088022",
+      "release-group": {
+        "id": "00fd2a87-8e68-3dc6-b749-ed89fb82cd6a",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Compilation"
+        ]
+      },
+      "status": "Official",
+      "title": "A Collection of Beatles Oldies"
+    },
+    {
+      "id": "0c4e7725-68b2-475a-9a3a-be13a555d71c",
+      "release-group": {
+        "id": "00fd2a87-8e68-3dc6-b749-ed89fb82cd6a",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Compilation"
+        ]
+      },
+      "status": "Official",
+      "title": "A Collection of Beatles Oldies"
+    },
+    {
+      "id": "77c606be-4c1e-4a69-a95e-46586a96f884",
+      "release-group": {
+        "id": "0d44e1cb-c6e0-3453-8b68-4d2082f05421",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Soundtrack"
+        ]
+      },
+      "status": "Official",
+      "title": "Help!"
+    },
+    {
+      "id": "bc7a6bb5-c5c9-4155-be9c-49a83db767c7",
+      "release-group": {
+        "id": "2af04578-5f1e-4c4c-bc75-72aa9d085bde",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Compilation"
+        ]
+      },
+      "status": "Official",
+      "title": "Beatles’ Greatest"
+    },
+    {
+      "id": "16806d2a-3cd3-4574-a3a5-106d70943762",
+      "release-group": {
+        "id": "0d44e1cb-c6e0-3453-8b68-4d2082f05421",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Soundtrack"
+        ]
+      },
+      "status": "Official",
+      "title": "Help!"
+    },
+    {
+      "id": "9a0bd9f5-2b46-41bf-9c57-08f758916537",
+      "release-group": {
+        "id": "0d44e1cb-c6e0-3453-8b68-4d2082f05421",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Soundtrack"
+        ]
+      },
+      "status": "Official",
+      "title": "Help!"
+    },
+    {
+      "id": "f8017577-d116-4427-b51d-cabdd987e1f7",
+      "release-group": {
+        "id": "0d44e1cb-c6e0-3453-8b68-4d2082f05421",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Soundtrack"
+        ]
+      },
+      "status": "Official",
+      "title": "Help!"
+    },
+    {
+      "id": "275402b5-daaa-458b-a6e3-66d299dc9631",
+      "release-group": {
+        "id": "0d44e1cb-c6e0-3453-8b68-4d2082f05421",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Soundtrack"
+        ]
+      },
+      "status": "Official",
+      "title": "Help!"
+    },
+    {
+      "id": "507da9fa-601e-3667-977c-d6000a0b543f",
+      "release-group": {
+        "id": "5bb120e2-fe76-33cc-a4bb-8f56f2fd3d67",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Compilation"
+        ]
+      },
+      "status": "Official",
+      "title": "1962–1966"
+    },
+    {
+      "id": "95fe9df2-62d3-47aa-b94d-64d99c7abe42",
+      "release-group": {
+        "id": "5bb120e2-fe76-33cc-a4bb-8f56f2fd3d67",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Compilation"
+        ]
+      },
+      "status": "Official",
+      "title": "1962–1966"
+    },
+    {
+      "id": "6dfd7636-8fd8-4f99-bc05-10650965be5f",
+      "release-group": {
+        "id": "0d44e1cb-c6e0-3453-8b68-4d2082f05421",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Soundtrack"
+        ]
+      },
+      "status": "Official",
+      "title": "Help!"
+    },
+    {
+      "id": "251f8da2-9a8e-4d2f-937d-467b0afb8253",
+      "release-group": {
+        "id": "00fd2a87-8e68-3dc6-b749-ed89fb82cd6a",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Compilation"
+        ]
+      },
+      "status": "Official",
+      "title": "A Collection of Beatles Oldies"
+    },
+    {
+      "id": "15e308e7-a9ae-4993-abc3-ceceeb41f08a",
+      "release-group": {
+        "id": "0d44e1cb-c6e0-3453-8b68-4d2082f05421",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Soundtrack"
+        ]
+      },
+      "status": "Official",
+      "title": "Help!"
+    },
+    {
+      "id": "859f2566-4b4e-428d-907a-ecbd78922d54",
+      "release-group": {
+        "id": "3fe20166-34f6-429f-968b-c2ff9fcfcc00",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Compilation"
+        ]
+      },
+      "status": "Official",
+      "title": "The Beatles Collection"
+    },
+    {
+      "id": "cb7d7313-f6fe-3a4e-8519-a80ea2a5e72f",
+      "release-group": {
+        "id": "5bb120e2-fe76-33cc-a4bb-8f56f2fd3d67",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Compilation"
+        ]
+      },
+      "status": "Official",
+      "title": "1962–1966"
+    },
+    {
+      "id": "e5b46b00-95bf-4879-9a61-d544ab1fc6ae",
+      "release-group": {
+        "id": "3fe20166-34f6-429f-968b-c2ff9fcfcc00",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Compilation"
+        ]
+      },
+      "status": "Official",
+      "title": "The Beatles Collection"
+    },
+    {
+      "id": "72bfb069-d925-4a0e-b0f0-e777547e208c",
+      "release-group": {
+        "id": "00fd2a87-8e68-3dc6-b749-ed89fb82cd6a",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Compilation"
+        ]
+      },
+      "status": "Official",
+      "title": "A Collection of Beatles Oldies"
+    },
+    {
+      "id": "80b601bc-c42d-3fae-b88c-13699a396cf6",
+      "release-group": {
+        "id": "0d44e1cb-c6e0-3453-8b68-4d2082f05421",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Soundtrack"
+        ]
+      },
+      "status": "Official",
+      "title": "Help!"
+    },
+    {
+      "id": "150954c3-fce9-3239-83cb-58e1ceced6c7",
+      "release-group": {
+        "id": "3fe20166-34f6-429f-968b-c2ff9fcfcc00",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Compilation"
+        ]
+      },
+      "status": "Official",
+      "title": "The Beatles Collection"
+    },
+    {
+      "id": "ac97de22-c9b4-4030-b45b-fbea7eca91f9",
+      "release-group": {
+        "id": "0d44e1cb-c6e0-3453-8b68-4d2082f05421",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Soundtrack"
+        ]
+      },
+      "status": "Official",
+      "title": "Help!"
+    },
+    {
+      "id": "1c6b5463-3e4d-44a9-b80a-64948d1ef6ef",
+      "release-group": {
+        "id": "f4571294-0bef-3f55-93bb-03a1ca101986",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Compilation"
+        ]
+      },
+      "status": "Official",
+      "title": "Reel Music"
+    },
+    {
+      "id": "106b5089-c2b5-38d5-988b-8bd7ab6b4754",
+      "release-group": {
+        "id": "f4571294-0bef-3f55-93bb-03a1ca101986",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Compilation"
+        ]
+      },
+      "status": "Official",
+      "title": "Reel Music"
+    },
+    {
+      "id": "e4b54062-56dd-4fcc-9037-808820847225",
+      "release-group": {
+        "id": "15924488-3397-4e50-9474-0712c4b31494",
+        "primary-type": "Album",
+        "secondary-types": [
+          "Compilation"
+        ]
+      },
+      "status": "Official",
+      "title": "20 Greatest Hits"
+    }
+  ],
+  "title": "Ticket to Ride"
+}

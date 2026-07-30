@@ -27,4 +27,33 @@ struct ManageWatchedFolders: Sendable {
     func markUnavailable(folderID: UUID) {
         catalog.markFolderUnavailable(id: folderID)
     }
+
+    @discardableResult
+    func applyIdentification(
+        contentHash: String,
+        title: String?,
+        artist: String?,
+        album: String?,
+        musicbrainzRecordingID: String?,
+        acoustidID: String?,
+        artworkData: Data?
+    ) -> Bool {
+        catalog.applyIdentification(
+            contentHash: contentHash,
+            title: title,
+            artist: artist,
+            album: album,
+            musicbrainzRecordingID: musicbrainzRecordingID,
+            acoustidID: acoustidID,
+            artworkData: artworkData
+        )
+    }
+
+    func pendingArtworkDownloads(limit: Int) -> [PendingArtwork] {
+        catalog.pendingArtworkDownloads(limit: limit)
+    }
+
+    func storeArtwork(trackID: String, data: Data) {
+        catalog.storeArtwork(trackID: trackID, data: data)
+    }
 }

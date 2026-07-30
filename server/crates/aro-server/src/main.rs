@@ -59,7 +59,10 @@ enum Command {
     Approve {
         request_id: uuid::Uuid,
     },
-    Devices,
+    Devices {
+        #[command(subcommand)]
+        command: Option<DeviceCommand>,
+    },
     Revoke {
         device_id: uuid::Uuid,
     },
@@ -94,6 +97,13 @@ enum FolderCommand {
 }
 
 #[derive(Subcommand)]
+enum DeviceCommand {
+    List,
+    Allow { device_id: uuid::Uuid },
+    Deny { device_id: uuid::Uuid },
+}
+
+#[derive(Subcommand)]
 enum PairingCommand {
     Requests {
         #[arg(long)]
@@ -106,7 +116,8 @@ async fn main() -> Result<()> {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| "aro_server=info".into()),
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "aro_server=info,aro_track_id=info".into()),
         )
         .init();
     let cli = Cli::parse();
@@ -122,7 +133,7 @@ async fn main() -> Result<()> {
         Command::Pairing { command } => pairing(&config_path, command).await,
         Command::Pair => open_pairing(&config_path).await,
         Command::Approve { request_id } => approve_pairing(&config_path, request_id).await,
-        Command::Devices => list_devices(&config_path).await,
+        Command::Devices { command } => devices(&config_path, command).await,
         Command::Revoke { device_id } => revoke_device(&config_path, device_id).await,
         Command::Status => status(&config_path),
         Command::Verify => verify(&config_path),
@@ -165,17 +176,32 @@ async fn serve(config: Config) -> Result<()> {
     ensure_certificate(&config)?;
     let fingerprint = certificate_fingerprint(&config.tls_cert)?;
     let store = HubStore::open(&config.data_dir)?;
+    let identification_config =
+        (!config.acoustid_api_key.is_empty()).then(|| aro_track_id::IdentificationConfig {
+            acoustid_api_key: config.acoustid_api_key.clone(),
+            musicbrainz_user_agent: config.musicbrainz_user_agent.clone(),
+        });
+    let identification = aro_track_id::IdentificationQueue::start(
+        store.clone(),
+        config.hub_id,
+        identification_config,
+    );
+    let loudness =
+        aro_track_id::loudness::LoudnessQueue::start(store.clone(), config.hub_id);
     let sources = sources::SourceManager::start(
         store.clone(),
         config.hub_id,
         config.storage_mode,
         config.source_rescan_seconds,
+        identification.clone(),
+        loudness,
     )?;
     let pairing = PairingManager::new(fingerprint.clone());
     let state = AppState {
         hub_id: config.hub_id,
         display_name: config.display_name.clone(),
         admin_token: config.admin_token.clone(),
+        admin_allow: config.admin_allow.clone(),
         pairing,
         jobs: JobRegistry::default(),
         store,
@@ -197,7 +223,10 @@ async fn serve(config: Config) -> Result<()> {
     );
     let tls = RustlsConfig::from_pem_file(&config.tls_cert, &config.tls_key).await?;
     axum_server::bind_rustls(config.bind, tls)
-        .serve(http::router(state).into_make_service())
+        .serve(
+            http::router(state)
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
         .await?;
     Ok(())
 }
@@ -351,6 +380,11 @@ fn ensure_certificate(config: &Config) -> Result<()> {
     }
     std::fs::write(&config.tls_cert, certified.cert.pem())?;
     std::fs::write(&config.tls_key, certified.signing_key.serialize_pem())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&config.tls_key, std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 
@@ -696,6 +730,41 @@ async fn open_pairing(path: &Path) -> Result<()> {
         .json::<serde_json::Value>()
         .await?;
     println!("{}", serde_json::to_string_pretty(&response)?);
+    Ok(())
+}
+
+async fn devices(path: &Path, command: Option<DeviceCommand>) -> Result<()> {
+    match command.unwrap_or(DeviceCommand::List) {
+        DeviceCommand::List => list_devices(path).await,
+        DeviceCommand::Allow { device_id } => set_device_contribution(path, device_id, true).await,
+        DeviceCommand::Deny { device_id } => set_device_contribution(path, device_id, false).await,
+    }
+}
+
+async fn set_device_contribution(
+    path: &Path,
+    device_id: uuid::Uuid,
+    can_contribute: bool,
+) -> Result<()> {
+    let config = Config::load(path)?;
+    admin_client()?
+        .post(format!("{}/v1/devices/permissions", local_url(&config)))
+        .bearer_auth(&config.admin_token)
+        .json(&serde_json::json!({
+            "device_id": device_id,
+            "can_contribute": can_contribute
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+    println!(
+        "{} contributions for {device_id}",
+        if can_contribute {
+            "Enabled"
+        } else {
+            "Disabled"
+        }
+    );
     Ok(())
 }
 

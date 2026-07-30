@@ -4,17 +4,30 @@ use aro_sync_protocol::*;
 use aro_sync_store::{HubStore, StoreError};
 use axum::{
     Json, Router,
-    body::Bytes,
-    extract::{Path, Query, State},
+    body::{Body, Bytes},
+    extract::{ConnectInfo, Path, Query, Request, State},
     http::{HeaderMap, StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use chrono::Duration;
+use ipnet::IpNet;
 use serde::Deserialize;
 use serde_json::json;
-use std::{path::PathBuf, sync::Arc};
-use tokio::fs;
+use sha2::{Digest, Sha256};
+use std::{
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+    sync::Arc,
+};
+use subtle::ConstantTimeEq;
+use tokio::{
+    fs,
+    io::{AsyncReadExt, AsyncSeekExt},
+};
+use tokio_util::io::ReaderStream;
+use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -22,30 +35,72 @@ pub struct AppState {
     pub hub_id: Uuid,
     pub display_name: String,
     pub admin_token: String,
+    /// Networks permitted to reach admin-only endpoints; enforced by
+    /// [`admin_network_guard`] ahead of the per-request token check.
+    pub admin_allow: Vec<IpNet>,
     pub pairing: PairingManager,
     pub jobs: JobRegistry,
     pub store: HubStore,
     pub sources: SourceManager,
 }
 
+fn is_peer_allowed(allow: &[IpNet], peer: IpAddr) -> bool {
+    allow.iter().any(|net| net.contains(&peer))
+}
+
+/// Rejects requests to admin-only routes whose peer address isn't covered by
+/// `AppState::admin_allow`, before the handler's own token check runs.
+async fn admin_network_guard(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if is_peer_allowed(&state.admin_allow, peer.ip()) {
+        next.run(request).await
+    } else {
+        ApiError::forbidden(
+            "admin_network_denied",
+            "This network is not permitted to reach the admin API.",
+        )
+        .into_response()
+    }
+}
+
 pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/v1/hub", get(hub_info))
-        .route("/v1/negotiate", post(negotiate))
+    let state = Arc::new(state);
+
+    // Bursts of up to 8 requests, replenishing one every 500ms per source IP.
+    // Defense-in-depth against admin-token brute forcing; the network guard
+    // above and the token check itself are the primary controls.
+    let admin_rate_limit = GovernorConfigBuilder::default()
+        .finish()
+        .expect("valid governor configuration");
+
+    let admin_only = Router::new()
         .route("/v1/pairing/open", post(open_pairing))
-        .route("/v1/pairing/start", post(start_pairing))
-        .route("/v1/pairing/{id}/pake1", post(pairing_pake1))
-        .route("/v1/pairing/{id}/confirm", post(confirm_pairing))
-        .route("/v1/pairing/{id}", get(pairing_status))
         .route("/v1/pairing/approve", post(approve_pairing))
         .route("/v1/pairing/requests", get(pairing_requests))
         .route("/v1/admin/folders", get(folders).post(add_folder))
         .route("/v1/admin/folders/scan", post(scan_folders))
         .route("/v1/admin/folders/remove", post(remove_folder))
         .route("/v1/devices", get(devices))
-        .route("/v1/device", get(current_device))
         .route("/v1/devices/revoke", post(revoke))
         .route("/v1/devices/permissions", post(update_device_permissions))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            admin_network_guard,
+        ))
+        .layer(GovernorLayer::new(admin_rate_limit));
+
+    let shared = Router::new()
+        .route("/v1/hub", get(hub_info))
+        .route("/v1/negotiate", post(negotiate))
+        .route("/v1/pairing/start", post(start_pairing))
+        .route("/v1/pairing/{id}/pake1", post(pairing_pake1))
+        .route("/v1/pairing/{id}/confirm", post(confirm_pairing))
+        .route("/v1/pairing/{id}", get(pairing_status))
+        .route("/v1/device", get(current_device))
         .route("/v1/join/preview", post(join_preview))
         .route("/v1/join/commit", post(join_commit))
         .route("/v1/snapshot", get(snapshot))
@@ -55,8 +110,12 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/blobs/commit", post(commit_blob))
         .route("/v1/library/export-manifest", get(export_manifest))
         .route("/v1/library/sources", get(source_health))
-        .route("/v1/jobs/{id}", get(job_status).delete(cancel_job))
-        .with_state(Arc::new(state))
+        .route("/v1/identify", post(identify_tracks))
+        .route("/v1/identification/status", get(identification_status))
+        .route("/v1/loudness/status", get(loudness_status))
+        .route("/v1/jobs/{id}", get(job_status).delete(cancel_job));
+
+    admin_only.merge(shared).with_state(state)
 }
 
 async fn pairing_requests(
@@ -457,6 +516,16 @@ async fn commit_blob(
     let device_id = require_device(&state, &headers)?;
     require_contributor(&state, device_id)?;
     let committed_size = state.store.commit_blob(&request.hash, request.size)?;
+    if state
+        .store
+        .needs_loudness_analysis(
+            &request.hash,
+            aro_track_id::loudness::ALGORITHM_VERSION,
+        )?
+        && let Some(path) = state.store.blob_path_for_download(&request.hash)?
+    {
+        state.sources.loudness().enqueue(request.hash.clone(), path);
+    }
     Ok(Json(BlobStatus {
         hash: request.hash,
         exists: true,
@@ -501,48 +570,189 @@ async fn source_health(
     Ok(Json(state.store.source_health()?))
 }
 
-async fn download_range(path: PathBuf, range: Option<&str>) -> Result<Response, ApiError> {
-    let bytes = fs::read(path).await.map_err(ApiError::internal)?;
-    let total = bytes.len();
-    if let Some(spec) = range.and_then(|value| value.strip_prefix("bytes=")) {
-        let (start, end) = spec
-            .split_once('-')
-            .ok_or_else(|| ApiError::bad_request("invalid_range"))?;
-        let start: usize = start
-            .parse()
-            .map_err(|_| ApiError::bad_request("invalid_range"))?;
-        let end: usize = if end.is_empty() {
-            total.saturating_sub(1)
-        } else {
-            end.parse()
-                .map_err(|_| ApiError::bad_request("invalid_range"))?
-        };
-        if start > end || end >= total {
-            return Err(ApiError::new(
-                StatusCode::RANGE_NOT_SATISFIABLE,
-                "invalid_range",
-                "Requested byte range is outside the blob",
-            ));
+#[derive(Deserialize)]
+struct IdentifyTracksRequest {
+    content_hashes: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct IdentifyTracksResponse {
+    queued: usize,
+    unresolved: Vec<String>,
+}
+
+/// Remote-client equivalent of the local control socket's `identify_tracks` command
+/// (see `crate::control::ControlCommand::IdentifyTracks`) — reachable over HTTPS so a
+/// Mac that's a pure remote client of this hub (no `aro-server` of its own running
+/// locally) can still trigger "Sync Track/Album/All Data", not only a self-hosting one.
+/// Deliberately does *not* trust a client-supplied file path the way the control-socket
+/// command does — that only works there because the local case has client and server
+/// on the same filesystem by construction. A remote caller only ever supplies a content
+/// hash; this resolves the on-disk path itself via `track_id_for_hash` /
+/// `live_path_for_track`, so the caller's own filesystem layout is irrelevant.
+async fn identify_tracks(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<IdentifyTracksRequest>,
+) -> Result<Json<IdentifyTracksResponse>, ApiError> {
+    let device_id = require_device(&state, &headers)?;
+    require_contributor(&state, device_id)?;
+
+    let identification = state.sources.identification();
+    let mut queued = 0;
+    let mut unresolved = Vec::new();
+    for hash in request.content_hashes {
+        let path = state
+            .store
+            .track_id_for_hash(&hash)?
+            .and_then(|track_id| state.store.live_path_for_track(track_id).ok().flatten());
+        match path {
+            Some(path) => {
+                identification.enqueue(hash, path);
+                queued += 1;
+            }
+            None => unresolved.push(hash),
         }
-        return Ok((
-            StatusCode::PARTIAL_CONTENT,
-            [
-                (header::CONTENT_TYPE, "application/octet-stream".into()),
-                (
-                    header::CONTENT_RANGE,
-                    format!("bytes {start}-{end}/{total}"),
-                ),
-            ],
-            bytes[start..=end].to_vec(),
-        )
-            .into_response());
     }
-    Ok((
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/octet-stream")],
-        bytes,
-    )
-        .into_response())
+    Ok(Json(IdentifyTracksResponse { queued, unresolved }))
+}
+
+/// Remote-client equivalent of the control socket's `identification_status` command —
+/// lets a pure remote client's Metadata page show live queue counts the same way the
+/// self-hosting case already does locally.
+async fn identification_status(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<aro_track_id::QueueStatus>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    Ok(Json(state.sources.identification().status().await))
+}
+
+async fn loudness_status(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<aro_track_id::loudness::LoudnessQueueStatus>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    Ok(Json(state.sources.loudness().status().await))
+}
+
+async fn download_range(path: PathBuf, range: Option<&str>) -> Result<Response, ApiError> {
+    let mut file = fs::File::open(path).await.map_err(ApiError::internal)?;
+    let total = file.metadata().await.map_err(ApiError::internal)?.len();
+    let requested = match range {
+        Some(value) => match parse_byte_range(value, total) {
+            Ok(value) => Some(value),
+            Err(()) => return Ok(range_not_satisfiable(total)),
+        },
+        None => None,
+    };
+    let (status, start, end) = match requested {
+        Some((start, end)) => (StatusCode::PARTIAL_CONTENT, start, end),
+        None => (StatusCode::OK, 0, total.saturating_sub(1)),
+    };
+    let length = if total == 0 { 0 } else { end - start + 1 };
+    if start > 0 {
+        file.seek(std::io::SeekFrom::Start(start))
+            .await
+            .map_err(ApiError::internal)?;
+    }
+    let stream = ReaderStream::new(file.take(length));
+    let mut response = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_LENGTH, length.to_string());
+    if status == StatusCode::PARTIAL_CONTENT {
+        response = response.header(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{total}"),
+        );
+    }
+    response
+        .body(Body::from_stream(stream))
+        .map_err(ApiError::internal)
+}
+
+fn parse_byte_range(value: &str, total: u64) -> Result<(u64, u64), ()> {
+    let spec = value.strip_prefix("bytes=").ok_or(())?;
+    if spec.contains(',') || total == 0 {
+        return Err(());
+    }
+    let (start, end) = spec.split_once('-').ok_or(())?;
+    if start.is_empty() {
+        return Err(());
+    }
+    let start = start.parse::<u64>().map_err(|_| ())?;
+    let end = if end.is_empty() {
+        total - 1
+    } else {
+        end.parse::<u64>().map_err(|_| ())?
+    };
+    if start > end || end >= total {
+        return Err(());
+    }
+    Ok((start, end))
+}
+
+fn range_not_satisfiable(total: u64) -> Response {
+    Response::builder()
+        .status(StatusCode::RANGE_NOT_SATISFIABLE)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_RANGE, format!("bytes */{total}"))
+        .body(Body::empty())
+        .expect("static range response is valid")
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn parses_bounded_and_open_ended_ranges() {
+        assert_eq!(parse_byte_range("bytes=2-4", 8), Ok((2, 4)));
+        assert_eq!(parse_byte_range("bytes=5-", 8), Ok((5, 7)));
+    }
+
+    #[test]
+    fn rejects_invalid_or_multiple_ranges() {
+        assert_eq!(parse_byte_range("items=0-1", 8), Err(()));
+        assert_eq!(parse_byte_range("bytes=-2", 8), Err(()));
+        assert_eq!(parse_byte_range("bytes=4-3", 8), Err(()));
+        assert_eq!(parse_byte_range("bytes=0-8", 8), Err(()));
+        assert_eq!(parse_byte_range("bytes=0-1,4-5", 8), Err(()));
+    }
+
+    #[tokio::test]
+    async fn streams_only_the_requested_bytes() {
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"abcdefgh").unwrap();
+
+        let response = download_range(file.path().to_path_buf(), Some("bytes=2-4"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "3");
+        assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 2-4/8");
+        let body = to_bytes(response.into_body(), 16).await.unwrap();
+        assert_eq!(&body[..], b"cde");
+    }
+
+    #[tokio::test]
+    async fn invalid_range_reports_the_complete_length() {
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"abcdefgh").unwrap();
+
+        let response = download_range(file.path().to_path_buf(), Some("bytes=8-"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes */8");
+    }
 }
 
 async fn job_status(
@@ -571,9 +781,23 @@ async fn cancel_job(
         .ok_or_else(|| ApiError::not_found("job_not_found"))
 }
 
+/// Compares two tokens in constant time (both are SHA-256-hashed to
+/// fixed-size arrays first, since `ConstantTimeEq` requires equal-length
+/// inputs and tokens may vary in length) to avoid leaking a match via
+/// response-time timing.
+fn tokens_match(a: &str, b: &str) -> bool {
+    let a_hash: [u8; 32] = Sha256::digest(a.as_bytes()).into();
+    let b_hash: [u8; 32] = Sha256::digest(b.as_bytes()).into();
+    a_hash.ct_eq(&b_hash).into()
+}
+
+fn admin_token_matches(state: &AppState, supplied: &str) -> bool {
+    tokens_match(supplied, &state.admin_token)
+}
+
 fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
     let supplied = bearer(headers).unwrap_or_default();
-    if supplied == state.admin_token {
+    if admin_token_matches(state, supplied) {
         Ok(())
     } else {
         Err(ApiError::unauthorized())
@@ -614,7 +838,7 @@ fn require_contributor(state: &AppState, device_id: Uuid) -> Result<(), ApiError
 }
 
 fn require_device_or_admin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
-    if bearer(headers).is_some_and(|token| token == state.admin_token) {
+    if bearer(headers).is_some_and(|token| admin_token_matches(state, token)) {
         return Ok(());
     }
     require_device(state, headers).map(|_| ())
@@ -643,6 +867,7 @@ fn pairing_error(error: PairingError) -> ApiError {
     }
 }
 
+#[derive(Debug)]
 pub struct ApiError {
     status: StatusCode,
     code: String,
@@ -715,5 +940,56 @@ impl From<StoreError> for ApiError {
             aro_sync_store::StoreError::Blob(_) => Self::bad_request(&error.to_string()),
             _ => Self::internal(error),
         }
+    }
+}
+
+#[cfg(test)]
+mod admin_access_tests {
+    use super::*;
+
+    #[test]
+    fn tokens_match_requires_equal_tokens() {
+        assert!(tokens_match("secret-token", "secret-token"));
+        assert!(!tokens_match("secret-token", "different-token"));
+        assert!(!tokens_match("secret-token", ""));
+        assert!(!tokens_match("short", "a-much-longer-token-value"));
+    }
+
+    #[test]
+    fn is_peer_allowed_matches_configured_networks_only() {
+        let loopback_only = [
+            "127.0.0.0/8".parse::<IpNet>().unwrap(),
+            "::1/128".parse::<IpNet>().unwrap(),
+        ];
+        assert!(is_peer_allowed(
+            &loopback_only,
+            "127.0.0.1".parse::<IpAddr>().unwrap()
+        ));
+        assert!(!is_peer_allowed(
+            &loopback_only,
+            "192.168.1.50".parse::<IpAddr>().unwrap()
+        ));
+
+        let lan_subnet = ["192.168.1.0/24".parse::<IpNet>().unwrap()];
+        assert!(is_peer_allowed(
+            &lan_subnet,
+            "192.168.1.50".parse::<IpAddr>().unwrap()
+        ));
+        assert!(!is_peer_allowed(
+            &lan_subnet,
+            "10.0.0.1".parse::<IpAddr>().unwrap()
+        ));
+
+        let anyone = ["0.0.0.0/0".parse::<IpNet>().unwrap()];
+        assert!(is_peer_allowed(
+            &anyone,
+            "203.0.113.5".parse::<IpAddr>().unwrap()
+        ));
+
+        let none: [IpNet; 0] = [];
+        assert!(!is_peer_allowed(
+            &none,
+            "127.0.0.1".parse::<IpAddr>().unwrap()
+        ));
     }
 }

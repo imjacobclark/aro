@@ -3,6 +3,27 @@ import Observation
 import SQLite3
 import AroCommon
 
+final class MediaStoragePolicyState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedPolicy: OfflineDownloadPolicy
+
+    init(_ policy: OfflineDownloadPolicy) {
+        storedPolicy = policy
+    }
+
+    var policy: OfflineDownloadPolicy {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedPolicy
+    }
+
+    func update(_ policy: OfflineDownloadPolicy) {
+        lock.lock()
+        storedPolicy = policy
+        lock.unlock()
+    }
+}
+
 struct SQLiteMediaCache: Sendable {
     let database: LibraryDatabase
 
@@ -141,20 +162,21 @@ struct SQLiteMediaCache: Sendable {
     }
 
     func media(for policy: OfflineDownloadPolicy) -> [RemoteMedia] {
-        guard policy != .stream else { return [] }
+        guard policy != .streamOnly, policy != .stream else { return [] }
         return database.withReadConnection { connection in
             var statement: OpaquePointer?
             let predicate: String
             var albums: [String] = []
             switch policy {
-            case .stream:
+            case .streamOnly, .stream:
                 return []
             case .favourites:
                 predicate = "AND s.favourite = 1"
             case .selectedAlbums(let selected):
                 albums = selected.sorted()
-                guard !albums.isEmpty else { return [] }
-                predicate = "AND m.album IN (\(albums.map { _ in "?" }.joined(separator: ",")))"
+                predicate = albums.isEmpty
+                    ? "AND s.favourite = 1"
+                    : "AND (s.favourite = 1 OR m.album IN (\(albums.map { _ in "?" }.joined(separator: ","))))"
             case .fullLibrary:
                 predicate = ""
             }
@@ -171,7 +193,7 @@ struct SQLiteMediaCache: Sendable {
                   AND l.path LIKE 'https://%'
                   AND s.deleted_at IS NULL
                   \(predicate)
-                ORDER BY t.id
+                ORDER BY s.favourite DESC, m.album, t.id
                 """,
                 -1,
                 &statement,
@@ -202,6 +224,22 @@ struct SQLiteMediaCache: Sendable {
             }
             return media
         } ?? []
+    }
+
+    func shouldRetainStreamedMedia(
+        hash: String,
+        policy: OfflineDownloadPolicy
+    ) -> Bool {
+        switch policy {
+        case .streamOnly:
+            return false
+        case .stream, .fullLibrary:
+            return true
+        case .favourites:
+            return matchesRetentionSelection(hash: hash, albums: [])
+        case .selectedAlbums(let albums):
+            return matchesRetentionSelection(hash: hash, albums: albums)
+        }
     }
 
     func replacePins(with hashes: Set<String>) {
@@ -310,10 +348,49 @@ struct SQLiteMediaCache: Sendable {
     ) -> String? {
         sqlite3_column_text(statement, column).map(String.init(cString:))
     }
+
+    private func matchesRetentionSelection(
+        hash: String,
+        albums: Set<String>
+    ) -> Bool {
+        database.withReadConnection { connection in
+            var statement: OpaquePointer?
+            let sortedAlbums = albums.sorted()
+            let albumPredicate = sortedAlbums.isEmpty
+                ? ""
+                : "OR m.album IN (\(sortedAlbums.map { _ in "?" }.joined(separator: ",")))"
+            guard sqlite3_prepare_v2(
+                connection,
+                """
+                SELECT 1
+                FROM tracks AS t
+                JOIN track_state AS s ON s.track_id = t.id
+                JOIN scan_metadata AS m ON m.track_id = t.id
+                WHERE t.content_hash = ?
+                  AND s.deleted_at IS NULL
+                  AND (s.favourite = 1 \(albumPredicate))
+                LIMIT 1
+                """,
+                -1,
+                &statement,
+                nil
+            ) == SQLITE_OK,
+                  let statement else {
+                return false
+            }
+            defer { sqlite3_finalize(statement) }
+            bind(hash, statement, 1)
+            for (offset, album) in sortedAlbums.enumerated() {
+                bind(album, statement, Int32(offset + 2))
+            }
+            return sqlite3_step(statement) == SQLITE_ROW
+        } ?? false
+    }
 }
 
 struct CachingSHA256MediaVerifier: MediaHashVerifying {
     let cache: SQLiteMediaCache
+    var shouldCache: @Sendable (_ hash: String) -> Bool = { _ in true }
     private let verifier = SHA256MediaVerifier()
 
     func verify(file: URL, expectedSHA256: String) async throws {
@@ -324,11 +401,13 @@ struct CachingSHA256MediaVerifier: MediaHashVerifying {
         let byteCount = try file.resourceValues(
             forKeys: [.fileSizeKey]
         ).fileSize ?? 0
-        cache.register(
-            hash: expectedSHA256,
-            localURL: file,
-            byteCount: Int64(byteCount)
-        )
+        if shouldCache(expectedSHA256) {
+            cache.register(
+                hash: expectedSHA256,
+                localURL: file,
+                byteCount: Int64(byteCount)
+            )
+        }
     }
 }
 
@@ -337,6 +416,8 @@ struct CachingSHA256MediaVerifier: MediaHashVerifying {
 final class MediaCacheController {
     private let cache: SQLiteMediaCache
     private let prepare: PrepareSongForPlayback?
+    private let cacheDirectory: URL
+    private let storagePolicyState: MediaStoragePolicyState
     var statusMessage: String?
     var errorMessage: String?
     private(set) var downloadProgress: (completed: Int, total: Int)?
@@ -346,11 +427,30 @@ final class MediaCacheController {
 
     init(
         database: LibraryDatabase,
-        prepare: PrepareSongForPlayback? = nil
+        prepare: PrepareSongForPlayback? = nil,
+        cacheDirectory: URL,
+        storagePolicyState: MediaStoragePolicyState
     ) {
         cache = SQLiteMediaCache(database: database)
         self.prepare = prepare
+        self.cacheDirectory = cacheDirectory
+        self.storagePolicyState = storagePolicyState
+        if storagePolicyState.policy == .streamOnly {
+            removeAllStoredMedia()
+            removeProgressiveArtifacts()
+        }
         refreshSummary()
+    }
+
+    func isCached(hash: String) -> Bool {
+        cache.localURL(hash: hash) != nil
+    }
+
+    /// Exposes the underlying (Sendable) cache so callers like the library
+    /// exporter can resolve already-downloaded bytes locally instead of
+    /// requiring a live connection to the library host.
+    var blobCache: SQLiteMediaCache {
+        cache
     }
 
     func refreshSummary(
@@ -417,9 +517,30 @@ final class MediaCacheController {
         }
     }
 
-    func apply(_ policy: OfflineDownloadPolicy) async {
-        let media = cache.media(for: policy)
+    func apply(
+        _ policy: OfflineDownloadPolicy,
+        storageLimitBytes: Int64? = nil
+    ) async {
+        storagePolicyState.update(policy)
+        if policy == .streamOnly {
+            removeAllStoredMedia()
+            removeProgressiveArtifacts()
+            statusMessage = "Stream only is active. No music is stored."
+            refreshSummary()
+            return
+        }
+
+        let limit = policy == .fullLibrary
+            ? nil
+            : resolvedLimit(configured: storageLimitBytes)
+        let requestedMedia = cache.media(for: policy)
+        let media = limit.map {
+            mediaWithinLimit(requestedMedia, limitBytes: $0)
+        } ?? requestedMedia
         cache.replacePins(with: Set(media.map(\.contentHash)))
+        if let limit {
+            enforceLimit(limit)
+        }
         guard let prepare, !media.isEmpty else {
             refreshSummary()
             return
@@ -447,6 +568,9 @@ final class MediaCacheController {
             statusMessage = "Some offline music could not be downloaded."
         }
         downloadProgress = nil
+        if let limit {
+            enforceLimit(limit)
+        }
         refreshSummary()
     }
 
@@ -473,6 +597,59 @@ final class MediaCacheController {
             )
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func resolvedLimit(configured: Int64?) -> Int64 {
+        if let configured {
+            return configured
+        }
+        let available = (try? cacheDirectory.resourceValues(
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey]
+        ).volumeAvailableCapacityForImportantUsage).flatMap(Int64.init)
+            ?? CacheEvictionPolicy.defaultLimitBytes * 10
+        return CacheEvictionPolicy.automaticLimitBytes(
+            availableCapacity: available
+        )
+    }
+
+    private func mediaWithinLimit(
+        _ media: [RemoteMedia],
+        limitBytes: Int64
+    ) -> [RemoteMedia] {
+        var remaining = max(0, limitBytes)
+        var selected: [RemoteMedia] = []
+        for item in media where item.byteCount <= remaining {
+            selected.append(item)
+            remaining -= item.byteCount
+        }
+        return selected
+    }
+
+    private func removeAllStoredMedia() {
+        do {
+            let entries = cache.entries()
+            for entry in entries {
+                try cache.remove(hash: entry.contentHash)
+            }
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        cache.replacePins(with: [])
+    }
+
+    private func removeProgressiveArtifacts() {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: cacheDirectory,
+            includingPropertiesForKeys: nil
+        ) else {
+            return
+        }
+        for file in files where
+            file.pathExtension == "partial"
+                || file.pathExtension == "ranges" {
+            try? FileManager.default.removeItem(at: file)
         }
     }
 }

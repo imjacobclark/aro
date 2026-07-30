@@ -192,11 +192,40 @@ public struct AroBlobCommitRequest: Codable, Sendable {
     }
 }
 
+/// Request body for `POST v1/identify` — the remote-hub equivalent of the local
+/// control socket's `identify_tracks` command. Content hashes only, deliberately no
+/// file path: a path on the calling device's filesystem is meaningless to a remote
+/// hub, which resolves its own on-disk path from the hash.
+public struct AroIdentifyTracksRequest: Codable, Sendable {
+    public let contentHashes: [String]
+
+    public init(contentHashes: [String]) {
+        self.contentHashes = contentHashes
+    }
+}
+
+public struct AroIdentifyTracksResponse: Codable, Sendable {
+    public let queued: Int
+    public let unresolved: [String]
+}
+
 public struct AroExportManifest: Codable, Sendable {
     public let schemaVersion: UInt16
     public let libraryName: String
     public let generatedAt: Date
     public let tracks: [AroExportTrack]
+
+    public init(
+        schemaVersion: UInt16,
+        libraryName: String,
+        generatedAt: Date,
+        tracks: [AroExportTrack]
+    ) {
+        self.schemaVersion = schemaVersion
+        self.libraryName = libraryName
+        self.generatedAt = generatedAt
+        self.tracks = tracks
+    }
 }
 
 public struct AroExportTrack: Identifiable, Codable, Sendable {
@@ -213,6 +242,32 @@ public struct AroExportTrack: Identifiable, Codable, Sendable {
     public let removedAt: Date?
 
     public var id: UUID { trackID }
+
+    public init(
+        trackID: UUID,
+        contentHash: String,
+        byteCount: UInt64,
+        title: String,
+        artist: String,
+        album: String?,
+        trackNumber: UInt32?,
+        discNumber: UInt32?,
+        originalFilename: String,
+        originalExtension: String,
+        removedAt: Date?
+    ) {
+        self.trackID = trackID
+        self.contentHash = contentHash
+        self.byteCount = byteCount
+        self.title = title
+        self.artist = artist
+        self.album = album
+        self.trackNumber = trackNumber
+        self.discNumber = discNumber
+        self.originalFilename = originalFilename
+        self.originalExtension = originalExtension
+        self.removedAt = removedAt
+    }
 }
 
 public struct SyncExchangeResponse: Codable, Sendable {

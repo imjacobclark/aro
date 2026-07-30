@@ -1,5 +1,6 @@
 import AroCommon
 
+import AppKit
 import SwiftUI
 
 enum AroTheme {
@@ -24,6 +25,65 @@ enum AroTheme {
         green: 0.09,
         blue: 0.20
     )
+
+    static let sidebarSurface = adaptiveColor(
+        light: NSColor(
+            calibratedRed: 0.925,
+            green: 0.935,
+            blue: 0.955,
+            alpha: 1
+        ),
+        dark: NSColor(
+            calibratedRed: 0.105,
+            green: 0.115,
+            blue: 0.14,
+            alpha: 1
+        )
+    )
+    static let browserSurface = adaptiveColor(
+        light: NSColor(
+            calibratedRed: 0.965,
+            green: 0.967,
+            blue: 0.972,
+            alpha: 1
+        ),
+        dark: NSColor(
+            calibratedRed: 0.125,
+            green: 0.13,
+            blue: 0.145,
+            alpha: 1
+        )
+    )
+    static let contentSurface = adaptiveColor(
+        light: NSColor(
+            calibratedRed: 0.982,
+            green: 0.978,
+            blue: 0.965,
+            alpha: 1
+        ),
+        dark: NSColor(
+            calibratedRed: 0.095,
+            green: 0.09,
+            blue: 0.085,
+            alpha: 1
+        )
+    )
+    static let albumSurface = adaptiveColor(
+        light: NSColor(
+            calibratedRed: 0.972,
+            green: 0.97,
+            blue: 0.96,
+            alpha: 1
+        ),
+        dark: NSColor(
+            calibratedRed: 0.135,
+            green: 0.13,
+            blue: 0.125,
+            alpha: 1
+        )
+    )
+    static let hairline = Color.primary.opacity(0.09)
+    static let selectedTint = violet.opacity(0.11)
 
     static let orbitGradient = Gradient(
         colors: [violet, coral, amber]
@@ -55,6 +115,18 @@ enum AroTheme {
             red: start.0 + (end.0 - start.0) * amount,
             green: start.1 + (end.1 - start.1) * amount,
             blue: start.2 + (end.2 - start.2) * amount
+        )
+    }
+
+    private static func adaptiveColor(
+        light: NSColor,
+        dark: NSColor
+    ) -> Color {
+        Color(
+            nsColor: NSColor(name: nil) { appearance in
+                appearance.bestMatch(from: [.darkAqua, .aqua])
+                    == .darkAqua ? dark : light
+            }
         )
     }
 }

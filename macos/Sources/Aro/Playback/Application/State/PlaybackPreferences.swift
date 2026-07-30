@@ -20,6 +20,14 @@ final class PlaybackPreferences {
         didSet { persist() }
     }
 
+    var shuffleEnabled: Bool {
+        didSet { persist() }
+    }
+
+    var repeatMode: PlaybackRepeatMode {
+        didSet { persist() }
+    }
+
     @ObservationIgnored private let store: any PlaybackPreferenceStoring
 
     init(
@@ -32,6 +40,8 @@ final class PlaybackPreferences {
         outputDeviceUID = values.outputDeviceUID
         hogModeEnabled = values.hogModeEnabled
         targetLUFS = values.targetLUFS
+        shuffleEnabled = values.shuffleEnabled
+        repeatMode = values.repeatMode
     }
 
     private func persist() {
@@ -40,7 +50,9 @@ final class PlaybackPreferences {
                 mode: mode,
                 outputDeviceUID: outputDeviceUID,
                 hogModeEnabled: hogModeEnabled,
-                targetLUFS: targetLUFS
+                targetLUFS: targetLUFS,
+                shuffleEnabled: shuffleEnabled,
+                repeatMode: repeatMode
             )
         )
     }

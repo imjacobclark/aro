@@ -218,24 +218,39 @@ final class LibraryDatabase: @unchecked Sendable {
         lock.withLock {
             guard let statement = try? prepare(
                 """
-                SELECT t.id, l.path, sm.title, sm.artist, sm.duration,
+                SELECT t.id, l.path,
+                       COALESCE(ts.title_override, sm.title),
+                       COALESCE(ts.artist_override, sm.artist),
+                       sm.duration,
                        l.file_size, sm.codec, sm.sample_rate, sm.bit_depth,
                        sm.channel_count, sm.bitrate, l.modification_date,
                        t.content_hash, la.integrated_lufs, la.peak_amplitude,
-                       la.analyzed_at, sm.album, sm.genre, sm.release_year,
-                       sm.artwork
+                       la.analyzed_at, la.algorithm_version,
+                       COALESCE(ts.album_override, sm.album),
+                       sm.genre, sm.release_year,
+                       sm.artwork, ts.favourite
                 FROM file_locations AS l
                 JOIN tracks AS t ON t.id = l.track_id
                 JOIN scan_metadata AS sm ON sm.track_id = t.id
                 JOIN track_state AS ts ON ts.track_id = t.id
                 LEFT JOIN loudness_analysis AS la
                   ON la.fingerprint = t.content_hash
-                 AND la.algorithm_version = ?
+                 AND la.algorithm_version = CASE
+                     WHEN l.path LIKE 'http://%'
+                       OR l.path LIKE 'https://%'
+                     THEN ?
+                     ELSE ?
+                 END
                 WHERE l.folder_id = ?
                   AND l.device_id = ?
                   AND l.available = 1
                   AND ts.hidden = 0
                   AND ts.deleted_at IS NULL
+                  AND (
+                    (l.path NOT LIKE 'http://%'
+                     AND l.path NOT LIKE 'https://%')
+                    OR la.fingerprint IS NOT NULL
+                  )
                 """
             ) else {
                 return []
@@ -244,10 +259,15 @@ final class LibraryDatabase: @unchecked Sendable {
             sqlite3_bind_int(
                 statement,
                 1,
+                Int32(LoudnessAnalysis.remoteAlgorithmVersion)
+            )
+            sqlite3_bind_int(
+                statement,
+                2,
                 Int32(LoudnessAnalysis.algorithmVersion)
             )
-            bind(folderID.uuidString, to: statement, at: 2)
-            bind(deviceID.uuidString, to: statement, at: 3)
+            bind(folderID.uuidString, to: statement, at: 3)
+            bind(deviceID.uuidString, to: statement, at: 4)
 
             var songs: [Song] = []
             while sqlite3_step(statement) == SQLITE_ROW {
@@ -296,7 +316,9 @@ final class LibraryDatabase: @unchecked Sendable {
                                 statement,
                                 15
                             )
-                        )
+                        ),
+                        algorithmVersion: optionalInt(statement, 16)
+                            ?? LoudnessAnalysis.algorithmVersion
                     )
                 } else {
                     loudness = nil
@@ -313,14 +335,17 @@ final class LibraryDatabase: @unchecked Sendable {
                         url: url,
                         title: text(statement, 2) ?? "Unknown",
                         artist: text(statement, 3) ?? "—",
-                        album: text(statement, 16),
-                        genre: text(statement, 17),
-                        releaseYear: optionalInt(statement, 18),
-                        artworkData: blob(statement, 19),
+                        album: text(statement, 17),
+                        genre: text(statement, 18),
+                        releaseYear: optionalInt(statement, 19),
+                        artworkData: blob(statement, 20),
                         duration: optionalDouble(statement, 4),
                         fileSizeBytes: fileSize,
                         audioProperties: properties,
                         fileFingerprint: fingerprint,
+                        contentHash: contentHash,
+                        isFavourite:
+                            sqlite3_column_int(statement, 21) != 0,
                         loudness: loudness
                     )
                 )
@@ -352,6 +377,7 @@ final class LibraryDatabase: @unchecked Sendable {
                         guard try !isHidden(trackID: trackID) else {
                             continue
                         }
+                        let favourite = try isFavourite(trackID: trackID)
                         reconciled.append(
                             Song(
                                 libraryID: trackID,
@@ -366,6 +392,8 @@ final class LibraryDatabase: @unchecked Sendable {
                                 fileSizeBytes: song.fileSizeBytes,
                                 audioProperties: song.audioProperties,
                                 fileFingerprint: song.fileFingerprint,
+                                contentHash: song.contentHash,
+                                isFavourite: favourite,
                                 loudness: song.loudness
                             )
                         )
@@ -389,6 +417,123 @@ final class LibraryDatabase: @unchecked Sendable {
                 return SongLibrary.deduplicated(reconciled)
             } catch {
                 return songs
+            }
+        }
+    }
+
+    func pendingArtworkDownloads(limit: Int) -> [PendingArtwork] {
+        lock.withLock {
+            guard let statement = try? prepare(
+                """
+                SELECT track_id, artwork_url FROM scan_metadata
+                WHERE artwork_url IS NOT NULL AND artwork IS NULL
+                LIMIT ?
+                """
+            ) else {
+                return []
+            }
+            defer { sqlite3_finalize(statement) }
+            sqlite3_bind_int(statement, 1, Int32(limit))
+            var results: [PendingArtwork] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let trackID = text(statement, 0),
+                      let url = text(statement, 1) else {
+                    continue
+                }
+                results.append(PendingArtwork(trackID: trackID, artworkURL: url))
+            }
+            return results
+        }
+    }
+
+    /// Stores downloaded artwork bytes for a track already known locally by id
+    /// (unlike `applyIdentification`, which resolves by content hash — this is
+    /// called for tracks already found via `pendingArtworkDownloads`).
+    func storeArtwork(trackID: String, data: Data) {
+        lock.withLock {
+            try? run(
+                "UPDATE scan_metadata SET artwork = ? WHERE track_id = ?"
+            ) {
+                bind(data, to: $0, at: 1)
+                bind(trackID, to: $0, at: 2)
+            }
+        }
+    }
+
+    /// Merges a background-identification result (from `aro-server`'s AcoustID/
+    /// MusicBrainz pipeline) into `track_state`'s override columns, keyed by content
+    /// hash — the only identifier shared between this database and `aro-server`'s own
+    /// `hub.sqlite3`, since the two generate track ids independently. Returns `false`
+    /// (not an error) if no local track has this content hash yet.
+    func applyIdentification(
+        contentHash: String,
+        title: String?,
+        artist: String?,
+        album: String?,
+        musicbrainzRecordingID: String?,
+        acoustidID: String?,
+        artworkData: Data?
+    ) -> Bool {
+        lock.withLock {
+            guard let statement = try? prepare(
+                "SELECT id FROM tracks WHERE content_hash = ? LIMIT 1"
+            ) else {
+                return false
+            }
+            let trackID: String
+            do {
+                defer { sqlite3_finalize(statement) }
+                bind(contentHash, to: statement, at: 1)
+                guard sqlite3_step(statement) == SQLITE_ROW,
+                      let idString = text(statement, 0) else {
+                    return false
+                }
+                trackID = idString
+            }
+
+            let now = Date().timeIntervalSince1970
+            do {
+                try run(
+                    """
+                    INSERT INTO track_state
+                        (track_id, updated_at, title_override, artist_override,
+                         album_override, musicbrainz_recording_id, acoustid_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(track_id) DO UPDATE SET
+                        updated_at = excluded.updated_at,
+                        title_override =
+                            COALESCE(excluded.title_override, track_state.title_override),
+                        artist_override =
+                            COALESCE(excluded.artist_override, track_state.artist_override),
+                        album_override =
+                            COALESCE(excluded.album_override, track_state.album_override),
+                        musicbrainz_recording_id = COALESCE(
+                            excluded.musicbrainz_recording_id,
+                            track_state.musicbrainz_recording_id
+                        ),
+                        acoustid_id =
+                            COALESCE(excluded.acoustid_id, track_state.acoustid_id)
+                    """
+                ) {
+                    bind(trackID, to: $0, at: 1)
+                    sqlite3_bind_double($0, 2, now)
+                    bind(title, to: $0, at: 3)
+                    bind(artist, to: $0, at: 4)
+                    bind(album, to: $0, at: 5)
+                    bind(musicbrainzRecordingID, to: $0, at: 6)
+                    bind(acoustidID, to: $0, at: 7)
+                }
+                if let artworkData {
+                    try run(
+                        "UPDATE scan_metadata SET artwork = ? WHERE track_id = ?"
+                    ) {
+                        bind(artworkData, to: $0, at: 1)
+                        bind(trackID, to: $0, at: 2)
+                    }
+                }
+                return true
+            } catch {
+                return false
             }
         }
     }
@@ -545,6 +690,20 @@ final class LibraryDatabase: @unchecked Sendable {
         let statement = try prepare(
             """
             SELECT hidden OR deleted_at IS NOT NULL
+            FROM track_state
+            WHERE track_id = ?
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        bind(trackID.uuidString, to: statement, at: 1)
+        return sqlite3_step(statement) == SQLITE_ROW
+            && sqlite3_column_int(statement, 0) != 0
+    }
+
+    private func isFavourite(trackID: UUID) throws -> Bool {
+        let statement = try prepare(
+            """
+            SELECT favourite
             FROM track_state
             WHERE track_id = ?
             """

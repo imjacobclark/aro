@@ -8,10 +8,15 @@ import Observation
 final class AudioDeviceManager: AudioDeviceManaging {
     private(set) var devices: [AudioOutputDevice] = []
     private(set) var lastWarning: String?
-    @ObservationIgnored private var previousSampleRates: [AudioObjectID: Double] = [:]
+    // Keyed by the device's stable hardware UID rather than its
+    // `AudioObjectID`, which CoreAudio can recycle across hot-plug cycles —
+    // a recycled ID could otherwise apply one device's remembered sample
+    // rate to a different device that reuses its freed ID.
+    @ObservationIgnored private var previousSampleRates: [String: Double] = [:]
 
     init() {
         refresh()
+        installHardwareListeners()
     }
 
     func refresh() {
@@ -20,6 +25,10 @@ final class AudioDeviceManager: AudioDeviceManaging {
             .sorted {
                 $0.name.localizedStandardCompare($1.name) == .orderedAscending
             }
+        let presentUIDs = Set(devices.map(\.uid))
+        previousSampleRates = previousSampleRates.filter {
+            presentUIDs.contains($0.key)
+        }
     }
 
     func selectedDevice(for uid: String?) -> AudioOutputDevice? {
@@ -57,9 +66,9 @@ final class AudioDeviceManager: AudioDeviceManaging {
             )
         }
 
-        let capturedPreviousRate = previousSampleRates[device.id] == nil
+        let capturedPreviousRate = previousSampleRates[device.uid] == nil
         if capturedPreviousRate {
-            previousSampleRates[device.id] = Self.nominalSampleRate(
+            previousSampleRates[device.uid] = Self.nominalSampleRate(
                 deviceID: device.id
             )
         }
@@ -84,7 +93,7 @@ final class AudioDeviceManager: AudioDeviceManaging {
                 try? Self.setHogMode(deviceID: device.id, pid: -1)
             }
             if capturedPreviousRate {
-                previousSampleRates.removeValue(forKey: device.id)
+                previousSampleRates.removeValue(forKey: device.uid)
             }
             throw error
         }
@@ -98,7 +107,7 @@ final class AudioDeviceManager: AudioDeviceManaging {
         }
         try? Self.setHogMode(deviceID: device.id, pid: -1)
         if let previousRate = previousSampleRates.removeValue(
-            forKey: device.id
+            forKey: device.uid
         ) {
             try? Self.setNominalSampleRate(
                 deviceID: device.id,

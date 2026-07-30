@@ -48,7 +48,55 @@ enum ControlCommand {
     RemoveFolder {
         source_id: Uuid,
     },
+    /// Enqueues one or more files for (re-)identification. Used for both "Sync Track
+    /// Data" (one file) and "Sync Album Data" (every file in the album, resolved
+    /// client-side — the server has no album grouping of its own). Keyed by content
+    /// hash and absolute path rather than a track id: this server's `hub_track_id`s
+    /// and the macOS app's own local library track ids are generated independently
+    /// and never coincide, so content hash is the only identifier they share.
+    IdentifyTracks {
+        tracks: Vec<IdentifyTrackRequest>,
+    },
+    IdentificationStatus,
+    /// Identification results recorded after `after` (exclusive), oldest first — the
+    /// pull side the macOS app polls to merge results into its own local library
+    /// catalog by content hash.
+    IdentificationResults {
+        after: i64,
+        #[serde(default = "default_identification_results_limit")]
+        limit: u32,
+    },
+    SetSetting {
+        key: String,
+        value: Value,
+    },
+    Setting {
+        key: String,
+    },
+    /// Reads a blob's bytes directly off this host's own store, base64-encoded
+    /// into the JSON response. Exists for the macOS app running *this same*
+    /// hub locally: it already reaches this socket for identification
+    /// results, so cached artwork (see `IdentificationResults.artwork_url`,
+    /// which points at `/v1/blobs/{hash}` since `aro-track-id` started
+    /// caching Cover Art Archive images) is one local round-trip away without
+    /// needing the HTTP layer's device/admin auth or a real network
+    /// connection at all — appropriate here since this socket is already
+    /// filesystem-permission-gated (0600) to the local user, unlike the HTTP
+    /// blob endpoint which is reachable from other paired devices.
+    Blob {
+        hash: String,
+    },
     Status,
+}
+
+#[derive(Deserialize)]
+struct IdentifyTrackRequest {
+    content_hash: String,
+    path: PathBuf,
+}
+
+fn default_identification_results_limit() -> u32 {
+    200
 }
 
 #[derive(Serialize)]
@@ -60,7 +108,7 @@ struct ControlResponse {
     error: Option<String>,
 }
 
-const CONTROL_PROTOCOL_VERSION: u16 = 5;
+const CONTROL_PROTOCOL_VERSION: u16 = 6;
 
 pub async fn start(path: &Path, state: Arc<AppState>) -> Result<JoinHandle<()>> {
     if let Some(parent) = path.parent() {
@@ -187,6 +235,37 @@ async fn handle(stream: &mut UnixStream, state: Arc<AppState>) -> Result<Value> 
         }
         ControlCommand::RemoveFolder { source_id } => {
             json!({"removed": state.sources.remove(source_id)?})
+        }
+        ControlCommand::IdentifyTracks { tracks } => {
+            let identification = state.sources.identification();
+            for track in &tracks {
+                identification.enqueue(track.content_hash.clone(), track.path.clone());
+            }
+            json!({"queued": tracks.len()})
+        }
+        ControlCommand::IdentificationStatus => {
+            serde_json::to_value(state.sources.identification().status().await)?
+        }
+        ControlCommand::IdentificationResults { after, limit } => {
+            serde_json::to_value(state.store.identification_results_since(after, limit)?)?
+        }
+        ControlCommand::SetSetting { key, value } => {
+            state.store.set_setting(&key, &value)?;
+            json!({"ok": true})
+        }
+        ControlCommand::Setting { key } => json!({"value": state.store.setting(&key)?}),
+        ControlCommand::Blob { hash } => {
+            let path = state
+                .store
+                .blob_path_for_download(&hash)?
+                .ok_or_else(|| anyhow::anyhow!("blob not found"))?;
+            let bytes = tokio::fs::read(&path).await?;
+            json!({
+                "data_base64": base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    bytes
+                )
+            })
         }
         ControlCommand::Status => json!({
             "control_protocol_version": CONTROL_PROTOCOL_VERSION,

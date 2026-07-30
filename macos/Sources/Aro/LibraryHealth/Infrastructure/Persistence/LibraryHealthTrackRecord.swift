@@ -5,6 +5,7 @@ struct LibraryHealthTrackRecord: Sendable {
     let contentHash: String?
     let title: String?
     let artist: String?
+    let album: String?
     let duration: Double?
     var copies: [LibraryHealthCopyRecord]
 }

@@ -9,41 +9,41 @@ const montserrat = localFont({
   weight: "100 900",
 });
 
-const siteUrl = "https://imjacobclark.github.io/aro/";
+const siteUrl = "https://listenaro.xyz/";
 
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
-  title: "Aro — Your music. Fully yours.",
+  title: "Aro — A complete music system for people who own their music",
   description:
-    "Own, host, and preserve your music library across the Aros you choose, with uncompromised playback and no Aro cloud account.",
+    "Host, play, organise, replicate, and export the music you own with one complete system.",
   alternates: {
     canonical: siteUrl,
   },
   icons: {
-    icon: "/aro/app-icon.png",
-    apple: "/aro/app-icon.png",
+    icon: "/app-icon.png",
+    apple: "/app-icon.png",
   },
   openGraph: {
     type: "website",
     url: siteUrl,
-    title: "Aro — Your music. Fully yours.",
+    title: "Aro — A complete music system for people who own their music",
     description:
-      "Host your music almost anywhere, connect securely from anywhere it is reachable, and keep complete independent copies on the Aros you choose.",
+      "Host your library, play every song bit-perfect, keep verified copies across Aros, and export everything whenever you want.",
     siteName: "Aro",
     images: [
       {
         url: `${siteUrl}og.png`,
         width: 1200,
         height: 630,
-        alt: "Aro — Your music. Fully yours.",
+        alt: "Aro music library and player",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "Aro — Your music. Fully yours.",
+    title: "Aro — A complete music system for people who own their music",
     description:
-      "Host, hear, and preserve the music you own across every Aro you choose.",
+      "Host, play, organise, replicate, and export the music you own.",
     images: [`${siteUrl}og.png`],
   },
 };

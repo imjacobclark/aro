@@ -174,6 +174,100 @@ struct LibraryHealthAnalyzerTests {
         #expect(report.alternateEncodings.isEmpty)
     }
 
+    @Test("A folder whose tracks span several albums is reported, even when its dominant artist owns other, fully-converged folders")
+    func fragmentedFolderIsReported() {
+        // Four tracks in the same folder, split across two album values -- the
+        // convergence failure this check exists to catch. A second, unrelated folder for
+        // the same artist is fully converged and must not itself be flagged (this is what
+        // proves the check is folder-keyed, not artist-keyed -- an artist legitimately
+        // spanning several albums, each in its own folder, is not a problem).
+        var tracks = (1...4).map { index in
+            albumTrack(
+                title: "Track \(index)",
+                artist: "The Beatles",
+                album: index <= 2 ? "1" : "The Beatles",
+                path: "/Music/The Beatles/1/\(index).m4a"
+            )
+        }
+        tracks += (1...3).map { index in
+            albumTrack(
+                title: "AM Track \(index)",
+                artist: "Arctic Monkeys",
+                album: "AM",
+                path: "/Music/Arctic Monkeys/AM/\(index).m4a"
+            )
+        }
+
+        let report = analyzer.analyze(tracks)
+
+        #expect(report.fragmentedFolders.map(\.title) == ["1"])
+        #expect(report.fragmentedFolders.first?.artist == "The Beatles")
+    }
+
+    @Test("A folder converged on a single album is not reported")
+    func convergedFolderIsNotReported() {
+        let tracks = (1...5).map { index in
+            albumTrack(
+                title: "Track \(index)",
+                artist: "Arctic Monkeys",
+                album: "AM",
+                path: "/Music/Arctic Monkeys/AM/\(index).m4a"
+            )
+        }
+
+        let report = analyzer.analyze(tracks)
+
+        #expect(report.fragmentedFolders.isEmpty)
+    }
+
+    @Test("A folder below the minimum track count is not reported even if its albums differ")
+    func folderBelowTrackThresholdIsNotReported() {
+        let tracks = [
+            albumTrack(title: "A", artist: "Artist", album: "Album 1", path: "/Music/Folder/a.m4a"),
+            albumTrack(title: "B", artist: "Artist", album: "Album 2", path: "/Music/Folder/b.m4a"),
+            albumTrack(title: "C", artist: "Artist", album: "Album 3", path: "/Music/Folder/c.m4a")
+        ]
+
+        let report = analyzer.analyze(tracks)
+
+        #expect(report.fragmentedFolders.isEmpty)
+    }
+
+    @Test("Tracks with no album yet don't count as their own distinct album value")
+    func unidentifiedAlbumIsNotCounted() {
+        // Four tracks in one folder: two share "AM", two have no album at all (not yet
+        // identified). This must NOT be reported as 3 albums (AM + two distinct "unknowns")
+        // -- an unidentified track is "no signal", not evidence of fragmentation.
+        let tracks = [
+            albumTrack(title: "A", artist: "Artist", album: "AM", path: "/Music/Folder/a.m4a"),
+            albumTrack(title: "B", artist: "Artist", album: "AM", path: "/Music/Folder/b.m4a"),
+            albumTrack(title: "C", artist: "Artist", album: nil, path: "/Music/Folder/c.m4a"),
+            albumTrack(title: "D", artist: "Artist", album: nil, path: "/Music/Folder/d.m4a")
+        ]
+
+        let report = analyzer.analyze(tracks)
+
+        #expect(report.fragmentedFolders.isEmpty)
+    }
+
+    private func albumTrack(
+        title: String,
+        artist: String,
+        album: String?,
+        path: String
+    ) -> LibraryHealthTrack {
+        let trackID = UUID()
+        return LibraryHealthTrack(
+            id: trackID,
+            contentHash: path,
+            title: title,
+            artist: artist,
+            album: album,
+            duration: 180,
+            copies: [copy(trackID: trackID, path: path)]
+        )
+    }
+
     private func copy(
         trackID: UUID,
         path: String,

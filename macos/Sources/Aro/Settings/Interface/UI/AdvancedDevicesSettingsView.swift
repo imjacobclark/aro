@@ -11,154 +11,16 @@ struct SyncSettingsView: View {
     let activeProfile: LibraryProfile?
     @Bindable var registry: LibraryProfileRegistry
     let activateProfile: (LibraryProfile) -> Void
-    var showsDismissButton = false
-
-    @Environment(\.dismiss) private var dismiss
 
     @State private var localServers = LocalAroServerMonitor()
     @State private var manualAddress = ""
     @State private var diagnosticStatus: String?
-    @State private var showingResetConfirmation = false
-    @State private var showingRemovedConfirmation = false
     @State private var importedFolders: [ControlledSourceFolder] = []
     @State private var migrationStatus: String?
+    @State private var isAdvancedExpanded = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            if showsDismissButton {
-                HStack {
-                    Text("Library Settings")
-                        .font(.title2.weight(.semibold))
-                    Spacer()
-                    Button("Done") { dismiss() }
-                        .keyboardShortcut(.cancelAction)
-                }
-                .padding(.horizontal, 20)
-                .padding(.top, 18)
-                .padding(.bottom, 8)
-            }
-
-            Form {
-                if let profile = activeProfile, profile.kind == .remote {
-                    remoteLibrarySection(profile)
-                } else {
-                    localLibrarySections
-                }
-
-                if activeProfile?.kind == .remote {
-                    Section("Offline Storage") {
-                    LabeledContent(
-                        "Downloaded files",
-                        value: "\(mediaCache.downloadedFileCount)"
-                    )
-                    LabeledContent(
-                        "Space used",
-                        value: ByteCountFormatter.string(
-                            fromByteCount: mediaCache.usedBytes,
-                            countStyle: .file
-                        )
-                    )
-                    LabeledContent(
-                        "Protected files",
-                        value: "\(mediaCache.protectedFileCount)"
-                    )
-                    HStack {
-                        Button("Delete Removed Downloads…", role: .destructive) {
-                            showingRemovedConfirmation = true
-                        }
-                        Button("Reset Temporary Downloads…", role: .destructive) {
-                            showingResetConfirmation = true
-                        }
-                    }
-                    }
-                }
-
-                Section("Library Data") {
-                    LabeledContent("Database") {
-                        Text(libraryFiles.libraryURL.path)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .textSelection(.enabled)
-                            .help(libraryFiles.libraryURL.path)
-                    }
-                    if activeProfile?.kind != .remote,
-                       !preferences.dataLocation.isEmpty {
-                        LabeledContent("Sharing data") {
-                            Text(preferences.dataLocation)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                                .textSelection(.enabled)
-                                .help(preferences.dataLocation)
-                        }
-                    }
-                    if activeProfile?.kind == .local {
-                        Button("Move Library Data…", action: moveLibraryData)
-                            .disabled(migrationStatus != nil)
-                        if let migrationStatus {
-                            HStack {
-                                ProgressView()
-                                Text(migrationStatus)
-                            }
-                        }
-                        Text(
-                            "Moves the database, Aro-managed music, downloads, "
-                                + "and Background Service data. Original locations "
-                                + "are retained as recoverable backups."
-                        )
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    }
-                }
-
-                if activeProfile?.kind != .remote {
-                    Section("Imported Folders") {
-                        if importedFolders.isEmpty {
-                            Text(
-                                service.isEnabled
-                                    ? "No folders have been imported."
-                                    : "Start sharing to manage imported folders."
-                            )
-                            .foregroundStyle(.secondary)
-                        }
-                        ForEach(
-                            0 ..< importedFolders.count,
-                            id: \.self
-                        ) { (index: Int) in
-                            importedFolderRow(importedFolders[index])
-                        }
-                        HStack {
-                            Button("Add Folder…", action: addImportedFolder)
-                                .disabled(!service.isEnabled)
-                            Button("Refresh", action: refreshImportedFolders)
-                                .disabled(!service.isEnabled)
-                        }
-                        Text(
-                            "Stopping a watch keeps every imported song in this Aro."
-                        )
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    }
-                }
-
-                if activeProfile?.kind != .remote,
-                   let warning = localServers.networkWarning {
-                    Section("Network") {
-                        Label(warning, systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(.orange)
-                    }
-                }
-
-                if let diagnosticStatus {
-                    Section("Result") {
-                        Text(diagnosticStatus)
-                            .textSelection(.enabled)
-                    }
-                }
-            }
-            .formStyle(.grouped)
-        }
-        .padding()
-        .frame(width: 640, height: 620)
+        embeddedSettings
         .onAppear {
             manualAddress = preferences.manualAddress
             refresh()
@@ -169,50 +31,72 @@ struct SyncSettingsView: View {
                 try? await Task.sleep(for: .seconds(3))
             }
         }
-        .confirmationDialog(
-            "Delete downloads removed from the source library?",
-            isPresented: $showingRemovedConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("Delete Removed Downloads", role: .destructive) {
-                mediaCache.deleteRemovedDownloads()
-                diagnosticStatus = mediaCache.statusMessage
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(
-                "Only downloaded copies are deleted. The source library is not changed, and files can be downloaded again if they return."
-            )
-        }
-        .confirmationDialog(
-            "Reset temporary offline downloads?",
-            isPresented: $showingResetConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("Reset Downloads", role: .destructive) {
-                mediaCache.clear()
-                diagnosticStatus = mediaCache.statusMessage
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(
-                "Temporary downloads will be removed. Favourites, selected albums, queued music, and the playing song remain protected."
-            )
-        }
     }
 
     @ViewBuilder
-    private var localLibrarySections: some View {
-        Section("This Library") {
-            if let profile = activeProfile {
-                LabeledContent("Library", value: profile.name)
-                LabeledContent(
-                    "Storage",
-                    value: profile.managedMusicPath == nil
-                        ? "Linked files"
-                        : "Stored by Aro"
-                )
+    private var embeddedSettings: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if activeProfile?.kind != .remote {
+                SettingsCard(title: "Library Sources") {
+                    importedFoldersContent
+                    Divider()
+                    libraryDataContent
+                }
             }
+
+            SettingsCard {
+                DisclosureGroup(isExpanded: $isAdvancedExpanded) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        if let profile = activeProfile,
+                           profile.kind == .remote {
+                            remoteLibraryContent(profile)
+                        } else {
+                            localLibraryContent
+                            Divider()
+                            Text("Manual Connection")
+                                .font(.headline)
+                            manualConnectionContent
+                        }
+
+                        if activeProfile?.kind == .remote {
+                            Divider()
+                            libraryDataContent
+                        }
+
+                        if activeProfile?.kind != .remote,
+                           let warning = localServers.networkWarning {
+                            Divider()
+                            networkWarningContent(warning)
+                        }
+
+                        if let errorMessage = localServers.errorMessage {
+                            Divider()
+                            networkWarningContent(errorMessage)
+                        }
+
+                        if let errorMessage = preferences.errorMessage {
+                            Divider()
+                            networkWarningContent(errorMessage)
+                        }
+
+                        if let diagnosticStatus {
+                            Divider()
+                            diagnosticResultContent(diagnosticStatus)
+                        }
+                    }
+                    .padding(.top, 12)
+                } label: {
+                    Text("Advanced")
+                        .font(.title3.weight(.semibold))
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var localLibraryContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
             if let server = bundledServer {
                 LabeledContent("Sharing", value: "Available")
                 LabeledContent(
@@ -254,8 +138,10 @@ struct SyncSettingsView: View {
                 Button("Open Logs", action: openLogs)
             }
         }
+    }
 
-        Section("Manual Connection") {
+    private var manualConnectionContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
             TextField(
                 "Address",
                 text: $manualAddress,
@@ -273,26 +159,18 @@ struct SyncSettingsView: View {
         }
     }
 
-    private func remoteLibrarySection(
+    private func remoteLibraryContent(
         _ profile: LibraryProfile
     ) -> some View {
-        Section("Connected Library") {
-            LabeledContent("Library", value: profile.name)
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Connection")
+                .font(.headline)
             if let baseURL = profile.baseURL {
                 LabeledContent("Address") {
                     Text(displayAddress(baseURL))
                         .textSelection(.enabled)
                 }
             }
-            LabeledContent(
-                "Download behaviour",
-                value: offlinePolicyName(profile.offlinePolicy)
-            )
-            Text(
-                "This Mac uses an Aro library hosted elsewhere. It is not serving its own library."
-            )
-            .font(.footnote)
-            .foregroundStyle(.secondary)
             HStack {
                 Button("Test Connected Library") {
                     testConnectedLibrary(profile)
@@ -300,6 +178,90 @@ struct SyncSettingsView: View {
                 Button("Copy Diagnostic Information", action: copyDiagnostics)
             }
         }
+    }
+
+    @ViewBuilder
+    private var libraryDataContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            LabeledContent(
+                activeProfile?.kind == .remote
+                    ? "Local cache"
+                    : "Library location"
+            ) {
+                Text(libraryFiles.libraryURL.path)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                    .help(libraryFiles.libraryURL.path)
+            }
+            Button("Reveal in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting([
+                    libraryFiles.libraryURL
+                ])
+            }
+            if activeProfile?.kind != .remote,
+               !preferences.dataLocation.isEmpty {
+                LabeledContent("Sharing data") {
+                    Text(preferences.dataLocation)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                        .help(preferences.dataLocation)
+                }
+            }
+            if activeProfile?.kind == .local {
+                Button("Move Library Data…", action: moveLibraryData)
+                    .disabled(migrationStatus != nil)
+                if let migrationStatus {
+                    HStack {
+                        ProgressView()
+                        Text(migrationStatus)
+                    }
+                }
+                Text(
+                    "Moves the database, Aro-managed music, downloads, "
+                        + "and Background Service data. Original locations "
+                        + "are retained as recoverable backups."
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var importedFoldersContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if importedFolders.isEmpty {
+                Text(
+                    service.isEnabled
+                        ? "No folders have been imported."
+                        : "Start sharing to manage imported folders."
+                )
+                .foregroundStyle(.secondary)
+            }
+            ForEach(0 ..< importedFolders.count, id: \.self) { index in
+                importedFolderRow(importedFolders[index])
+            }
+            HStack {
+                Button("Add Folder…", action: addImportedFolder)
+                    .disabled(!service.isEnabled)
+                Button("Refresh", action: refreshImportedFolders)
+                    .disabled(!service.isEnabled)
+            }
+            Text("Stopping a watch keeps every imported song in this Aro.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func networkWarningContent(_ warning: String) -> some View {
+        Label(warning, systemImage: "exclamationmark.triangle")
+            .foregroundStyle(.orange)
+    }
+
+    private func diagnosticResultContent(_ status: String) -> some View {
+        Text(status)
+            .textSelection(.enabled)
     }
 
     private var bundledServer: LocalAroServer? {
@@ -575,12 +537,12 @@ struct SyncSettingsView: View {
         _ policy: OfflineDownloadPolicy
     ) -> String {
         switch policy {
+        case .streamOnly:
+            "Stream only"
         case .stream:
-            "Stream as needed"
-        case .favourites:
-            "Keep favourites offline"
-        case .selectedAlbums:
-            "Keep selected albums offline"
+            "Keep recently played"
+        case .favourites, .selectedAlbums:
+            "Keep favourite albums or songs"
         case .fullLibrary:
             "Keep the full library offline"
         }

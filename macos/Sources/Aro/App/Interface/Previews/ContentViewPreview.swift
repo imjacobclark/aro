@@ -26,12 +26,14 @@ struct ContentView_Previews: PreviewProvider {
                 defaults: UserDefaults(suiteName: "AroPreview")!
             ),
             mediaCache: runtime.mediaCacheController,
+            libraryFiles: runtime.libraryFileManager,
             reviewLibraryHealth: runtime.reviewLibraryHealth,
             loadStatsDashboard: runtime.loadStatsDashboard,
             syncStore: runtime.syncOperationStore,
-            libraryFiles: runtime.libraryFileManager,
             removeSong: { _ in },
+            setSongFavourite: { _, _ in },
             activateProfile: { _ in },
+            forgetProfile: { _ in },
             completeRemoteConnection: { _, _, _, _ in }
         )
         .frame(width: 900, height: 600)
@@ -88,6 +90,24 @@ private struct PreviewLibraryCatalog: LibraryCatalogRepository {
     func reconcile(songs: [Song], folderID: UUID) -> [Song] {
         songs
     }
+
+    func applyIdentification(
+        contentHash: String,
+        title: String?,
+        artist: String?,
+        album: String?,
+        musicbrainzRecordingID: String?,
+        acoustidID: String?,
+        artworkData: Data?
+    ) -> Bool {
+        false
+    }
+
+    func pendingArtworkDownloads(limit: Int) -> [PendingArtwork] {
+        []
+    }
+
+    func storeArtwork(trackID: String, data: Data) {}
 }
 
 private struct PreviewFolderMonitorFactory: FolderMonitorCreating {

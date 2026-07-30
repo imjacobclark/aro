@@ -15,6 +15,17 @@ check_command() {
 check_command cargo
 check_command rustc
 check_command rustup
+check_command pkg-config
+
+if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists libchromaprint 2>/dev/null; then
+    printf "%-18s %s\n" "libchromaprint" "available ($(pkg-config --modversion libchromaprint))"
+else
+    printf "%-18s %s\n" "libchromaprint" "missing"
+    printf "%-18s %s\n" "" "aro-track-id links this at build time — install it:"
+    printf "%-18s %s\n" "" "macOS: brew install chromaprint pkgconf"
+    printf "%-18s %s\n" "" "Debian/Ubuntu: apt-get install libchromaprint-dev pkg-config"
+    failed=1
+fi
 
 for tool in codesign security docker; do
     if command -v "$tool" >/dev/null 2>&1; then

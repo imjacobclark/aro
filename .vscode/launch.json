@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:aro}/macos",
+            "name": "Debug Aro (macos)",
+            "target": "Aro",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug Aro (macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:aro}/macos",
+            "name": "Release Aro (macos)",
+            "target": "Aro",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release Aro (macos)"
+        }
+    ]
+}

@@ -3,6 +3,7 @@ import SwiftUI
 struct LibrarySearchField: View {
     let prompt: String
     @Binding var text: String
+    @FocusState private var isFocused: Bool
 
     var body: some View {
         HStack(spacing: 7) {
@@ -11,6 +12,7 @@ struct LibrarySearchField: View {
 
             TextField(prompt, text: $text)
                 .textFieldStyle(.plain)
+                .focused($isFocused)
 
             if !text.isEmpty {
                 Button {
@@ -23,17 +25,21 @@ struct LibrarySearchField: View {
                 .accessibilityLabel("Clear search")
             }
         }
-        .padding(.horizontal, 9)
-        .frame(height: 28)
+        .padding(.horizontal, 11)
+        .frame(height: 40)
         .background(
-            Color.primary.opacity(0.07),
-            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+            Color.primary.opacity(0.045),
+            in: RoundedRectangle(cornerRadius: 9, style: .continuous)
         )
         .overlay {
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .stroke(Color.primary.opacity(0.08))
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(
+                    isFocused
+                        ? AroTheme.violet.opacity(0.72)
+                        : Color.primary.opacity(0.1),
+                    lineWidth: isFocused ? 1.5 : 1
+                )
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 18)
     }
 }

@@ -10,6 +10,7 @@ struct AddDeviceSheet: View {
     @State private var requests: [ControlledPairingRequest] = []
     @State private var errorMessage: String?
     @State private var allowContributions = false
+    @ScaledMetric(relativeTo: .largeTitle) private var codeFontSize: CGFloat = 34
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -74,7 +75,7 @@ struct AddDeviceSheet: View {
             Text("Or enter this connection code")
                 .foregroundStyle(.secondary)
             Text(formatted(invitation.code))
-                .font(.system(size: 34, weight: .semibold, design: .monospaced))
+                .font(.system(size: codeFontSize, weight: .semibold, design: .monospaced))
                 .textSelection(.enabled)
                 .accessibilityLabel("Connection code \(invitation.code)")
             TimelineView(.periodic(from: .now, by: 1)) { context in

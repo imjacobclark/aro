@@ -25,8 +25,8 @@ struct ConnectLibrarySheet: View {
     @State private var pairingTask: Task<Void, Never>?
     @State private var completedPairing: CompletedConnection?
     @State private var pairingRequestID: UUID?
-    @State private var policy: OfflineDownloadPolicy = .stream
-    @State private var selectedAlbums: Set<String> = []
+    @State private var policy: OfflineDownloadPolicy = .streamOnly
+    @State private var connectionError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -74,6 +74,20 @@ struct ConnectLibrarySheet: View {
         .sheet(isPresented: $showingScanner) {
             scannerContent
         }
+        .alert(
+            "Unable to Connect",
+            isPresented: Binding(
+                get: { connectionError != nil },
+                set: { if !$0 { connectionError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(
+                connectionError
+                    ?? "Aro could not connect to this library."
+            )
+        }
     }
 
     private var discoveryContent: some View {
@@ -87,13 +101,16 @@ struct ConnectLibrarySheet: View {
                         : excludedHubID == nil
                             ? "No libraries found"
                             : "No other libraries found",
-                    systemImage: browser.isSearching
-                        ? "dot.radiowaves.left.and.right"
-                        : "wifi.slash",
+                    systemImage: browser.errorMessage != nil
+                        ? "exclamationmark.triangle"
+                        : browser.isSearching
+                            ? "dot.radiowaves.left.and.right"
+                            : "wifi.slash",
                     description: Text(
-                        browser.isSearching
-                            ? "Discovery updates automatically."
-                            : "Make sure the other Aro library is online and sharing is enabled."
+                        browser.errorMessage
+                            ?? (browser.isSearching
+                                ? "Discovery updates automatically."
+                                : "Make sure the other Aro library is online and sharing is enabled.")
                     )
                 )
             } else {
@@ -118,6 +135,7 @@ struct ConnectLibrarySheet: View {
                             if selectedHubID == hub.id {
                                 Image(systemName: "checkmark.circle.fill")
                                     .foregroundStyle(.tint)
+                                    .accessibilityHidden(true)
                             }
                         }
                         .contentShape(Rectangle())
@@ -129,6 +147,10 @@ struct ConnectLibrarySheet: View {
                             ? Color.accentColor.opacity(0.12)
                             : Color.secondary.opacity(0.08),
                         in: RoundedRectangle(cornerRadius: 12)
+                    )
+                    .accessibilityElement(children: .combine)
+                    .accessibilityAddTraits(
+                        selectedHubID == hub.id ? [.isSelected] : []
                     )
                 }
             }
@@ -167,6 +189,7 @@ struct ConnectLibrarySheet: View {
 
             TextField("Six-digit connection code", text: $code)
                 .textFieldStyle(.roundedBorder)
+                .accessibilityHint("Enter the six-digit code shown by the library you want to connect to.")
                 .onChange(of: code) {
                     code = String(code.filter(\.isNumber).prefix(6))
                 }
@@ -174,6 +197,7 @@ struct ConnectLibrarySheet: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .lineLimit(3)
+                .accessibilityAddTraits(.updatesFrequently)
             if let pairingRequestID {
                 GroupBox("Pairing request ID") {
                     HStack {
@@ -188,6 +212,7 @@ struct ConnectLibrarySheet: View {
                                 forType: .string
                             )
                         }
+                        .accessibilityLabel("Copy pairing request ID")
                     }
                 }
             }
@@ -208,25 +233,29 @@ struct ConnectLibrarySheet: View {
             Text("How should music be stored on this Mac?")
                 .font(.title2.weight(.semibold))
             policyChoice(
-                .stream,
-                title: "Stream as I listen",
-                detail: "Uses very little storage. Recently played music remains available temporarily.",
+                .streamOnly,
+                title: "Stream only",
+                detail: "Never retains streamed songs on this Mac.",
+                systemImage: "dot.radiowaves.left.and.right",
                 recommended: true
             )
             policyChoice(
-                .favourites,
-                title: "Keep favourites offline",
-                detail: "Favourite songs remain downloaded on this Mac."
+                .stream,
+                title: "Keep recently played",
+                detail: "Retains completed streams within a storage limit.",
+                systemImage: "clock.arrow.circlepath"
             )
             policyChoice(
-                .selectedAlbums(selectedAlbums),
-                title: "Keep selected albums offline",
-                detail: "Choose albums after the first library update."
+                .favourites,
+                title: "Keep favourite albums or songs",
+                detail: "Keeps favourite songs; choose albums after the first library update.",
+                systemImage: "heart.fill"
             )
             policyChoice(
                 .fullLibrary,
                 title: "Keep the full library offline",
-                detail: "Downloads every available song to this Mac."
+                detail: "Downloads every available song to this Mac.",
+                systemImage: "checkmark.icloud.fill"
             )
             Spacer()
             HStack {
@@ -263,6 +292,7 @@ struct ConnectLibrarySheet: View {
             }
             .frame(minWidth: 520, minHeight: 360)
             .clipShape(RoundedRectangle(cornerRadius: 12))
+            .accessibilityLabel("Camera preview for scanning an Aro connection code")
             Text("Point this Mac’s camera at the code shown by the library host.")
                 .foregroundStyle(.secondary)
         }
@@ -290,6 +320,7 @@ struct ConnectLibrarySheet: View {
         _ value: OfflineDownloadPolicy,
         title: String,
         detail: String,
+        systemImage: String,
         recommended: Bool = false
     ) -> some View {
         Button {
@@ -302,8 +333,12 @@ struct ConnectLibrarySheet: View {
                         : "circle"
                 )
                 .foregroundStyle(.tint)
+                .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 3) {
                     HStack {
+                        Image(systemName: systemImage)
+                            .frame(width: 20)
+                            .accessibilityHidden(true)
                         Text(title).font(.headline)
                         if recommended {
                             Text("Recommended")
@@ -324,6 +359,10 @@ struct ConnectLibrarySheet: View {
         .buttonStyle(.plain)
         .padding()
         .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(
+            policyKind(policy) == policyKind(value) ? [.isSelected] : []
+        )
     }
 
     private func connect() {
@@ -381,6 +420,7 @@ struct ConnectLibrarySheet: View {
                 return
             } catch {
                 status = error.localizedDescription
+                connectionError = error.localizedDescription
             }
         }
     }
@@ -408,6 +448,7 @@ struct ConnectLibrarySheet: View {
 
     private func policyKind(_ policy: OfflineDownloadPolicy) -> String {
         switch policy {
+        case .streamOnly: "streamOnly"
         case .stream: "stream"
         case .favourites: "favourites"
         case .selectedAlbums: "albums"

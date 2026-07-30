@@ -10,7 +10,7 @@ final class UnavailableAudioPlaybackEngine: AudioPlaybackEngine {
     var outputStatus = PlaybackOutputStatus()
 
     func load(
-        songs: [Song],
+        items: [PlaybackQueueItem],
         startingAt index: Int,
         from time: TimeInterval,
         playbackID: UUID

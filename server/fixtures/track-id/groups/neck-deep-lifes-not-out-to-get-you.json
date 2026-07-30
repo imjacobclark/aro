@@ -1,0 +1,225 @@
+{
+  "folder": "Neck Deep/Lifes Not Out To Get You",
+  "files": [
+    {
+      "file_name": "01 Citizens Of Earth copy.m4a",
+      "content_hash": "514edd5fd975bb70",
+      "duration_secs": 160,
+      "tag_title": "Citizens Of Earth copy",
+      "tag_track_number": 1,
+      "candidate_recording_ids": [
+        "b2a30c36-0f44-4b27-960c-f12700c795cc"
+      ],
+      "observed_album_before": "Life’s Not Out to Get You",
+      "resolved_artist_before": "Neck Deep",
+      "resolved_album_before": "Life’s Not Out to Get You",
+      "previously_chosen_recording_id": "b2a30c36-0f44-4b27-960c-f12700c795cc"
+    },
+    {
+      "file_name": "01 Citizens Of Earth.m4a",
+      "content_hash": "9a2a181264938ff6",
+      "duration_secs": 160,
+      "tag_title": "Citizens Of Earth",
+      "tag_track_number": 1,
+      "candidate_recording_ids": [
+        "b2a30c36-0f44-4b27-960c-f12700c795cc"
+      ],
+      "observed_album_before": "Life’s Not Out to Get You",
+      "resolved_artist_before": "Neck Deep",
+      "resolved_album_before": "Life’s Not Out to Get You",
+      "previously_chosen_recording_id": "b2a30c36-0f44-4b27-960c-f12700c795cc"
+    },
+    {
+      "file_name": "02 Threat Level Midnight.m4a",
+      "content_hash": "afaf248146e2d54c",
+      "duration_secs": 166,
+      "tag_title": "Threat Level Midnight",
+      "tag_track_number": 2,
+      "candidate_recording_ids": [
+        "fcccf4ce-cd6f-45c6-8e06-e4e63a7eecb7"
+      ],
+      "observed_album_before": "Life’s Not Out to Get You",
+      "resolved_artist_before": "Neck Deep",
+      "resolved_album_before": "Life’s Not Out to Get You",
+      "previously_chosen_recording_id": "fcccf4ce-cd6f-45c6-8e06-e4e63a7eecb7"
+    },
+    {
+      "file_name": "03 Can't Kick Up The Roots.m4a",
+      "content_hash": "3a3147610a81ebe5",
+      "duration_secs": 169,
+      "tag_title": "Can't Kick Up The Roots",
+      "tag_track_number": 3,
+      "candidate_recording_ids": [
+        "376528ee-6aa2-4dab-8bc2-d7d7195f5f26"
+      ],
+      "observed_album_before": "Life’s Not Out to Get You",
+      "resolved_artist_before": "Neck Deep",
+      "resolved_album_before": "Life’s Not Out to Get You",
+      "previously_chosen_recording_id": "376528ee-6aa2-4dab-8bc2-d7d7195f5f26"
+    },
+    {
+      "file_name": "04 Kali Ma.m4a",
+      "content_hash": "2c74da307c88c12e",
+      "duration_secs": 170,
+      "tag_title": "Kali Ma",
+      "tag_track_number": 4,
+      "candidate_recording_ids": [
+        "f083494e-06ed-4043-ae5d-05ce7db51e27"
+      ],
+      "observed_album_before": "Life’s Not Out to Get You",
+      "resolved_artist_before": "Neck Deep",
+      "resolved_album_before": "Life’s Not Out to Get You",
+      "previously_chosen_recording_id": "f083494e-06ed-4043-ae5d-05ce7db51e27"
+    },
+    {
+      "file_name": "05 Gold Steps.m4a",
+      "content_hash": "c0a6cabde9c88169",
+      "duration_secs": 192,
+      "tag_title": "Gold Steps",
+      "tag_track_number": 5,
+      "candidate_recording_ids": [
+        "e30919a6-4f58-4e39-995d-5fb0f1dcdaea"
+      ],
+      "observed_album_before": "Life’s Not Out to Get You",
+      "resolved_artist_before": "Neck Deep",
+      "resolved_album_before": "Life’s Not Out to Get You",
+      "previously_chosen_recording_id": "e30919a6-4f58-4e39-995d-5fb0f1dcdaea"
+    },
+    {
+      "file_name": "06 Lime St..m4a",
+      "content_hash": "2c4339018a6f6d88",
+      "duration_secs": 199,
+      "tag_title": "Lime St.",
+      "tag_track_number": 6,
+      "candidate_recording_ids": [
+        "72ed602b-5851-41c5-a57c-5ec14f6fa68c"
+      ],
+      "observed_album_before": "Life’s Not Out to Get You",
+      "resolved_artist_before": "Neck Deep",
+      "resolved_album_before": "Life’s Not Out to Get You",
+      "previously_chosen_recording_id": "72ed602b-5851-41c5-a57c-5ec14f6fa68c"
+    },
+    {
+      "file_name": "07 Serpents.m4a",
+      "content_hash": "862f44b6b751b2b1",
+      "duration_secs": 165,
+      "tag_title": "Serpents",
+      "tag_track_number": 7,
+      "candidate_recording_ids": [
+        "17dd7dcc-1869-40e0-a579-fbb4f6ae7cec"
+      ],
+      "observed_album_before": "Life’s Not Out to Get You",
+      "resolved_artist_before": "Neck Deep",
+      "resolved_album_before": "Life’s Not Out to Get You",
+      "previously_chosen_recording_id": "17dd7dcc-1869-40e0-a579-fbb4f6ae7cec"
+    },
+    {
+      "file_name": "08 The Beach Is For Lovers (Not Lonely Loosers).m4a",
+      "content_hash": "4ba23e15b95bf295",
+      "duration_secs": 184,
+      "tag_title": "The Beach Is For Lovers (Not Lonely Loosers)",
+      "tag_track_number": 8,
+      "candidate_recording_ids": [
+        "38c6f81b-e8cc-445d-a251-ff7b62af97d0"
+      ],
+      "observed_album_before": "Life’s Not Out to Get You",
+      "resolved_artist_before": "Neck Deep",
+      "resolved_album_before": "Life’s Not Out to Get You",
+      "previously_chosen_recording_id": "38c6f81b-e8cc-445d-a251-ff7b62af97d0"
+    },
+    {
+      "file_name": "09 December.m4a",
+      "content_hash": "f12a8f5d43605111",
+      "duration_secs": 218,
+      "tag_title": "December",
+      "tag_track_number": 9,
+      "candidate_recording_ids": [
+        "33cab056-bba2-44da-bf42-600edd146587",
+        "b2582384-7f2d-41ea-b08d-c2aa49566704"
+      ],
+      "observed_album_before": "December",
+      "resolved_artist_before": "Neck Deep",
+      "resolved_album_before": "December",
+      "previously_chosen_recording_id": "33cab056-bba2-44da-bf42-600edd146587"
+    },
+    {
+      "file_name": "10 Smooth Seas Dont Make Good Sailors.m4a",
+      "content_hash": "162a08babeab2655",
+      "duration_secs": 185,
+      "tag_title": "Smooth Seas Dont Make Good Sailors",
+      "tag_track_number": 10,
+      "candidate_recording_ids": [],
+      "observed_album_before": "Life’s Not Out to Get You",
+      "resolved_artist_before": "Neck Deep",
+      "resolved_album_before": "Life’s Not Out to Get You",
+      "previously_chosen_recording_id": "b2340eee-c8b1-47e8-8784-fb09ff71a1aa"
+    },
+    {
+      "file_name": "11 I Hope This Comes Back To Haunt You.m4a",
+      "content_hash": "8b008e5ce73a8e0b",
+      "duration_secs": 169,
+      "tag_title": "I Hope This Comes Back To Haunt You",
+      "tag_track_number": 11,
+      "candidate_recording_ids": [],
+      "observed_album_before": "Life’s Not Out to Get You",
+      "resolved_artist_before": "Neck Deep",
+      "resolved_album_before": "Life’s Not Out to Get You",
+      "previously_chosen_recording_id": "cf3d6749-0432-4756-9684-f947dfcd3c40"
+    },
+    {
+      "file_name": "12 Rock Bottom.m4a",
+      "content_hash": "1065e8feeba0604f",
+      "duration_secs": 200,
+      "tag_title": "Rock Bottom",
+      "tag_track_number": 12,
+      "candidate_recording_ids": [
+        "86aa4442-a2a7-459b-8de4-3faffcb906bb"
+      ],
+      "observed_album_before": "Life’s Not Out to Get You",
+      "resolved_artist_before": "Neck Deep",
+      "resolved_album_before": "Life’s Not Out to Get You",
+      "previously_chosen_recording_id": "86aa4442-a2a7-459b-8de4-3faffcb906bb"
+    },
+    {
+      "file_name": "13 December (Full Band Version).m4a",
+      "content_hash": "7bf1d6c03b22d1b3",
+      "duration_secs": 216,
+      "tag_title": "December (Full Band Version)",
+      "tag_track_number": 13,
+      "candidate_recording_ids": [],
+      "observed_album_before": "Life’s Not Out to Get You",
+      "resolved_artist_before": "Neck Deep",
+      "resolved_album_before": "Life’s Not Out to Get You",
+      "previously_chosen_recording_id": "6a48ab41-12a0-4722-a916-a08bf34cca25"
+    },
+    {
+      "file_name": "14 Can't Kick Up The Roots (Acoustic).m4a",
+      "content_hash": "87ea0b64b4940e7d",
+      "duration_secs": 170,
+      "tag_title": "Can't Kick Up The Roots (Acoustic)",
+      "tag_track_number": 14,
+      "candidate_recording_ids": [
+        "376528ee-6aa2-4dab-8bc2-d7d7195f5f26"
+      ],
+      "observed_album_before": "Life’s Not Out to Get You",
+      "resolved_artist_before": "Neck Deep",
+      "resolved_album_before": "Life’s Not Out to Get You",
+      "previously_chosen_recording_id": "376528ee-6aa2-4dab-8bc2-d7d7195f5f26"
+    },
+    {
+      "file_name": "15 Lime St. (Acoustic).m4a",
+      "content_hash": "9231a8151ecf1131",
+      "duration_secs": 194,
+      "tag_title": "Lime St. (Acoustic)",
+      "tag_track_number": 15,
+      "candidate_recording_ids": [
+        "04aeb584-edb7-479b-af16-1ca4502ef6c2"
+      ],
+      "observed_album_before": "Life’s Not Out to Get You",
+      "resolved_artist_before": "Neck Deep",
+      "resolved_album_before": "Life’s Not Out to Get You",
+      "previously_chosen_recording_id": "04aeb584-edb7-479b-af16-1ca4502ef6c2"
+    }
+  ],
+  "note": "file_name/tag_title/tag_track_number are parsed from the real relative_path (independent ground truth). duration_secs and candidate_recording_ids come from the real fingerprint/AcoustID data (independent ground truth). resolved_artist_before/resolved_album_before/previously_chosen_recording_id/observed_album_before reflect the PRIOR per-file pipeline's already-computed identification result -- NOT the file's original embedded tag -- and must not be fed into match scoring as if they were independent evidence."
+}

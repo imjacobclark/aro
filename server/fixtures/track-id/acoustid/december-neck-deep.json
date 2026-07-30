@@ -1,0 +1,46 @@
+{
+  "error": null,
+  "results": [
+    {
+      "id": "df6e7870-01ef-429f-a11e-627662c26e41",
+      "recordings": [
+        {
+          "artists": [
+            {
+              "name": "Neck Deep"
+            },
+            {
+              "name": "Chris Carrabba"
+            }
+          ],
+          "id": "33cab056-bba2-44da-bf42-600edd146587",
+          "releasegroups": [
+            {
+              "title": "December"
+            }
+          ],
+          "title": "December"
+        },
+        {
+          "artists": [
+            {
+              "name": "Neck Deep"
+            }
+          ],
+          "id": "b2582384-7f2d-41ea-b08d-c2aa49566704",
+          "releasegroups": [
+            {
+              "title": "Life’s Not Out to Get You"
+            },
+            {
+              "title": "December"
+            }
+          ],
+          "title": "December"
+        }
+      ],
+      "score": 0.9994396
+    }
+  ],
+  "status": "ok"
+}

@@ -46,14 +46,49 @@ struct SQLiteLibraryCatalogRepository: LibraryCatalogRepository {
         )
     }
 
+    @discardableResult
+    func applyIdentification(
+        contentHash: String,
+        title: String?,
+        artist: String?,
+        album: String?,
+        musicbrainzRecordingID: String?,
+        acoustidID: String?,
+        artworkData: Data?
+    ) -> Bool {
+        database.applyIdentification(
+            contentHash: contentHash,
+            title: title,
+            artist: artist,
+            album: album,
+            musicbrainzRecordingID: musicbrainzRecordingID,
+            acoustidID: acoustidID,
+            artworkData: artworkData
+        )
+    }
+
+    func pendingArtworkDownloads(limit: Int) -> [PendingArtwork] {
+        database.pendingArtworkDownloads(limit: limit)
+    }
+
+    func storeArtwork(trackID: String, data: Data) {
+        database.storeArtwork(trackID: trackID, data: data)
+    }
+
     private func enriching(_ songs: [Song]) -> [Song] {
-        songs.map { song in
+        let missingFingerprints = songs.compactMap { song in
+            song.loudness == nil ? song.fileFingerprint?.cacheKey : nil
+        }
+        guard !missingFingerprints.isEmpty else { return songs }
+        let analyses = loudness.analyses(
+            fingerprints: missingFingerprints,
+            algorithmVersion: LoudnessAnalysis.algorithmVersion
+        )
+        guard !analyses.isEmpty else { return songs }
+        return songs.map { song in
             guard song.loudness == nil,
                   let fingerprint = song.fileFingerprint?.cacheKey,
-                  let analysis = loudness.analysis(
-                      fingerprint: fingerprint,
-                      algorithmVersion: LoudnessAnalysis.algorithmVersion
-                  ) else {
+                  let analysis = analyses[fingerprint] else {
                 return song
             }
             var enriched = song

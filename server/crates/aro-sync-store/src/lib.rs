@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::{
     fs::{self, OpenOptions},
     io::{Seek, SeekFrom, Write},
@@ -40,6 +40,102 @@ pub struct SourceFile {
     pub size: u64,
     pub modified_millis: i64,
     pub available: bool,
+}
+
+/// A cached raw response pair from a prior AcoustID/MusicBrainz identification lookup,
+/// keyed by fingerprint. Local-node cache only, deliberately not part of the CRDT
+/// operation log — each node can re-derive it, and it never needs to sync.
+#[derive(Clone, Debug)]
+pub struct IdentificationCacheEntry {
+    pub acoustid_response: Option<Value>,
+    pub musicbrainz_response: Option<Value>,
+    /// Which shape of `aro_track_id::{acoustid, musicbrainz}` response types this row was
+    /// captured with — see `aro_track_id::CACHE_SCHEMA_VERSION`. Rows written before this
+    /// column existed default to `0`, which is guaranteed to be older than any real version
+    /// and therefore always treated as stale.
+    pub schema_version: u32,
+    pub refreshed_at: i64,
+}
+
+/// One row of `release_group_affinity`, as returned by
+/// [`HubStore::release_group_affinity_rows`].
+#[derive(Clone, Debug)]
+pub struct ReleaseGroupAffinityRow {
+    pub release_group_id: String,
+    pub release_title: Option<String>,
+    pub track_count: i64,
+}
+
+/// A cached raw `ws/2/release/{id}` response, keyed by release id. Unlike
+/// `identification_cache` (which can legitimately cache a "no match" negative result), a
+/// release cache row only ever exists once a release has actually been successfully fetched
+/// — so `response` is required, not optional. Local-node cache only, like
+/// `IdentificationCacheEntry`, and for the same reason: each node can re-derive it, and it
+/// never needs to sync.
+#[derive(Clone, Debug)]
+pub struct ReleaseCacheEntry {
+    pub response: Value,
+    pub schema_version: u32,
+    pub refreshed_at: i64,
+}
+
+/// One scanned, available file within a folder, as returned by [`HubStore::folder_members`].
+#[derive(Clone, Debug)]
+pub struct FolderMember {
+    pub path: PathBuf,
+    pub content_hash: String,
+}
+
+/// The outcome of identifying one file, keyed by `content_hash` rather than
+/// `hub_track_id`. Content hash is the only identifier genuinely shared between this
+/// database and the macOS app's separate local library catalog (their track IDs are
+/// generated independently and never coincide) — so identification results are kept
+/// here, outside the CRDT `tracks` table, and pulled by content hash rather than
+/// merged through the operation log.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct IdentificationResult {
+    pub content_hash: String,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub artwork_url: Option<String>,
+    pub musicbrainz_recording_id: Option<String>,
+    pub acoustid_id: Option<String>,
+    pub identified_at: i64,
+    /// How this result was produced — `"per_file"`, `"group"`, or `"reconcile"` (see
+    /// `aro_track_id::queue`). `None` for rows written before this column existed.
+    pub resolution_source: Option<String>,
+    /// The `album::GroupMatch::score`/analogous confidence this result was written with,
+    /// if it came from a scored path — `None` for a per-file result, which has no single
+    /// comparable score.
+    pub resolution_score: Option<f64>,
+    /// Which `aro_track_id::IDENTIFICATION_GENERATION` this result was last written or
+    /// confirmed at. Defaults to `0` for rows predating this column (see the migration's
+    /// `DEFAULT`), which is below any real generation and therefore eligible for exactly
+    /// one reconcile pass.
+    pub resolution_generation: i64,
+    pub release_id: Option<String>,
+    pub release_group_id: Option<String>,
+}
+
+/// Shared row-mapper for the three `identification_results` read paths — keeps the column
+/// order/count in exactly one place rather than duplicated per query.
+fn identification_result_from_row(row: &rusqlite::Row) -> rusqlite::Result<IdentificationResult> {
+    Ok(IdentificationResult {
+        content_hash: row.get(0)?,
+        title: row.get(1)?,
+        artist: row.get(2)?,
+        album: row.get(3)?,
+        artwork_url: row.get(4)?,
+        musicbrainz_recording_id: row.get(5)?,
+        acoustid_id: row.get(6)?,
+        identified_at: row.get(7)?,
+        resolution_source: row.get(8)?,
+        resolution_score: row.get(9)?,
+        resolution_generation: row.get(10)?,
+        release_id: row.get(11)?,
+        release_group_id: row.get(12)?,
+    })
 }
 
 #[derive(Debug, Error)]
@@ -1155,6 +1251,97 @@ impl HubStore {
         Ok(size)
     }
 
+    pub fn needs_loudness_analysis(
+        &self,
+        hash: &str,
+        algorithm_version: i64,
+    ) -> Result<bool, StoreError> {
+        validate_hash(hash)?;
+        let connection = self.connection.lock();
+        let analyzed: bool = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM loudness
+                WHERE content_hash = ?1 AND algorithm_version = ?2
+            )",
+            params![hash, algorithm_version],
+            |row| row.get(0),
+        )?;
+        if analyzed {
+            return Ok(false);
+        }
+        let permanently_failed: bool = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM loudness_analysis_failures
+                WHERE content_hash = ?1 AND algorithm_version = ?2
+            )",
+            params![hash, algorithm_version],
+            |row| row.get(0),
+        )?;
+        Ok(!permanently_failed)
+    }
+
+    pub fn put_loudness_analysis(
+        &self,
+        hash: &str,
+        algorithm_version: i64,
+        integrated_lufs: f64,
+        peak_amplitude: f64,
+        hub_id: Uuid,
+    ) -> Result<(), StoreError> {
+        validate_hash(hash)?;
+        let analyzed_at = chrono::Utc::now().timestamp_millis() as f64 / 1_000.0;
+        self.append_operations(&[Operation {
+            operation_id: Uuid::new_v4(),
+            device_id: hub_id,
+            entity_type: "loudness".into(),
+            entity_id: format!("{hash}:{algorithm_version}"),
+            kind: "upsert".into(),
+            payload: serde_json::json!({
+                "content_hash": hash,
+                "algorithm_version": algorithm_version,
+                "integrated_lufs": integrated_lufs,
+                "peak_amplitude": peak_amplitude,
+                "analyzed_at": analyzed_at,
+            }),
+            field_versions: BTreeMap::new(),
+        }])?;
+        Ok(())
+    }
+
+    pub fn record_loudness_failure(
+        &self,
+        hash: &str,
+        algorithm_version: i64,
+        error: &str,
+    ) -> Result<(), StoreError> {
+        validate_hash(hash)?;
+        self.connection.lock().execute(
+            r#"
+            INSERT INTO loudness_analysis_failures
+                (content_hash, algorithm_version, error, attempted_at)
+            VALUES (?1, ?2, ?3, unixepoch())
+            ON CONFLICT(content_hash, algorithm_version) DO UPDATE SET
+                error = excluded.error,
+                attempted_at = excluded.attempted_at
+            "#,
+            params![hash, algorithm_version, error],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_loudness_failure(
+        &self,
+        hash: &str,
+        algorithm_version: i64,
+    ) -> Result<(), StoreError> {
+        self.connection.lock().execute(
+            "DELETE FROM loudness_analysis_failures
+             WHERE content_hash = ?1 AND algorithm_version = ?2",
+            params![hash, algorithm_version],
+        )?;
+        Ok(())
+    }
+
     pub fn blob_path_for_download(&self, hash: &str) -> Result<Option<PathBuf>, StoreError> {
         validate_hash(hash)?;
         let path = self.blob_path(hash);
@@ -1172,6 +1359,397 @@ impl HubStore {
             return Ok(None);
         }
         Ok(referenced)
+    }
+
+    /// The full metadata map for a track, as materialized from its operation history.
+    pub fn track_metadata(
+        &self,
+        track_id: Uuid,
+    ) -> Result<Option<serde_json::Map<String, Value>>, StoreError> {
+        let metadata: Option<String> = self
+            .connection
+            .lock()
+            .query_row(
+                "SELECT metadata FROM tracks WHERE hub_track_id = ?1",
+                [track_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(metadata.map(|value| serde_json::from_str(&value).unwrap_or_default()))
+    }
+
+    /// The absolute on-disk path for a track's source file, if it still belongs to a
+    /// watched, available source. Used to gate tag write-back: we only ever attempt to
+    /// mutate a file aro can currently reach.
+    pub fn live_path_for_track(&self, track_id: Uuid) -> Result<Option<PathBuf>, StoreError> {
+        let row: Option<(String, String)> = self
+            .connection
+            .lock()
+            .query_row(
+                r#"
+                SELECT sources.path, source_files.relative_path
+                FROM source_files
+                JOIN sources ON sources.source_id = source_files.source_id
+                WHERE source_files.hub_track_id = ?1
+                  AND source_files.available = 1
+                  AND sources.available = 1
+                  AND sources.detached_at IS NULL
+                  AND sources.path IS NOT NULL
+                LIMIT 1
+                "#,
+                [track_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(row
+            .map(|(base, relative)| Path::new(&base).join(relative))
+            .filter(|path| path.is_file()))
+    }
+
+    pub fn identification_cache_get(
+        &self,
+        fingerprint: &str,
+    ) -> Result<Option<IdentificationCacheEntry>, StoreError> {
+        self.connection
+            .lock()
+            .query_row(
+                r#"
+                SELECT acoustid_response, musicbrainz_response, schema_version, refreshed_at
+                FROM identification_cache
+                WHERE fingerprint = ?1
+                "#,
+                [fingerprint],
+                |row| {
+                    let acoustid: Option<String> = row.get(0)?;
+                    let musicbrainz: Option<String> = row.get(1)?;
+                    Ok(IdentificationCacheEntry {
+                        acoustid_response: acoustid
+                            .and_then(|value| serde_json::from_str(&value).ok()),
+                        musicbrainz_response: musicbrainz
+                            .and_then(|value| serde_json::from_str(&value).ok()),
+                        schema_version: row.get::<_, i64>(2)? as u32,
+                        refreshed_at: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn identification_cache_put(
+        &self,
+        fingerprint: &str,
+        acoustid_response: Option<&Value>,
+        musicbrainz_response: Option<&Value>,
+        schema_version: u32,
+    ) -> Result<(), StoreError> {
+        let now = chrono::Utc::now().timestamp();
+        self.connection.lock().execute(
+            r#"
+            INSERT INTO identification_cache
+                (fingerprint, acoustid_response, musicbrainz_response, schema_version, created_at, refreshed_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+            ON CONFLICT(fingerprint) DO UPDATE SET
+                acoustid_response = excluded.acoustid_response,
+                musicbrainz_response = excluded.musicbrainz_response,
+                schema_version = excluded.schema_version,
+                refreshed_at = excluded.refreshed_at
+            "#,
+            params![
+                fingerprint,
+                acoustid_response.map(Value::to_string),
+                musicbrainz_response.map(Value::to_string),
+                schema_version,
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The cached `ws/2/release/{id}` response for `release_id`, if one has ever been
+    /// successfully fetched. `None` both when nothing is cached and when the stored JSON
+    /// fails to parse — a corrupt row is treated the same as "not cached", matching
+    /// `identification_cache_get`'s convention.
+    pub fn release_cache_get(
+        &self,
+        release_id: &str,
+    ) -> Result<Option<ReleaseCacheEntry>, StoreError> {
+        let row = self
+            .connection
+            .lock()
+            .query_row(
+                r#"
+                SELECT response, schema_version, refreshed_at
+                FROM musicbrainz_release_cache
+                WHERE release_id = ?1
+                "#,
+                [release_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)? as u32,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(row.and_then(|(response, schema_version, refreshed_at)| {
+            serde_json::from_str(&response)
+                .ok()
+                .map(|response| ReleaseCacheEntry {
+                    response,
+                    schema_version,
+                    refreshed_at,
+                })
+        }))
+    }
+
+    pub fn release_cache_put(
+        &self,
+        release_id: &str,
+        response: &Value,
+        schema_version: u32,
+    ) -> Result<(), StoreError> {
+        let now = chrono::Utc::now().timestamp();
+        self.connection.lock().execute(
+            r#"
+            INSERT INTO musicbrainz_release_cache
+                (release_id, response, schema_version, created_at, refreshed_at)
+            VALUES (?1, ?2, ?3, ?4, ?4)
+            ON CONFLICT(release_id) DO UPDATE SET
+                response = excluded.response,
+                schema_version = excluded.schema_version,
+                refreshed_at = excluded.refreshed_at
+            "#,
+            params![release_id, response.to_string(), schema_version, now],
+        )?;
+        Ok(())
+    }
+
+    /// Every scanned, available file whose parent directory is exactly `folder` — the
+    /// folder's whole membership, independent of which specific files were offered to
+    /// `IdentificationQueue::enqueue` on any one scan pass. This is what lets a manually
+    /// re-synced single file pull in the rest of its folder as group context, rather than
+    /// only ever seeing the one file a caller happened to name.
+    ///
+    /// Scans every `source_files` row across every source, rather than an indexed
+    /// per-folder lookup — there's no path-prefix index today, and doing real directory
+    /// comparison (rather than a fragile SQL string-prefix match) needs `Path::parent()` in
+    /// Rust. Acceptable because this runs once per group, not once per file, against
+    /// libraries in the hundreds-to-low-thousands of tracks this crate targets — not a
+    /// per-file hot path.
+    pub fn folder_members(&self, folder: &Path) -> Result<Vec<FolderMember>, StoreError> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            r#"
+            SELECT sources.path, source_files.relative_path, source_files.content_hash
+            FROM source_files
+            JOIN sources ON sources.source_id = source_files.source_id
+            WHERE source_files.available = 1 AND sources.path IS NOT NULL
+            "#,
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(source_path, relative_path, content_hash)| {
+                let full_path = Path::new(&source_path).join(relative_path);
+                (full_path.parent() == Some(folder)).then_some(FolderMember {
+                    path: full_path,
+                    content_hash,
+                })
+            })
+            .collect())
+    }
+
+    /// The identification result for one file, if it's ever been identified — the
+    /// singular counterpart to [`Self::identification_results_since`], used to read a
+    /// specific sibling file's already-computed answer (e.g. for sibling-consensus
+    /// grouping) rather than pulling every result since some cursor.
+    pub fn identification_result(
+        &self,
+        content_hash: &str,
+    ) -> Result<Option<IdentificationResult>, StoreError> {
+        self.connection
+            .lock()
+            .query_row(
+                r#"
+                SELECT content_hash, title, artist, album, artwork_url,
+                       musicbrainz_recording_id, acoustid_id, identified_at,
+                       resolution_source, resolution_score, resolution_generation,
+                       release_id, release_group_id
+                FROM identification_results
+                WHERE content_hash = ?1
+                "#,
+                [content_hash],
+                identification_result_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Advances `content_hash`'s `resolution_generation` to `generation`, without touching
+    /// any other field — a no-op if it's already at or beyond `generation`, or if the file
+    /// has no identification result at all. Used by a reconcile sweep to mark a file "seen
+    /// at this generation" even when its existing answer was kept in place (see
+    /// `aro_track_id::queue::should_revise`), so it isn't re-offered to every future sweep
+    /// forever — without this, a file whose answer is correctly never revised would never
+    /// leave `folders_needing_reconcile`'s result set.
+    pub fn touch_identification_generation(
+        &self,
+        content_hash: &str,
+        generation: i64,
+    ) -> Result<(), StoreError> {
+        self.connection.lock().execute(
+            "UPDATE identification_results SET resolution_generation = ?1 \
+             WHERE content_hash = ?2 AND resolution_generation < ?1",
+            params![generation, content_hash],
+        )?;
+        Ok(())
+    }
+
+    pub fn has_identification_result(&self, content_hash: &str) -> Result<bool, StoreError> {
+        Ok(self
+            .connection
+            .lock()
+            .query_row(
+                "SELECT 1 FROM identification_results WHERE content_hash = ?1",
+                [content_hash],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    pub fn put_identification_result(
+        &self,
+        result: &IdentificationResult,
+    ) -> Result<(), StoreError> {
+        self.connection.lock().execute(
+            r#"
+            INSERT INTO identification_results
+                (content_hash, title, artist, album, artwork_url,
+                 musicbrainz_recording_id, acoustid_id, identified_at,
+                 resolution_source, resolution_score, resolution_generation,
+                 release_id, release_group_id)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            ON CONFLICT(content_hash) DO UPDATE SET
+                title = excluded.title,
+                artist = excluded.artist,
+                album = excluded.album,
+                artwork_url = excluded.artwork_url,
+                musicbrainz_recording_id = excluded.musicbrainz_recording_id,
+                acoustid_id = excluded.acoustid_id,
+                identified_at = excluded.identified_at,
+                resolution_source = excluded.resolution_source,
+                resolution_score = excluded.resolution_score,
+                resolution_generation = excluded.resolution_generation,
+                release_id = excluded.release_id,
+                release_group_id = excluded.release_group_id
+            "#,
+            params![
+                result.content_hash,
+                result.title,
+                result.artist,
+                result.album,
+                result.artwork_url,
+                result.musicbrainz_recording_id,
+                result.acoustid_id,
+                result.identified_at,
+                result.resolution_source,
+                result.resolution_score,
+                result.resolution_generation,
+                result.release_id,
+                result.release_group_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Results identified after `after` (exclusive), oldest first — the pull side of
+    /// the bridge the macOS app polls to merge results into its own local library
+    /// catalog, since content hash (not any track id) is the only shared key.
+    pub fn identification_results_since(
+        &self,
+        after: i64,
+        limit: u32,
+    ) -> Result<Vec<IdentificationResult>, StoreError> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            r#"
+            SELECT content_hash, title, artist, album, artwork_url,
+                   musicbrainz_recording_id, acoustid_id, identified_at,
+                   resolution_source, resolution_score, resolution_generation,
+                   release_id, release_group_id
+            FROM identification_results
+            WHERE identified_at > ?1
+            ORDER BY identified_at
+            LIMIT ?2
+            "#,
+        )?;
+        let rows = statement.query_map(
+            params![after, limit.clamp(1, 1_000)],
+            identification_result_from_row,
+        )?;
+        rows.collect::<Result<_, _>>().map_err(Into::into)
+    }
+
+    /// Distinct folders (parent directories of `source_files.relative_path`) containing at
+    /// least one file whose `identification_results.resolution_generation` is below
+    /// `generation` — i.e. folders a reconcile pass at `generation` hasn't touched yet.
+    /// Ordered by member count descending, matching the coalescer's largest-folder-first
+    /// flush order (see `aro_track_id::queue`) so a reconcile sweep seeds affinity the same
+    /// way a cold-start pass does. Files with no identification result at all are not
+    /// counted — reconcile revises existing answers, it doesn't identify new files (that
+    /// remains `sources.rs::maybe_enqueue_identification`'s job).
+    pub fn folders_needing_reconcile(
+        &self,
+        generation: i64,
+        limit: u32,
+    ) -> Result<Vec<PathBuf>, StoreError> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            r#"
+            SELECT sources.path, source_files.relative_path, count(*) AS member_count
+            FROM source_files
+            JOIN sources ON sources.source_id = source_files.source_id
+            JOIN identification_results ir ON ir.content_hash = source_files.content_hash
+            WHERE source_files.available = 1
+              AND sources.path IS NOT NULL
+              AND ir.resolution_generation < ?1
+            GROUP BY sources.path, source_files.relative_path
+            "#,
+        )?;
+        let rows: Vec<(String, String, i64)> = statement
+            .query_map([generation], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<Result<_, _>>()?;
+
+        // Grouping by exact relative path over-counts (each file is its own "folder" by
+        // that key), so fold to actual parent directories in Rust, same reasoning as
+        // `folder_members`'s doc comment on why this isn't done in SQL.
+        let mut counts: HashMap<PathBuf, i64> = HashMap::new();
+        for (source_path, relative_path, member_count) in rows {
+            let full_path = Path::new(&source_path).join(relative_path);
+            if let Some(folder) = full_path.parent() {
+                *counts.entry(folder.to_path_buf()).or_insert(0) += member_count;
+            }
+        }
+        let mut folders: Vec<(PathBuf, i64)> = counts.into_iter().collect();
+        folders.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        Ok(folders
+            .into_iter()
+            .take(limit.clamp(1, 1_000) as usize)
+            .map(|(folder, _)| folder)
+            .collect())
     }
 
     pub fn verify_all(&self) -> Result<(usize, Vec<String>), StoreError> {
@@ -1224,6 +1802,111 @@ impl HubStore {
             })
             .optional()?;
         Ok(json.and_then(|value| serde_json::from_str(&value).ok()))
+    }
+
+    /// Records that `artist_normalized`'s track identification resolved to
+    /// `release_group_id` this time, incrementing its running tally. Used by
+    /// `aro-track-id`'s "Intelligent" album-matching mode to let a release-group
+    /// that already has several of an artist's tracks pull in the rest, instead of
+    /// each track picking independently. Never overwrites `release_title` with
+    /// `None` — later calls for the same release-group may not always have a title
+    /// on hand, but earlier ones did.
+    pub fn record_release_group_choice(
+        &self,
+        artist_normalized: &str,
+        release_group_id: &str,
+        release_title: Option<&str>,
+    ) -> Result<(), StoreError> {
+        self.connection.lock().execute(
+            r#"
+            INSERT INTO release_group_affinity(artist_normalized, release_group_id, release_title, track_count)
+            VALUES (?1, ?2, ?3, 1)
+            ON CONFLICT(artist_normalized, release_group_id) DO UPDATE SET
+                release_title = COALESCE(excluded.release_title, release_group_affinity.release_title),
+                track_count = release_group_affinity.track_count + 1
+            "#,
+            params![artist_normalized, release_group_id, release_title],
+        )?;
+        Ok(())
+    }
+
+    /// The release-group affinity tally for `artist_normalized`, keyed by
+    /// release-group id, as recorded by `record_release_group_choice`.
+    pub fn release_group_affinity(
+        &self,
+        artist_normalized: &str,
+    ) -> Result<HashMap<String, i64>, StoreError> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            "SELECT release_group_id, track_count FROM release_group_affinity \
+             WHERE artist_normalized = ?1",
+        )?;
+        let rows = statement
+            .query_map([artist_normalized], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// The raw per-release-group affinity rows for `artist_normalized`, including each
+    /// row's title. Unlike [`Self::release_group_affinity`], which only exposes the
+    /// id-keyed tally, this keeps `release_title` alongside each id so a caller can
+    /// consolidate rows that are really the same album under two or more distinct
+    /// MusicBrainz release-group ids (observed directly: three different release-group ids
+    /// all titled "The Beatles" for one artist, splitting what should be one affinity
+    /// signal into three weaker ones) — see `aro_track_id::musicbrainz::AffinityIndex`,
+    /// which is what actually performs that consolidation. This store deliberately doesn't
+    /// fold Unicode punctuation variants itself (see [`Self::release_title_affinity`]), so
+    /// that consolidation has to happen in the caller.
+    pub fn release_group_affinity_rows(
+        &self,
+        artist_normalized: &str,
+    ) -> Result<Vec<ReleaseGroupAffinityRow>, StoreError> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            "SELECT release_group_id, release_title, track_count FROM release_group_affinity \
+             WHERE artist_normalized = ?1",
+        )?;
+        let rows = statement
+            .query_map([artist_normalized], |row| {
+                Ok(ReleaseGroupAffinityRow {
+                    release_group_id: row.get(0)?,
+                    release_title: row.get(1)?,
+                    track_count: row.get(2)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Distinct release titles (trimmed, lowercased) that `artist_normalized`
+    /// already has affinity for, per `record_release_group_choice`. Unlike
+    /// `release_group_affinity`, this is keyed by title rather than
+    /// release-group id — `aro-track-id::acoustid::best_recording` uses it to
+    /// disambiguate between two different MusicBrainz *recordings* that share
+    /// an identical title (AcoustID's payload carries release-group titles per
+    /// candidate recording, but not release-group ids). Rows with no
+    /// `release_title` are excluded since they can't be matched against
+    /// anything. Callers apply their own further normalization on top (see
+    /// `aro-track-id::matching::normalize_matching_key`) since this store
+    /// deliberately doesn't fold Unicode punctuation variants itself.
+    pub fn release_title_affinity(
+        &self,
+        artist_normalized: &str,
+    ) -> Result<HashSet<String>, StoreError> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            "SELECT DISTINCT release_title FROM release_group_affinity \
+             WHERE artist_normalized = ?1 AND release_title IS NOT NULL",
+        )?;
+        let rows = statement
+            .query_map([artist_normalized], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows
+            .into_iter()
+            .map(|title| title.trim().to_lowercase())
+            .collect())
     }
 
     pub fn purge_blob(&self, hash: &str) -> Result<bool, StoreError> {
@@ -1345,6 +2028,13 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
             payload TEXT NOT NULL,
             PRIMARY KEY(content_hash, algorithm_version)
         );
+        CREATE TABLE IF NOT EXISTS loudness_analysis_failures (
+            content_hash TEXT NOT NULL,
+            algorithm_version INTEGER NOT NULL,
+            error TEXT NOT NULL,
+            attempted_at INTEGER NOT NULL,
+            PRIMARY KEY(content_hash, algorithm_version)
+        );
         CREATE TABLE IF NOT EXISTS blobs (
             hash TEXT PRIMARY KEY,
             size INTEGER NOT NULL,
@@ -1390,6 +2080,67 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
         INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, unixepoch());
         "#,
     )?;
+    connection.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS identification_cache (
+            fingerprint TEXT PRIMARY KEY,
+            acoustid_response TEXT,
+            musicbrainz_response TEXT,
+            created_at INTEGER NOT NULL,
+            refreshed_at INTEGER NOT NULL
+        );
+        INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (5, unixepoch());
+        "#,
+    )?;
+    connection.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS identification_results (
+            content_hash TEXT PRIMARY KEY,
+            title TEXT,
+            artist TEXT,
+            album TEXT,
+            artwork_url TEXT,
+            musicbrainz_recording_id TEXT,
+            acoustid_id TEXT,
+            identified_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS identification_results_identified_at
+            ON identification_results(identified_at);
+        INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (6, unixepoch());
+        "#,
+    )?;
+    connection.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS release_group_affinity (
+            artist_normalized TEXT NOT NULL,
+            release_group_id TEXT NOT NULL,
+            release_title TEXT,
+            track_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(artist_normalized, release_group_id)
+        );
+        INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (7, unixepoch());
+        "#,
+    )?;
+    connection.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS musicbrainz_release_cache (
+            release_id TEXT PRIMARY KEY,
+            response TEXT NOT NULL,
+            schema_version INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            refreshed_at INTEGER NOT NULL
+        );
+        INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (8, unixepoch());
+        "#,
+    )?;
+    // `DEFAULT 0` is deliberate: every row written before this column existed lands below
+    // any real `CACHE_SCHEMA_VERSION` and is therefore treated as stale on next access —
+    // see `aro_track_id::queue`'s freshness check, which replaced an earlier one-off check
+    // for a single specific missing field with this general mechanism.
+    let _ = connection.execute(
+        "ALTER TABLE identification_cache ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
     let _ = connection.execute(
         "ALTER TABLE device_credentials ADD COLUMN device_type TEXT NOT NULL DEFAULT 'Device'",
         [],
@@ -1419,6 +2170,42 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
     let _ = connection.execute("ALTER TABLE sources ADD COLUMN last_scan_at TEXT", []);
     let _ = connection.execute("ALTER TABLE sources ADD COLUMN last_error TEXT", []);
     let _ = connection.execute("ALTER TABLE sources ADD COLUMN detached_at TEXT", []);
+    // Provenance for how each identification result was produced, so a later reconcile
+    // pass can tell "never revised" apart from "already a confident group match" and
+    // decide whether a new answer is actually better evidence, not just different evidence
+    // — see `aro_track_id::queue`'s revision rule. `resolution_generation` defaults to 0,
+    // below any real `aro_track_id::IDENTIFICATION_GENERATION`, so every row written before
+    // this column existed is eligible for exactly one reconcile pass at the current
+    // generation, same `DEFAULT`-driven staleness pattern as `identification_cache
+    // .schema_version`.
+    let _ = connection.execute(
+        "ALTER TABLE identification_results ADD COLUMN resolution_source TEXT",
+        [],
+    );
+    let _ = connection.execute(
+        "ALTER TABLE identification_results ADD COLUMN resolution_score REAL",
+        [],
+    );
+    let _ = connection.execute(
+        "ALTER TABLE identification_results ADD COLUMN resolution_generation INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = connection.execute(
+        "ALTER TABLE identification_results ADD COLUMN release_id TEXT",
+        [],
+    );
+    let _ = connection.execute(
+        "ALTER TABLE identification_results ADD COLUMN release_group_id TEXT",
+        [],
+    );
+    let _ = connection.execute(
+        "CREATE INDEX IF NOT EXISTS identification_results_generation ON identification_results(resolution_generation)",
+        [],
+    );
+    let _ = connection.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (9, unixepoch())",
+        [],
+    );
     connection.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS source_files (
@@ -1635,6 +2422,353 @@ mod tests {
         store.write_chunk(&corrupt_hash, 0, b"wrong").unwrap();
         assert!(store.commit_blob(&corrupt_hash, 5).is_err());
         assert!(!store.blob_status(&corrupt_hash).unwrap().0);
+    }
+
+    #[test]
+    fn release_cache_round_trips_and_versions() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+
+        assert!(store.release_cache_get("rel-1").unwrap().is_none());
+        store
+            .release_cache_put("rel-1", &serde_json::json!({"id": "rel-1", "title": "1"}), 2)
+            .unwrap();
+
+        let entry = store.release_cache_get("rel-1").unwrap().unwrap();
+        assert_eq!(entry.response, serde_json::json!({"id": "rel-1", "title": "1"}));
+        assert_eq!(entry.schema_version, 2);
+
+        // Upsert overwrites in place, same as identification_cache_put.
+        store
+            .release_cache_put("rel-1", &serde_json::json!({"id": "rel-1", "title": "1 (2015)"}), 3)
+            .unwrap();
+        let updated = store.release_cache_get("rel-1").unwrap().unwrap();
+        assert_eq!(updated.schema_version, 3);
+        assert_eq!(
+            updated.response,
+            serde_json::json!({"id": "rel-1", "title": "1 (2015)"})
+        );
+    }
+
+    #[test]
+    fn folder_members_returns_only_available_files_in_the_exact_folder() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let source_id = Uuid::new_v4();
+        let source_root = directory.path().join("library");
+        store
+            .register_host_source(source_id, "Library", "managed", &source_root)
+            .unwrap();
+
+        // Two files in the target folder...
+        store
+            .upsert_source_file(source_id, "Beatles/1/01 Love Me Do.m4a", Uuid::new_v4(), "hash-1", 100, 0)
+            .unwrap();
+        store
+            .upsert_source_file(source_id, "Beatles/1/02 From Me To You.m4a", Uuid::new_v4(), "hash-2", 100, 0)
+            .unwrap();
+        // ...one in a different folder...
+        store
+            .upsert_source_file(source_id, "Editors/The Back Room/01 Bones.m4a", Uuid::new_v4(), "hash-3", 100, 0)
+            .unwrap();
+        // ...and one unavailable file in the target folder, which must be excluded.
+        store
+            .upsert_source_file(source_id, "Beatles/1/03 She Loves You.m4a", Uuid::new_v4(), "hash-4", 100, 0)
+            .unwrap();
+        store
+            .connection
+            .lock()
+            .execute(
+                "UPDATE source_files SET available = 0 WHERE relative_path = 'Beatles/1/03 She Loves You.m4a'",
+                [],
+            )
+            .unwrap();
+
+        let members = store
+            .folder_members(&source_root.join("Beatles").join("1"))
+            .unwrap();
+
+        let mut hashes: Vec<_> = members.iter().map(|member| member.content_hash.clone()).collect();
+        hashes.sort();
+        assert_eq!(hashes, vec!["hash-1".to_string(), "hash-2".to_string()]);
+    }
+
+    #[test]
+    fn identification_result_returns_a_single_result_by_content_hash() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+
+        assert!(store.identification_result("hash-1").unwrap().is_none());
+        store
+            .put_identification_result(&IdentificationResult {
+                content_hash: "hash-1".into(),
+                title: Some("December".into()),
+                artist: Some("Neck Deep".into()),
+                album: Some("Life's Not Out to Get You".into()),
+                artwork_url: None,
+                musicbrainz_recording_id: Some("rec-1".into()),
+                acoustid_id: Some("ac-1".into()),
+                identified_at: 1_000,
+                resolution_source: None,
+                resolution_score: None,
+                resolution_generation: 0,
+                release_id: None,
+                release_group_id: None,
+            })
+            .unwrap();
+
+        let result = store.identification_result("hash-1").unwrap().unwrap();
+        assert_eq!(result.title.as_deref(), Some("December"));
+        assert_eq!(result.album.as_deref(), Some("Life's Not Out to Get You"));
+    }
+
+    #[test]
+    fn resolution_columns_round_trip() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+
+        store
+            .put_identification_result(&IdentificationResult {
+                content_hash: "hash-1".into(),
+                title: Some("December".into()),
+                artist: Some("Neck Deep".into()),
+                album: Some("Life's Not Out to Get You".into()),
+                artwork_url: None,
+                musicbrainz_recording_id: Some("rec-1".into()),
+                acoustid_id: Some("ac-1".into()),
+                identified_at: 1_000,
+                resolution_source: Some("group".into()),
+                resolution_score: Some(0.92),
+                resolution_generation: 3,
+                release_id: Some("release-1".into()),
+                release_group_id: Some("rg-1".into()),
+            })
+            .unwrap();
+
+        let result = store.identification_result("hash-1").unwrap().unwrap();
+        assert_eq!(result.resolution_source.as_deref(), Some("group"));
+        assert_eq!(result.resolution_score, Some(0.92));
+        assert_eq!(result.resolution_generation, 3);
+        assert_eq!(result.release_id.as_deref(), Some("release-1"));
+        assert_eq!(result.release_group_id.as_deref(), Some("rg-1"));
+    }
+
+    #[test]
+    fn identification_result_row_predating_resolution_columns_defaults_generation_to_zero() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+
+        // Simulates a row written before these columns existed.
+        store
+            .connection
+            .lock()
+            .execute(
+                r#"
+                INSERT INTO identification_results
+                    (content_hash, title, artist, album, artwork_url,
+                     musicbrainz_recording_id, acoustid_id, identified_at)
+                VALUES ('hash-legacy', 'Song', 'Artist', NULL, NULL, NULL, NULL, 1)
+                "#,
+                [],
+            )
+            .unwrap();
+
+        let result = store.identification_result("hash-legacy").unwrap().unwrap();
+        assert_eq!(result.resolution_generation, 0);
+        assert!(result.resolution_source.is_none());
+        assert!(result.resolution_score.is_none());
+    }
+
+    #[test]
+    fn folders_needing_reconcile_orders_by_member_count() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let source_id = Uuid::new_v4();
+        let source_root = directory.path().join("library");
+        store
+            .register_host_source(source_id, "Library", "managed", &source_root)
+            .unwrap();
+
+        let seed = |relative_path: &str, hash: &str, generation: i64| {
+            store
+                .upsert_source_file(source_id, relative_path, Uuid::new_v4(), hash, 100, 0)
+                .unwrap();
+            store
+                .put_identification_result(&IdentificationResult {
+                    content_hash: hash.into(),
+                    title: Some("Title".into()),
+                    artist: None,
+                    album: None,
+                    artwork_url: None,
+                    musicbrainz_recording_id: None,
+                    acoustid_id: None,
+                    identified_at: 1,
+                    resolution_source: Some("per_file".into()),
+                    resolution_score: None,
+                    resolution_generation: generation,
+                    release_id: None,
+                    release_group_id: None,
+                })
+                .unwrap();
+        };
+
+        // "Big" (3 members) and "Small" (1 member) both predate the current generation (0
+        // < 1); "Current" (2 members) is already at generation 1 and must not appear.
+        seed("Small/a.m4a", "s1", 0);
+        seed("Big/a.m4a", "b1", 0);
+        seed("Big/b.m4a", "b2", 0);
+        seed("Big/c.m4a", "b3", 0);
+        seed("Current/a.m4a", "c1", 1);
+        seed("Current/b.m4a", "c2", 1);
+
+        let folders = store.folders_needing_reconcile(1, 10).unwrap();
+
+        assert_eq!(folders.len(), 2);
+        assert_eq!(folders[0], source_root.join("Big"));
+        assert_eq!(folders[1], source_root.join("Small"));
+    }
+
+    #[test]
+    fn folders_needing_reconcile_respects_the_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let source_id = Uuid::new_v4();
+        let source_root = directory.path().join("library");
+        store
+            .register_host_source(source_id, "Library", "managed", &source_root)
+            .unwrap();
+
+        for folder in ["A", "B", "C", "D"] {
+            store
+                .upsert_source_file(source_id, &format!("{folder}/a.m4a"), Uuid::new_v4(), folder, 100, 0)
+                .unwrap();
+            store
+                .put_identification_result(&IdentificationResult {
+                    content_hash: folder.into(),
+                    title: Some("Title".into()),
+                    artist: None,
+                    album: None,
+                    artwork_url: None,
+                    musicbrainz_recording_id: None,
+                    acoustid_id: None,
+                    identified_at: 1,
+                    resolution_source: None,
+                    resolution_score: None,
+                    resolution_generation: 0,
+                    release_id: None,
+                    release_group_id: None,
+                })
+                .unwrap();
+        }
+
+        let folders = store.folders_needing_reconcile(1, 2).unwrap();
+        assert_eq!(folders.len(), 2);
+    }
+
+    /// Proves the reconcile sweep's termination guarantee directly at the store layer,
+    /// without needing the network-dependent `identify_group` path: touching every visited
+    /// file's generation (exactly what `aro_track_id::queue::reconcile_sweep` does after
+    /// processing a folder, regardless of whether `should_revise` actually rewrote
+    /// anything) removes that folder from `folders_needing_reconcile`'s result set for the
+    /// current generation — so a sweep can never see the same folder twice.
+    #[test]
+    fn touching_generation_removes_the_folder_from_future_reconcile_batches() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let source_id = Uuid::new_v4();
+        let source_root = directory.path().join("library");
+        store
+            .register_host_source(source_id, "Library", "managed", &source_root)
+            .unwrap();
+        store
+            .upsert_source_file(source_id, "Neck Deep/a.m4a", Uuid::new_v4(), "hash-1", 100, 0)
+            .unwrap();
+        store
+            .put_identification_result(&IdentificationResult {
+                content_hash: "hash-1".into(),
+                title: Some("December".into()),
+                artist: None,
+                album: None,
+                artwork_url: None,
+                musicbrainz_recording_id: None,
+                acoustid_id: None,
+                identified_at: 1,
+                resolution_source: Some("per_file".into()),
+                resolution_score: None,
+                resolution_generation: 0,
+                release_id: None,
+                release_group_id: None,
+            })
+            .unwrap();
+
+        assert_eq!(store.folders_needing_reconcile(1, 10).unwrap().len(), 1);
+
+        store.touch_identification_generation("hash-1", 1).unwrap();
+
+        assert!(store.folders_needing_reconcile(1, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn touch_identification_generation_never_regresses_an_already_advanced_row() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        store
+            .put_identification_result(&IdentificationResult {
+                content_hash: "hash-1".into(),
+                title: Some("Title".into()),
+                artist: None,
+                album: None,
+                artwork_url: None,
+                musicbrainz_recording_id: None,
+                acoustid_id: None,
+                identified_at: 1,
+                resolution_source: Some("group".into()),
+                resolution_score: Some(0.9),
+                resolution_generation: 5,
+                release_id: None,
+                release_group_id: None,
+            })
+            .unwrap();
+
+        // A lower/equal generation must never move the marker backwards.
+        store.touch_identification_generation("hash-1", 2).unwrap();
+        assert_eq!(
+            store.identification_result("hash-1").unwrap().unwrap().resolution_generation,
+            5
+        );
+
+        store.touch_identification_generation("hash-1", 7).unwrap();
+        assert_eq!(
+            store.identification_result("hash-1").unwrap().unwrap().resolution_generation,
+            7
+        );
+    }
+
+    #[test]
+    fn identification_cache_row_predating_schema_version_column_defaults_to_zero() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+
+        // Simulates a row written before this column existed: every other column but
+        // `schema_version`, which the migration's `DEFAULT 0` must supply on its own.
+        store
+            .connection
+            .lock()
+            .execute(
+                r#"
+                INSERT INTO identification_cache
+                    (fingerprint, acoustid_response, musicbrainz_response, created_at, refreshed_at)
+                VALUES ('fp-legacy', '{"status":"ok"}', '{"id":"mb-1"}', 1, 1)
+                "#,
+                [],
+            )
+            .unwrap();
+
+        let entry = store
+            .identification_cache_get("fp-legacy")
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.schema_version, 0);
     }
 
     #[test]
@@ -1944,5 +3078,190 @@ mod tests {
             store.commit_join(client_device, &commit),
             Err(StoreError::JoinPreviewNotFound)
         ));
+    }
+
+    #[test]
+    fn identification_cache_round_trips_and_track_metadata_is_readable() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let device_id = Uuid::new_v4();
+        let track_id = Uuid::new_v4();
+
+        assert!(store.identification_cache_get("fp-1").unwrap().is_none());
+        store
+            .identification_cache_put(
+                "fp-1",
+                Some(&serde_json::json!({"status": "ok"})),
+                Some(&serde_json::json!({"id": "mb-1"})),
+                3,
+            )
+            .unwrap();
+        let entry = store.identification_cache_get("fp-1").unwrap().unwrap();
+        assert_eq!(
+            entry.acoustid_response,
+            Some(serde_json::json!({"status": "ok"}))
+        );
+        assert_eq!(
+            entry.musicbrainz_response,
+            Some(serde_json::json!({"id": "mb-1"}))
+        );
+        assert_eq!(entry.schema_version, 3);
+
+        assert!(store.track_metadata(track_id).unwrap().is_none());
+        let timestamp = HybridTimestamp {
+            physical_millis: 1,
+            logical: 0,
+            device_id,
+        };
+        store
+            .append_operations(&[Operation {
+                operation_id: Uuid::new_v4(),
+                device_id,
+                entity_type: "track".into(),
+                entity_id: track_id.to_string(),
+                kind: "upsert".into(),
+                payload: serde_json::json!({"title": "Song"}),
+                field_versions: BTreeMap::from([("title".into(), timestamp)]),
+            }])
+            .unwrap();
+        let metadata = store.track_metadata(track_id).unwrap().unwrap();
+        assert_eq!(metadata.get("title"), Some(&Value::String("Song".into())));
+
+        // No source_files row exists for this track, so it isn't reachable on disk.
+        assert!(store.live_path_for_track(track_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn release_group_affinity_tallies_survive_restart_and_are_scoped_per_artist() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+
+        assert!(
+            store
+                .release_group_affinity("neck deep")
+                .unwrap()
+                .is_empty()
+        );
+
+        store
+            .record_release_group_choice(
+                "neck deep",
+                "rg-real-album",
+                Some("Life's Not Out to Get You"),
+            )
+            .unwrap();
+        store
+            .record_release_group_choice(
+                "neck deep",
+                "rg-real-album",
+                Some("Life's Not Out to Get You"),
+            )
+            .unwrap();
+        store
+            .record_release_group_choice("the beatles", "rg-one", Some("1"))
+            .unwrap();
+
+        let neck_deep = store.release_group_affinity("neck deep").unwrap();
+        assert_eq!(neck_deep.get("rg-real-album"), Some(&2));
+        assert_eq!(neck_deep.len(), 1);
+
+        // Scoped per artist: the Beatles tally never shows up for Neck Deep and
+        // vice versa.
+        let beatles = store.release_group_affinity("the beatles").unwrap();
+        assert_eq!(beatles.get("rg-one"), Some(&1));
+
+        drop(store);
+        let reopened = HubStore::open(directory.path()).unwrap();
+        assert_eq!(
+            reopened
+                .release_group_affinity("neck deep")
+                .unwrap()
+                .get("rg-real-album"),
+            Some(&2)
+        );
+    }
+
+    #[test]
+    fn identification_results_are_keyed_by_content_hash_and_pullable_since_a_cursor() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+
+        assert!(!store.has_identification_result("hash-a").unwrap());
+        assert!(
+            store
+                .identification_results_since(0, 10)
+                .unwrap()
+                .is_empty()
+        );
+
+        store
+            .put_identification_result(&IdentificationResult {
+                content_hash: "hash-a".into(),
+                title: Some("Song A".into()),
+                artist: Some("Artist A".into()),
+                album: None,
+                artwork_url: None,
+                musicbrainz_recording_id: Some("mb-a".into()),
+                acoustid_id: Some("ac-a".into()),
+                identified_at: 100,
+                resolution_source: None,
+                resolution_score: None,
+                resolution_generation: 0,
+                release_id: None,
+                release_group_id: None,
+            })
+            .unwrap();
+        assert!(store.has_identification_result("hash-a").unwrap());
+
+        store
+            .put_identification_result(&IdentificationResult {
+                content_hash: "hash-b".into(),
+                title: Some("Song B".into()),
+                artist: None,
+                album: None,
+                artwork_url: None,
+                musicbrainz_recording_id: None,
+                acoustid_id: Some("ac-b".into()),
+                identified_at: 200,
+                resolution_source: None,
+                resolution_score: None,
+                resolution_generation: 0,
+                release_id: None,
+                release_group_id: None,
+            })
+            .unwrap();
+
+        let all = store.identification_results_since(0, 10).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].content_hash, "hash-a");
+        assert_eq!(all[1].content_hash, "hash-b");
+
+        let since_a = store.identification_results_since(100, 10).unwrap();
+        assert_eq!(since_a.len(), 1);
+        assert_eq!(since_a[0].content_hash, "hash-b");
+
+        // Re-identifying the same hash updates in place rather than duplicating.
+        store
+            .put_identification_result(&IdentificationResult {
+                content_hash: "hash-a".into(),
+                title: Some("Song A (corrected)".into()),
+                artist: Some("Artist A".into()),
+                album: Some("Album A".into()),
+                artwork_url: None,
+                musicbrainz_recording_id: Some("mb-a".into()),
+                acoustid_id: Some("ac-a".into()),
+                identified_at: 300,
+                resolution_source: None,
+                resolution_score: None,
+                resolution_generation: 0,
+                release_id: None,
+                release_group_id: None,
+            })
+            .unwrap();
+        let all = store.identification_results_since(0, 10).unwrap();
+        assert_eq!(all.len(), 2);
+        let updated = all.iter().find(|r| r.content_hash == "hash-a").unwrap();
+        assert_eq!(updated.title.as_deref(), Some("Song A (corrected)"));
+        assert_eq!(updated.album.as_deref(), Some("Album A"));
     }
 }

@@ -60,6 +60,7 @@ public enum LibraryHealthRecommendationKind: String, Sendable {
     case alternateEncoding
     case moved
     case missing
+    case fragmentedFolder
 }
 
 public struct LibraryHealthRecommendation:
@@ -102,6 +103,9 @@ public struct LibraryHealthTrack: Sendable {
     public let contentHash: String?
     public let title: String
     public let artist: String
+    /// `nil` when identification hasn't resolved an album for this track yet — treated as
+    /// "no signal" by folder-fragmentation analysis, not as its own distinct album value.
+    public let album: String?
     public let duration: TimeInterval?
     public let copies: [LibraryHealthCopy]
 
@@ -110,6 +114,7 @@ public struct LibraryHealthTrack: Sendable {
         contentHash: String?,
         title: String,
         artist: String,
+        album: String? = nil,
         duration: TimeInterval?,
         copies: [LibraryHealthCopy]
     ) {
@@ -117,6 +122,7 @@ public struct LibraryHealthTrack: Sendable {
         self.contentHash = contentHash
         self.title = title
         self.artist = artist
+        self.album = album
         self.duration = duration
         self.copies = copies
     }
@@ -127,17 +133,20 @@ public struct LibraryHealthReport: Sendable {
     public var alternateEncodings: [LibraryHealthRecommendation]
     public var movedFiles: [LibraryHealthRecommendation]
     public var missingFiles: [LibraryHealthRecommendation]
+    public var fragmentedFolders: [LibraryHealthRecommendation]
 
     public init(
         exactDuplicates: [LibraryHealthRecommendation] = [],
         alternateEncodings: [LibraryHealthRecommendation] = [],
         movedFiles: [LibraryHealthRecommendation] = [],
-        missingFiles: [LibraryHealthRecommendation] = []
+        missingFiles: [LibraryHealthRecommendation] = [],
+        fragmentedFolders: [LibraryHealthRecommendation] = []
     ) {
         self.exactDuplicates = exactDuplicates
         self.alternateEncodings = alternateEncodings
         self.movedFiles = movedFiles
         self.missingFiles = missingFiles
+        self.fragmentedFolders = fragmentedFolders
     }
 
     public var recommendationCount: Int {
@@ -145,6 +154,7 @@ public struct LibraryHealthReport: Sendable {
             + alternateEncodings.count
             + movedFiles.count
             + missingFiles.count
+            + fragmentedFolders.count
     }
 
     public var exactReclaimableBytes: Int64 {
@@ -161,6 +171,7 @@ public struct LibraryHealthAnalyzer: Sendable {
         var report = LibraryHealthReport()
         classifyLocations(in: tracks, into: &report)
         classifyAlternateEncodings(in: tracks, into: &report)
+        classifyFragmentedFolders(in: tracks, into: &report)
         sortRecommendations(in: &report)
         return report
     }
@@ -306,6 +317,76 @@ public struct LibraryHealthAnalyzer: Sendable {
         )
     }
 
+    /// Flags a folder whose available copies span several distinct albums — grouped by
+    /// **containing folder**, not by artist, since an artist can legitimately own several
+    /// albums (each in its own folder) without that being a problem; a folder splitting
+    /// across several album values, on the other hand, means identification hasn't
+    /// converged for a single physical rip. Iterates copies rather than tracks because a
+    /// track's several copies can live in different folders, and folder membership is a
+    /// property of the copy's path, not the track.
+    private func classifyFragmentedFolders(
+        in tracks: [LibraryHealthTrack],
+        into report: inout LibraryHealthReport
+    ) {
+        struct Entry {
+            let album: String?
+            let artist: String
+        }
+
+        var byFolder: [String: [Entry]] = [:]
+        for track in tracks {
+            for copy in track.copies where copy.isAvailable {
+                let folder = (copy.path as NSString).deletingLastPathComponent
+                byFolder[folder, default: []].append(
+                    Entry(album: track.album, artist: track.artist)
+                )
+            }
+        }
+
+        for (folder, entries) in byFolder
+        where entries.count >= Self.minTracksForFragmentedFolder {
+            let normalizedAlbums = Set(
+                entries.compactMap { entry -> String? in
+                    guard let album = entry.album else { return nil }
+                    let normalized = normalizedMetadata(album)
+                    return normalized.isEmpty ? nil : normalized
+                }
+            )
+            guard normalizedAlbums.count >= Self.minAlbumsForFragmentedFolder else {
+                continue
+            }
+
+            let displayAlbums = Set(entries.compactMap(\.album)).sorted {
+                $0.localizedStandardCompare($1) == .orderedAscending
+            }
+            let dominantArtist =
+                Dictionary(grouping: entries, by: \.artist)
+                .max { $0.value.count < $1.value.count }?
+                .key ?? "Unknown Artist"
+
+            report.fragmentedFolders.append(
+                LibraryHealthRecommendation(
+                    id: "fragmented:\(folder)",
+                    kind: .fragmentedFolder,
+                    title: (folder as NSString).lastPathComponent,
+                    artist: dominantArtist,
+                    reason:
+                        "\(entries.count) tracks span \(normalizedAlbums.count) albums: \(displayAlbums.joined(separator: ", ")).",
+                    copies: [],
+                    preferredCopyID: nil,
+                    potentialSavingsBytes: 0
+                )
+            )
+        }
+    }
+
+    /// A folder needs at least this many available copies before it's worth judging for
+    /// album fragmentation at all — a couple of stray files isn't a meaningful signal.
+    private static let minTracksForFragmentedFolder = 4
+    /// A folder spanning fewer distinct albums than this is normal, not fragmented — `1`
+    /// (fully converged) is the success case this check exists to detect regressions from.
+    private static let minAlbumsForFragmentedFolder = 2
+
     private func metadataKey(title: String, artist: String) -> String {
         let unknown = ["", "unknown track", "unknown artist"]
         let normalizedTitle = normalizedMetadata(title)
@@ -335,6 +416,7 @@ public struct LibraryHealthAnalyzer: Sendable {
         report.alternateEncodings.sort(by: recommendationSort)
         report.movedFiles.sort(by: recommendationSort)
         report.missingFiles.sort(by: recommendationSort)
+        report.fragmentedFolders.sort(by: recommendationSort)
     }
 
     private func recommendationSort(
@@ -366,7 +448,14 @@ public struct ReviewLibraryHealth: Sendable {
         self.analyzer = analyzer
     }
 
-    public func execute() -> LibraryHealthReport {
-        analyzer.analyze(tracks.libraryHealthTracks())
+    /// Runs the underlying (synchronous, SQLite-backed) query and analysis
+    /// off the calling actor, so repeated callers such as a UI polling loop
+    /// don't block the main thread.
+    public func execute() async -> LibraryHealthReport {
+        let tracks = tracks
+        let analyzer = analyzer
+        return await Task.detached(priority: .utility) {
+            analyzer.analyze(tracks.libraryHealthTracks())
+        }.value
     }
 }

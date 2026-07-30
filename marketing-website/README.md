@@ -2,7 +2,7 @@
 
 The single-page Aro product site is generated from the audited
 [`features.md`](../features.md) catalogue. It is a static Next.js export hosted
-at [imjacobclark.github.io/aro](https://imjacobclark.github.io/aro/).
+at [listenaro.xyz](https://listenaro.xyz/).
 
 ## Work locally
 
@@ -21,5 +21,5 @@ The production site is built after a successful `Development Release`. That
 workflow passes the new semantic version and exact Apple Silicon/Intel release
 asset URLs into the static build before deploying it to GitHub Pages.
 
-For a production-shaped local export, set `NEXT_PUBLIC_BASE_PATH=/aro` before
-running `npm run build`.
+The production export is built for the root of `listenaro.xyz`; no base path is
+required.

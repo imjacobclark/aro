@@ -37,6 +37,7 @@ struct SQLiteLibraryHealthTrackQuery: LibraryHealthTrackQuerying {
                             'Unknown Track'),
                    COALESCE(NULLIF(ts.artist_override, ''), sm.artist,
                             'Unknown Artist'),
+                   sm.album,
                    sm.duration, l.path, l.available,
                    COALESCE(l.file_size, 0),
                    COALESCE(sm.codec, 'Unknown'),
@@ -67,7 +68,7 @@ struct SQLiteLibraryHealthTrackQuery: LibraryHealthTrackQuerying {
         var records: [String: LibraryHealthTrackRecord] = [:]
         while sqlite3_step(statement) == SQLITE_ROW {
             guard let id = text(statement, 0),
-                let path = text(statement, 5)
+                let path = text(statement, 6)
             else {
                 continue
             }
@@ -77,7 +78,8 @@ struct SQLiteLibraryHealthTrackQuery: LibraryHealthTrackQuerying {
                     contentHash: text(statement, 1),
                     title: text(statement, 2),
                     artist: text(statement, 3),
-                    duration: optionalDouble(statement, 4),
+                    album: text(statement, 4),
+                    duration: optionalDouble(statement, 5),
                     copies: []
                 )
             }
@@ -85,12 +87,12 @@ struct SQLiteLibraryHealthTrackQuery: LibraryHealthTrackQuerying {
                 LibraryHealthCopyRecord(
                     path: path,
                     isAvailable:
-                        sqlite3_column_int(statement, 6) != 0,
-                    codec: text(statement, 8),
-                    sampleRate: optionalDouble(statement, 9),
-                    bitDepth: optionalInt(statement, 10),
-                    bitrate: optionalDouble(statement, 11),
-                    fileSizeBytes: sqlite3_column_int64(statement, 7)
+                        sqlite3_column_int(statement, 7) != 0,
+                    codec: text(statement, 9),
+                    sampleRate: optionalDouble(statement, 10),
+                    bitDepth: optionalInt(statement, 11),
+                    bitrate: optionalDouble(statement, 12),
+                    fileSizeBytes: sqlite3_column_int64(statement, 8)
                 )
             )
         }

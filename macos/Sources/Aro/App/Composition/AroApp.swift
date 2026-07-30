@@ -12,6 +12,7 @@ struct AroApp: App {
     @State private var audioDeviceManager: AudioDeviceManager
     @State private var hubService = AroHubService()
     @State private var syncPreferences: SyncPreferences
+    @State private var nowPlayingCoordinator: NowPlayingCoordinator
 
     init() {
         do {
@@ -85,8 +86,11 @@ struct AroApp: App {
             }
         )
         if !registry.isConfigured {
-            runtime.libraryStore.selection = .devices
+            runtime.libraryStore.selection = .settings
         }
+        let nowPlayingCoordinator = NowPlayingCoordinator()
+        nowPlayingCoordinator.rebind(to: runtime.playbackController)
+        _nowPlayingCoordinator = State(initialValue: nowPlayingCoordinator)
         _runtime = State(initialValue: runtime)
         _profileRegistry = State(initialValue: registry)
     }
@@ -102,12 +106,14 @@ struct AroApp: App {
                 hubService: hubService,
                 syncPreferences: syncPreferences,
                 mediaCache: runtime.mediaCacheController,
+                libraryFiles: runtime.libraryFileManager,
                 reviewLibraryHealth: runtime.reviewLibraryHealth,
                 loadStatsDashboard: runtime.loadStatsDashboard,
                 syncStore: runtime.syncOperationStore,
-                libraryFiles: runtime.libraryFileManager,
                 removeSong: removeSong,
+                setSongFavourite: setSongFavourite,
                 activateProfile: activateProfile,
+                forgetProfile: forgetProfile,
                 completeRemoteConnection: completeRemoteConnection
             )
             .id(ObjectIdentifier(runtime))
@@ -123,35 +129,27 @@ struct AroApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
         .defaultSize(width: 900, height: 600)
+        .commands {
+            CommandMenu("Playback") {
+                Button(
+                    runtime.playbackController.isPlaying ? "Pause" : "Play"
+                ) {
+                    runtime.playbackController.togglePlayPause()
+                }
+                .disabled(!runtime.playbackController.canTogglePlayback)
 
-        Settings {
-            TabView {
-                Tab("Playback", systemImage: "speaker.wave.2") {
-                    PlaybackSettingsView(
-                        preferences: playbackPreferences,
-                        deviceManager: audioDeviceManager,
-                        playback: runtime.playbackController,
-                        libraryFileManager: runtime.libraryFileManager
-                    )
-                    .id(ObjectIdentifier(runtime.playbackController))
+                Button("Next") {
+                    runtime.playbackController.next()
                 }
-                Tab("Devices", systemImage: "macbook.and.iphone") {
-                    SyncSettingsView(
-                        service: hubService,
-                        preferences: syncPreferences,
-                        mediaCache: runtime.mediaCacheController,
-                        syncStore: runtime.syncOperationStore,
-                        libraryFiles: runtime.libraryFileManager,
-                        activeProfile: profileRegistry.activeProfile,
-                        registry: profileRegistry,
-                        activateProfile: activateProfile
-                    )
-                    .id(ObjectIdentifier(runtime))
+                .disabled(!runtime.playbackController.canGoNext)
+
+                Button("Previous") {
+                    runtime.playbackController.previous()
                 }
+                .disabled(!runtime.playbackController.canGoPrevious)
             }
-            .font(AroFont.body)
-            .tint(AroTheme.violet)
         }
+
     }
 
     private func activateProfile(_ profile: LibraryProfile) {
@@ -175,8 +173,9 @@ struct AroApp: App {
         for path in initialPaths {
             replacement.libraryStore.addFolder(URL(fileURLWithPath: path))
         }
-        replacement.libraryStore.selection = .devices
+        replacement.libraryStore.selection = .settings
         runtime = replacement
+        nowPlayingCoordinator.rebind(to: replacement.playbackController)
         if profile.kind == .local, profile.sharingEnabled {
             if syncPreferences.dataLocation.isEmpty {
                 syncPreferences.dataLocation =
@@ -184,6 +183,38 @@ struct AroApp: App {
             }
             hubService.setEnabled(true)
         }
+    }
+
+    /// Client-only action: disconnects this Mac from a remote library it
+    /// doesn't host, deleting the local (disposable) replica database, media
+    /// cache, and pairing credential. Never touches the remote server — see
+    /// the app's "remote libraries are canonical, local client data is
+    /// disposable" philosophy. Local (`.kind == .local`) profiles are hosted
+    /// here, not just cached, so they're intentionally not eligible.
+    private func forgetProfile(_ profile: LibraryProfile) {
+        guard profile.kind == .remote else { return }
+
+        if profile.id == profileRegistry.activeProfileID {
+            // The active profile's database is open via `runtime`; switch
+            // away first so that connection closes before its file is
+            // deleted below. If there's nothing else to switch to, the
+            // Settings UI is expected to have disabled this action.
+            let fallback = profileRegistry.profiles.first {
+                $0.id != profile.id && $0.kind == .local
+            } ?? profileRegistry.profiles
+                .filter { $0.id != profile.id }
+                .max { $0.lastActivatedAt < $1.lastActivatedAt }
+            guard let fallback else { return }
+            activateProfile(fallback)
+        }
+
+        try? FileManager.default.removeItem(
+            at: LibraryProfileRegistry.profileDirectory(profileID: profile.id)
+        )
+        if let hubID = profile.hubID {
+            try? FileHubCredentialStore().remove(hubID: hubID)
+        }
+        profileRegistry.remove(profile.id)
     }
 
     private func completeRemoteConnection(
@@ -244,5 +275,15 @@ struct AroApp: App {
             }
         }
         try runtime.removeFromLibrary(trackID: song.libraryID)
+    }
+
+    private func setSongFavourite(
+        _ song: Song,
+        _ favourite: Bool
+    ) async throws {
+        try await runtime.setFavourite(
+            trackID: song.libraryID,
+            favourite: favourite
+        )
     }
 }

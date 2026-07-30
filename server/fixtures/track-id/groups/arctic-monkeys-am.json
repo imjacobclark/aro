@@ -1,0 +1,205 @@
+{
+  "folder": "Arctic Monkeys/AM",
+  "files": [
+    {
+      "file_name": "01 - Do I Wanna Know_.mp3",
+      "content_hash": "c44a940fe46f1809",
+      "duration_secs": 272,
+      "tag_title": "Do I Wanna Know_",
+      "tag_track_number": 1,
+      "candidate_recording_ids": [
+        "30e5ac2d-7d1e-439f-985f-323323055edb",
+        "47bc1682-b135-4bb6-80ef-4384d37dfe48",
+        "8932034a-2616-4b70-8e26-f4e0b0a26f46",
+        "8c43596e-286e-4a4d-a11c-818fcc120866",
+        "98c2b337-e12e-4a1f-b8ba-9d67e6a70d04",
+        "a9c2d0db-af99-4d8f-92d2-8d307022c3ec",
+        "b6912b63-297b-4023-8ec9-0b3d8d2d31b3",
+        "bcd76742-3f6a-4862-9f51-3a893e11554b",
+        "f1e57531-e0df-4b3e-938f-1ae30c5b1a11"
+      ],
+      "observed_album_before": "AM",
+      "resolved_artist_before": "Arctic Monkeys",
+      "resolved_album_before": "AM",
+      "previously_chosen_recording_id": "8932034a-2616-4b70-8e26-f4e0b0a26f46"
+    },
+    {
+      "file_name": "02 - R U Mine_.mp3",
+      "content_hash": "1f0c5add03bef983",
+      "duration_secs": 201,
+      "tag_title": "R U Mine_",
+      "tag_track_number": 2,
+      "candidate_recording_ids": [
+        "5e751612-3c91-445d-843e-139caf7a3236",
+        "adadc047-e040-45d5-b020-0603db0d69dc",
+        "c99bc041-5d23-4a8e-a767-7c7847d24896",
+        "d87c479f-7430-4311-b4b5-c031dcb824cd",
+        "db0495d3-5c00-4016-9e4a-4216e54a4377"
+      ],
+      "observed_album_before": "AM",
+      "resolved_artist_before": "Arctic Monkeys",
+      "resolved_album_before": "AM",
+      "previously_chosen_recording_id": "c99bc041-5d23-4a8e-a767-7c7847d24896"
+    },
+    {
+      "file_name": "03 - One For The Road.mp3",
+      "content_hash": "a9a335a3211d696b",
+      "duration_secs": 206,
+      "tag_title": "One For The Road",
+      "tag_track_number": 3,
+      "candidate_recording_ids": [
+        "42f81b9d-4b96-4480-ab22-31ab3d602d42",
+        "90911acf-1dc2-4416-9929-e72309817eb3",
+        "b3c8270b-5153-4ae6-8e64-ee0183db24c0"
+      ],
+      "observed_album_before": "AM",
+      "resolved_artist_before": "Arctic Monkeys",
+      "resolved_album_before": "AM",
+      "previously_chosen_recording_id": "42f81b9d-4b96-4480-ab22-31ab3d602d42"
+    },
+    {
+      "file_name": "04 - Arabella.mp3",
+      "content_hash": "4d61fbf0c3d2f040",
+      "duration_secs": 207,
+      "tag_title": "Arabella",
+      "tag_track_number": 4,
+      "candidate_recording_ids": [
+        "36569a1a-55c5-4bc4-ae12-46e49df94921",
+        "40b7bb8d-35a3-4a9b-bfd1-7174872f7e36",
+        "f7ea0f9e-18dc-4bf8-8c19-9d4ab3b01293"
+      ],
+      "observed_album_before": "AM",
+      "resolved_artist_before": "Arctic Monkeys",
+      "resolved_album_before": "AM",
+      "previously_chosen_recording_id": "36569a1a-55c5-4bc4-ae12-46e49df94921"
+    },
+    {
+      "file_name": "05 - I Want It All.mp3",
+      "content_hash": "c5b95ae0c02a459e",
+      "duration_secs": 185,
+      "tag_title": "I Want It All",
+      "tag_track_number": 5,
+      "candidate_recording_ids": [
+        "85bad389-8d14-48f4-b007-28841f7d267b",
+        "86c8c108-a134-467e-ab0f-4f867c2acfac"
+      ],
+      "observed_album_before": "AM",
+      "resolved_artist_before": "Arctic Monkeys",
+      "resolved_album_before": "AM",
+      "previously_chosen_recording_id": "85bad389-8d14-48f4-b007-28841f7d267b"
+    },
+    {
+      "file_name": "06 - No. 1 Party Anthem.mp3",
+      "content_hash": "476b1da599157d04",
+      "duration_secs": 243,
+      "tag_title": "No. 1 Party Anthem",
+      "tag_track_number": 6,
+      "candidate_recording_ids": [
+        "0f4411c5-004b-4b09-83c9-b38f64b2253b",
+        "52ba3e3d-157f-400a-a603-6fb00ba3968c",
+        "9bce391b-2d27-4751-9959-df3f632eb141",
+        "e811575d-6d5f-4d20-9d4e-d05f01c5f7d5"
+      ],
+      "observed_album_before": "AM",
+      "resolved_artist_before": "Arctic Monkeys",
+      "resolved_album_before": "AM",
+      "previously_chosen_recording_id": "e811575d-6d5f-4d20-9d4e-d05f01c5f7d5"
+    },
+    {
+      "file_name": "07 - Mad Sounds.mp3",
+      "content_hash": "09db9ebec4c9f3ec",
+      "duration_secs": 215,
+      "tag_title": "Mad Sounds",
+      "tag_track_number": 7,
+      "candidate_recording_ids": [
+        "bfa5df7c-ce85-4738-bc38-fd6fa7873337",
+        "eaa22014-18b8-4de2-8383-f69ee50c6a2f"
+      ],
+      "observed_album_before": "AM",
+      "resolved_artist_before": "Arctic Monkeys",
+      "resolved_album_before": "AM",
+      "previously_chosen_recording_id": "bfa5df7c-ce85-4738-bc38-fd6fa7873337"
+    },
+    {
+      "file_name": "08 - Fireside.mp3",
+      "content_hash": "b044e10bf92321cc",
+      "duration_secs": 181,
+      "tag_title": "Fireside",
+      "tag_track_number": 8,
+      "candidate_recording_ids": [
+        "4c986184-424a-44bb-ad23-b6261f3d044f",
+        "50992b0a-3edd-41af-98dc-bfaa931a01df",
+        "8b748c98-ce3d-4f18-8ead-5d3310bda6ef",
+        "c4966fc1-b06e-46ba-a070-9c6cec0d9053"
+      ],
+      "observed_album_before": "AM",
+      "resolved_artist_before": "Arctic Monkeys",
+      "resolved_album_before": "AM",
+      "previously_chosen_recording_id": "50992b0a-3edd-41af-98dc-bfaa931a01df"
+    },
+    {
+      "file_name": "09 - Why'd You Only Call Me When You're High_.mp3",
+      "content_hash": "5ef09571271e7c82",
+      "duration_secs": 161,
+      "tag_title": "Why'd You Only Call Me When You're High_",
+      "tag_track_number": 9,
+      "candidate_recording_ids": [
+        "4c986184-424a-44bb-ad23-b6261f3d044f",
+        "bbff010b-872f-4a63-813c-dab02478c272",
+        "c078009c-d983-4964-862a-dc0f51db846f",
+        "cc5c491e-8e84-4b6f-bed4-3dffe512aafd"
+      ],
+      "observed_album_before": "AM",
+      "resolved_artist_before": "Arctic Monkeys",
+      "resolved_album_before": "AM",
+      "previously_chosen_recording_id": "bbff010b-872f-4a63-813c-dab02478c272"
+    },
+    {
+      "file_name": "10 - Snap Out Of It.mp3",
+      "content_hash": "937f7a78b00489db",
+      "duration_secs": 193,
+      "tag_title": "Snap Out Of It",
+      "tag_track_number": 10,
+      "candidate_recording_ids": [
+        "7a6420ce-876a-4e76-a751-f62f4af61899",
+        "80b763b1-1e3e-4976-80ab-8f4213ba67c1",
+        "adadc047-e040-45d5-b020-0603db0d69dc"
+      ],
+      "observed_album_before": "AM",
+      "resolved_artist_before": "Arctic Monkeys",
+      "resolved_album_before": "AM",
+      "previously_chosen_recording_id": "7a6420ce-876a-4e76-a751-f62f4af61899"
+    },
+    {
+      "file_name": "11 - Knee Socks.mp3",
+      "content_hash": "fb7a4b9ead41c391",
+      "duration_secs": 257,
+      "tag_title": "Knee Socks",
+      "tag_track_number": 11,
+      "candidate_recording_ids": [
+        "bc40c6f2-bf3b-43e9-a4fe-fb8c938fab66",
+        "e756875e-cc4f-4744-a7b8-c68ee96978fb"
+      ],
+      "observed_album_before": "AM",
+      "resolved_artist_before": "Arctic Monkeys",
+      "resolved_album_before": "AM",
+      "previously_chosen_recording_id": "bc40c6f2-bf3b-43e9-a4fe-fb8c938fab66"
+    },
+    {
+      "file_name": "12 - I Wanna Be Yours.mp3",
+      "content_hash": "160fa57dd33598d4",
+      "duration_secs": 184,
+      "tag_title": "I Wanna Be Yours",
+      "tag_track_number": 12,
+      "candidate_recording_ids": [
+        "005851bf-cf4c-4efa-baab-7f62792bfbc6",
+        "a1ff202f-f271-4646-9aac-ba7c98e3a50c"
+      ],
+      "observed_album_before": "AM",
+      "resolved_artist_before": "Arctic Monkeys",
+      "resolved_album_before": "AM",
+      "previously_chosen_recording_id": "005851bf-cf4c-4efa-baab-7f62792bfbc6"
+    }
+  ],
+  "note": "file_name/tag_title/tag_track_number are parsed from the real relative_path (independent ground truth). duration_secs and candidate_recording_ids come from the real fingerprint/AcoustID data (independent ground truth). resolved_artist_before/resolved_album_before/previously_chosen_recording_id/observed_album_before reflect the PRIOR per-file pipeline's already-computed identification result -- NOT the file's original embedded tag -- and must not be fed into match scoring as if they were independent evidence."
+}

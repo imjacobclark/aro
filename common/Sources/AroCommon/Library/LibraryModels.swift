@@ -1,7 +1,10 @@
 import Foundation
 
 public struct LoudnessAnalysis: Hashable, Codable, Sendable {
+    /// Legacy macOS ReplayGain-derived measurement used for local files.
     public static let algorithmVersion = 1
+    /// Authoritative BS.1770 measurement produced by an Aro hub.
+    public static let remoteAlgorithmVersion = 2
 
     public let integratedLUFS: Double
     public let peakAmplitude: Double
@@ -93,6 +96,13 @@ public struct Song: Identifiable, Hashable, Sendable {
     public let fileSizeBytes: Int64?
     public let audioProperties: AudioFileProperties?
     public let fileFingerprint: AudioFileFingerprint?
+    /// The file's content hash, independent of `fileFingerprint`. `fileFingerprint`
+    /// is `nil` unless *both* file size and modification date resolved (it exists
+    /// for change-detection, which genuinely needs all three); callers that only need
+    /// the hash — e.g. addressing a file for background identification — shouldn't
+    /// lose it just because one of those two lookups failed.
+    public let contentHash: String?
+    public let isFavourite: Bool
     public var loudness: LoudnessAnalysis?
 
     public init(
@@ -108,6 +118,8 @@ public struct Song: Identifiable, Hashable, Sendable {
         fileSizeBytes: Int64? = nil,
         audioProperties: AudioFileProperties? = nil,
         fileFingerprint: AudioFileFingerprint? = nil,
+        contentHash: String? = nil,
+        isFavourite: Bool = false,
         loudness: LoudnessAnalysis? = nil
     ) {
         self.libraryID = libraryID
@@ -122,6 +134,8 @@ public struct Song: Identifiable, Hashable, Sendable {
         self.fileSizeBytes = fileSizeBytes
         self.audioProperties = audioProperties
         self.fileFingerprint = fileFingerprint
+        self.contentHash = contentHash ?? fileFingerprint?.contentHash
+        self.isFavourite = isFavourite
         self.loudness = loudness
     }
 
@@ -143,6 +157,8 @@ public struct Song: Identifiable, Hashable, Sendable {
             fileSizeBytes: fileSizeBytes,
             audioProperties: audioProperties,
             fileFingerprint: fileFingerprint,
+            contentHash: contentHash,
+            isFavourite: isFavourite,
             loudness: loudness
         )
     }

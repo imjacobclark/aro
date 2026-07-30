@@ -192,15 +192,22 @@ public struct LoadStatsDashboard: Sendable {
         self.streakCalculator = streakCalculator
     }
 
-    public func execute(now: Date = Date()) -> StatsDashboard {
-        var listening = stats.listeningStats(now: now)
-        listening.currentStreak = streakCalculator.streak(
-            for: listening.daily.filter { $0.seconds > 0 }.map(\.date),
-            now: now
-        )
-        return StatsDashboard(
-            listening: listening,
-            library: stats.libraryStats()
-        )
+    /// Runs the underlying (synchronous, SQLite-backed) queries off the
+    /// calling actor, so repeated callers such as a UI polling loop don't
+    /// block the main thread.
+    public func execute(now: Date = Date()) async -> StatsDashboard {
+        let stats = stats
+        let streakCalculator = streakCalculator
+        return await Task.detached(priority: .utility) {
+            var listening = stats.listeningStats(now: now)
+            listening.currentStreak = streakCalculator.streak(
+                for: listening.daily.filter { $0.seconds > 0 }.map(\.date),
+                now: now
+            )
+            return StatsDashboard(
+                listening: listening,
+                library: stats.libraryStats()
+            )
+        }.value
     }
 }

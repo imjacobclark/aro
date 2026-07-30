@@ -32,17 +32,30 @@ actor AroLibraryExporter {
     private let client: AroSyncClient
     private let credential: HubDeviceCredential?
     private let fileManager = FileManager.default
+    // Fallback source used when the library host can't be reached. A
+    // Resilient (full-library) profile already mirrors every track's bytes
+    // locally, so export shouldn't have to depend on the host being alive —
+    // only the manifest and any not-yet-cached bytes do.
+    private let localSongs: [Song]
+    private let localMediaCache: SQLiteMediaCache?
 
-    init(client: AroSyncClient, credential: HubDeviceCredential?) {
+    init(
+        client: AroSyncClient,
+        credential: HubDeviceCredential?,
+        localSongs: [Song] = [],
+        localMediaCache: SQLiteMediaCache? = nil
+    ) {
         self.client = client
         self.credential = credential
+        self.localSongs = localSongs
+        self.localMediaCache = localMediaCache
     }
 
     func export(
         to destination: URL,
         progress: @escaping @Sendable (LibraryExportProgress) async -> Void
     ) async throws -> LibraryExportResult {
-        let manifest = try await client.exportManifest(credential: credential)
+        let manifest = try await resolvedManifest()
         let root = destination.appendingPathComponent(
             "aro-library",
             isDirectory: true
@@ -103,29 +116,79 @@ actor AroLibraryExporter {
         )
     }
 
+    /// Prefers the host's manifest when reachable (it carries richer
+    /// metadata, e.g. track/disc numbers, than the local library alone).
+    /// Falls back to a manifest built from the local library so export
+    /// still works with the host offline, provided this device has its own
+    /// copy of the songs to draw from.
+    private func resolvedManifest() async throws -> AroExportManifest {
+        do {
+            return try await client.exportManifest(credential: credential)
+        } catch {
+            guard !localSongs.isEmpty else {
+                throw error
+            }
+            return localManifest()
+        }
+    }
+
+    private func localManifest() -> AroExportManifest {
+        let tracks = localSongs.compactMap { song -> AroExportTrack? in
+            guard let hash = song.fileFingerprint?.contentHash,
+                  let byteCount = song.fileSizeBytes else {
+                return nil
+            }
+            return AroExportTrack(
+                trackID: song.libraryID,
+                contentHash: hash,
+                byteCount: UInt64(byteCount),
+                title: song.title,
+                artist: song.artist,
+                album: song.album,
+                trackNumber: nil,
+                discNumber: nil,
+                originalFilename: song.url.lastPathComponent,
+                originalExtension: song.url.pathExtension,
+                removedAt: nil
+            )
+        }
+        return AroExportManifest(
+            schemaVersion: 1,
+            libraryName: "Library",
+            generatedAt: Date(),
+            tracks: tracks
+        )
+    }
+
     private func download(
         _ track: AroExportTrack,
         to target: URL
     ) async throws {
         let partial = target.appendingPathExtension("aro-part")
-        let currentSize = fileSize(partial)
-        if currentSize > track.byteCount {
-            try fileManager.removeItem(at: partial)
-        }
-        let offset = min(fileSize(partial), track.byteCount)
-        if offset < track.byteCount {
-            let bytes = try await client.downloadBlob(
-                hash: track.contentHash,
-                from: offset,
-                credential: credential
-            )
-            if offset == 0 {
-                try bytes.write(to: partial, options: .atomic)
-            } else {
-                let handle = try FileHandle(forWritingTo: partial)
-                defer { try? handle.close() }
-                try handle.seekToEnd()
-                try handle.write(contentsOf: bytes)
+        if let cachedURL = localMediaCache?.localURL(hash: track.contentHash),
+           fileManager.fileExists(atPath: cachedURL.path) {
+            try? fileManager.removeItem(at: partial)
+            try fileManager.copyItem(at: cachedURL, to: partial)
+        } else {
+            let currentSize = fileSize(partial)
+            if currentSize > track.byteCount {
+                try fileManager.removeItem(at: partial)
+            }
+            let offset = min(fileSize(partial), track.byteCount)
+            if offset < track.byteCount {
+                let bytes = try await client.downloadBlob(
+                    hash: track.contentHash,
+                    from: offset,
+                    credential: credential
+                )
+                if offset == 0 {
+                    try bytes.write(to: partial, options: .atomic)
+                } else {
+                    let handle = try FileHandle(forWritingTo: partial)
+                    defer { try? handle.close() }
+                    try handle.seekToEnd()
+                    try handle.write(contentsOf: bytes)
+                }
             }
         }
         guard fileSize(partial) == track.byteCount else {

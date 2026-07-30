@@ -7,10 +7,12 @@ struct SongTableView: View {
     let scanState: FolderScanState
     let hasWatchedFolders: Bool
     let playback: PlaybackController
+    let mediaCache: MediaCacheController
+    let usesStreamOnlyIcon: Bool
     let storesLibraryCopy: Bool
     let removeSong: (Song) async throws -> Void
+    let syncTrackData: (Song) async -> Void
 
-    @State private var selectedSongID: Song.ID?
     @State private var songPendingRemoval: Song?
     @State private var removalError: String?
 
@@ -32,7 +34,6 @@ struct SongTableView: View {
 
                 Spacer(minLength: 12)
 
-                AppSettingsButton()
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 20)
@@ -53,47 +54,23 @@ struct SongTableView: View {
                 emptyState
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                Table(songs, selection: $selectedSongID) {
-                    TableColumn("Title") { song in
-                        HStack(spacing: 6) {
-                            if playback.currentSong?.id == song.id {
-                                Image(systemName: "speaker.wave.2.fill")
-                                    .foregroundStyle(.tint)
-                                    .accessibilityLabel("Currently playing")
-                            }
-                            Text(song.title)
-                        }
+                AppKitSongTable(
+                    songs: songs,
+                    currentSongID: playback.currentSong?.id,
+                    downloadedSongIDs: downloadedSongIDs,
+                    usesStreamOnlyIcon: usesStreamOnlyIcon,
+                    presentation: .library,
+                    onPlay: { song in
+                        playback.play(song: song, queue: songs)
+                    },
+                    onSyncTrackData: { song in
+                        await syncTrackData(song)
+                    },
+                    onRequestRemoval: { song in
+                        songPendingRemoval = song
                     }
-                    TableColumn("Artist", value: \.artist)
-                    TableColumn("Duration") { song in
-                        Text(song.formattedDuration)
-                            .monospacedDigit()
-                    }
-                    .width(min: 72, ideal: 88, max: 110)
-                }
-                .contextMenu(forSelectionType: Song.ID.self) { selectedIDs in
-                    Button("Play") {
-                        playFirstSong(in: selectedIDs)
-                    }
-                    .disabled(selectedIDs.isEmpty)
-                    Divider()
-                    Button("Remove from Aro…", role: .destructive) {
-                        songPendingRemoval = songs.first {
-                            selectedIDs.contains($0.id)
-                        }
-                    }
-                    .disabled(selectedIDs.isEmpty)
-                } primaryAction: { selectedIDs in
-                    playFirstSong(in: selectedIDs)
-                }
+                )
             }
-        }
-        .onChange(of: songs.map(\.id)) { _, songIDs in
-            guard let selectedSongID,
-                  !songIDs.contains(selectedSongID) else {
-                return
-            }
-            self.selectedSongID = nil
         }
         .confirmationDialog(
             "Remove \(songPendingRemoval?.title ?? "this song") from Aro?",
@@ -135,14 +112,18 @@ struct SongTableView: View {
         }
     }
 
-    private func playFirstSong(in selectedIDs: Set<Song.ID>) {
-        guard let selectedID = selectedIDs.first,
-              let song = songs.first(where: { $0.id == selectedID }) else {
-            return
-        }
+    private var downloadedSongIDs: Set<Song.ID> {
+        Set(songs.lazy.filter(isDownloaded).map(\.id))
+    }
 
-        selectedSongID = selectedID
-        playback.play(song: song, queue: songs)
+    private func isDownloaded(_ song: Song) -> Bool {
+        guard !song.url.isFileURL else {
+            return true
+        }
+        guard let hash = song.fileFingerprint?.contentHash else {
+            return false
+        }
+        return mediaCache.isCached(hash: hash)
     }
 
     @ViewBuilder

@@ -108,6 +108,22 @@ struct SQLiteSchemaMigrator {
             "ALTER TABLE scan_metadata ADD COLUMN release_year INTEGER"
         )
         try? execute("ALTER TABLE scan_metadata ADD COLUMN artwork BLOB")
+        // Set by the CRDT sync path (`SQLiteSyncOperationStore.applyTrack`) when a
+        // remote track carries a Cover Art Archive URL but not the image bytes
+        // themselves — a background task downloads and clears this once `artwork`
+        // is populated. Needed because remote clients (no local aro-server doing
+        // identification) only ever learn about artwork through synced track
+        // operations, not the control-socket identification-results pull, which
+        // only has data for a machine that's actually running identification.
+        try? execute("ALTER TABLE scan_metadata ADD COLUMN artwork_url TEXT")
+        // Overrides written by background AcoustID/MusicBrainz identification
+        // (server/crates/aro-track-id). Kept separate from `scan_metadata` — which
+        // AudioScanner unconditionally re-derives from file tags on every rescan —
+        // so an identification result survives the next filesystem-triggered rescan
+        // instead of being silently overwritten.
+        try? execute("ALTER TABLE track_state ADD COLUMN album_override TEXT")
+        try? execute("ALTER TABLE track_state ADD COLUMN musicbrainz_recording_id TEXT")
+        try? execute("ALTER TABLE track_state ADD COLUMN acoustid_id TEXT")
 
         try execute(
             """

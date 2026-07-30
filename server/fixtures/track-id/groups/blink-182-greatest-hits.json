@@ -1,0 +1,394 @@
+{
+  "folder": "Blink-182/Greatest Hits",
+  "files": [
+    {
+      "file_name": "01 Carousel.m4a",
+      "content_hash": "01a3ed4505a5ef03",
+      "duration_secs": 191,
+      "tag_title": "Carousel",
+      "tag_track_number": 1,
+      "candidate_recording_ids": [
+        "276b6e97-02bd-4c4c-996a-4d71a26e1598",
+        "6b235773-16bd-4fc5-b57e-c966f9d1db6d",
+        "a59664bd-2979-4401-bc26-403085009dd6",
+        "a9669ae1-87e3-4487-8f2d-a8d522f8e924",
+        "adda7bcc-43b3-4fa2-ac95-c361df8163a7",
+        "c6e6ad40-f58f-4d21-91f1-fa67a817bd29",
+        "f907e03f-e909-4617-b5ad-c59e63525374"
+      ],
+      "observed_album_before": "Greatest Hits",
+      "resolved_artist_before": "blink‐182",
+      "resolved_album_before": "Greatest Hits",
+      "previously_chosen_recording_id": "a59664bd-2979-4401-bc26-403085009dd6"
+    },
+    {
+      "file_name": "02 M+M's.m4a",
+      "content_hash": "5090abd57f290c32",
+      "duration_secs": 155,
+      "tag_title": "M+M's",
+      "tag_track_number": 2,
+      "candidate_recording_ids": [
+        "39d41b65-7356-4881-83e8-c4b394fcad17",
+        "471dc436-80be-4f06-bc8f-7e2685876cfc",
+        "7d3a2f87-13b4-4b3c-8e5c-b3cdcd8bdf13",
+        "c94ebb20-1a71-4d72-942d-3b32cf18c260"
+      ],
+      "observed_album_before": "Greatest Hits",
+      "resolved_artist_before": "blink‐182",
+      "resolved_album_before": "Greatest Hits",
+      "previously_chosen_recording_id": "39d41b65-7356-4881-83e8-c4b394fcad17"
+    },
+    {
+      "file_name": "03 Dammit.m4a",
+      "content_hash": "6a28adc8d6cea431",
+      "duration_secs": 166,
+      "tag_title": "Dammit",
+      "tag_track_number": 3,
+      "candidate_recording_ids": [
+        "144133c0-dd21-4cba-9946-d735dee5b473",
+        "4f519610-8e08-4500-81c5-42f41bf4b882",
+        "7119c66f-5774-4c3f-b82a-2656b2406649",
+        "9f7e1cc6-6941-4c9d-80df-742f8f0b8a3a",
+        "d8aefb2c-07dc-4d99-91ef-cccbff3c0ee8",
+        "fd125370-5ac9-45eb-86ad-ab99e258404b"
+      ],
+      "observed_album_before": "Dude Ranch",
+      "resolved_artist_before": "blink‐182",
+      "resolved_album_before": "Dude Ranch",
+      "previously_chosen_recording_id": "7119c66f-5774-4c3f-b82a-2656b2406649"
+    },
+    {
+      "file_name": "04 Josie.m4a",
+      "content_hash": "4f1598d66888f448",
+      "duration_secs": 185,
+      "tag_title": "Josie",
+      "tag_track_number": 4,
+      "candidate_recording_ids": [
+        "231aa59d-0f6e-411e-8e0f-f562c2716364",
+        "276b6e97-02bd-4c4c-996a-4d71a26e1598",
+        "7b3d96c9-3e22-4337-be32-f8a26b816685",
+        "9f7e1cc6-6941-4c9d-80df-742f8f0b8a3a",
+        "b17c1340-a282-4d2e-94b6-ceeeedad6552",
+        "cdca8e22-eea5-4b0d-b01c-244ad576bd9d"
+      ],
+      "observed_album_before": "Greatest Hits",
+      "resolved_artist_before": "blink‐182",
+      "resolved_album_before": "Greatest Hits",
+      "previously_chosen_recording_id": "b17c1340-a282-4d2e-94b6-ceeeedad6552"
+    },
+    {
+      "file_name": "05 What's My Age Again_.m4a",
+      "content_hash": "ae01ee934ad36ec5",
+      "duration_secs": 149,
+      "tag_title": "What's My Age Again_",
+      "tag_track_number": 5,
+      "candidate_recording_ids": [
+        "26056acc-b780-40ad-99b1-50e87c903841",
+        "31e439df-4666-4416-b661-7ae9e6c06893",
+        "38aa42d0-a624-4dec-9c87-7b1aa2d9b62a",
+        "57958cbd-fb81-432f-a2ec-bb1027c591cb",
+        "59165953-7f6b-45e3-8521-f3f1b16506cd",
+        "71452d4a-04d6-4e79-a024-a0e258aadba2",
+        "7db810d5-cf36-4ed6-a08c-ecb77557c002",
+        "8531738b-64e8-46c8-81b9-6a97b14ad98d",
+        "893d8f9b-5b63-43e2-8582-4f4718ebca0e",
+        "9c528140-53fd-42b7-816a-f6d1d2b24064",
+        "bb55eb53-ec1b-4d98-87ee-3ff70d33ad1b",
+        "c305b24a-4e59-4039-8369-a513343eaa59",
+        "d9abf163-ed1b-4079-b638-c4307709ba49",
+        "e0524388-a2a0-49a3-a9d6-665b8f5fd6f6"
+      ],
+      "observed_album_before": "Enema of the State",
+      "resolved_artist_before": "blink‐182",
+      "resolved_album_before": "Enema of the State",
+      "previously_chosen_recording_id": "893d8f9b-5b63-43e2-8582-4f4718ebca0e"
+    },
+    {
+      "file_name": "06 All The Small Things.m4a",
+      "content_hash": "9b373a4c6e361e3b",
+      "duration_secs": 171,
+      "tag_title": "All The Small Things",
+      "tag_track_number": 6,
+      "candidate_recording_ids": [
+        "07f547a0-50f7-47fb-8a80-4db121ebe10f",
+        "24f45ca0-cb99-4c3a-bb92-548e03ed3f1d",
+        "2f911620-c015-4c87-b92b-8ea9ea148852",
+        "38cca02e-580d-4bac-bebc-e52a66d6350c",
+        "3d94d514-9ac4-4ddd-bb19-f92a4ebf52b7",
+        "40538dca-0bbb-4a04-8ef9-cb0720f45742",
+        "671be436-ebcd-418a-b85e-46703f747c4b",
+        "67a8cd8b-cd3d-4083-a516-91cb0f020b28",
+        "6fe274f2-d8c4-4955-b7ef-fa93dabb2934",
+        "7371ff0d-0e9f-4a63-9f8b-7d9ddabe30a3",
+        "86807a80-3cdd-44eb-9311-bc8aac93d5eb",
+        "938fb26f-ac4d-4d5b-bcf0-01db36d98e2b",
+        "a8710c0c-3c33-4b90-a035-580ffed5ca34",
+        "a9e01c7f-e7ff-449d-b8f1-872cb62410e4",
+        "c96cfd3f-62a3-43f4-b4b1-3d8b2873198e",
+        "d381d2e1-9d3c-42bd-a8d5-573a56bd1251",
+        "d7d35e98-e588-4548-a296-7467f2b25fde",
+        "f36d9818-019b-4379-ad13-5080feb9ad8a",
+        "fc54a9df-218a-450e-a06a-b0c7a2b2493a",
+        "fd125370-5ac9-45eb-86ad-ab99e258404b"
+      ],
+      "observed_album_before": "Enema of the State",
+      "resolved_artist_before": "blink‐182",
+      "resolved_album_before": "Enema of the State",
+      "previously_chosen_recording_id": "f36d9818-019b-4379-ad13-5080feb9ad8a"
+    },
+    {
+      "file_name": "07 Adam's Song.m4a",
+      "content_hash": "2171748077bda0f7",
+      "duration_secs": 247,
+      "tag_title": "Adam's Song",
+      "tag_track_number": 7,
+      "candidate_recording_ids": [
+        "11fc6576-77a2-4ba4-aba5-e9e87b674298",
+        "241eb917-5f7e-475e-8e49-f92b956028d9",
+        "30d8fa0c-928f-4d06-b0e1-433a3484e219",
+        "32c7e292-14f1-4080-bddf-ef852e0a4c59",
+        "375fe061-b50d-4da1-8d13-a41e6401cb09",
+        "50509355-8685-4246-a3b8-5c832c260d65",
+        "52496da1-67eb-4475-9867-cfab817a215f",
+        "63f4d7f8-85f4-4cf4-97a2-ab3a4e962b41",
+        "744a0736-7ce2-4a60-8361-3560cb512223",
+        "819aaaa1-6512-471c-84c1-911b9e65fb37",
+        "8c7ce461-5559-4586-a932-bc0fcbba0dde",
+        "8f88e147-005a-44e8-b69c-334c4ec1105a",
+        "b03aa2d1-f299-4ab2-beea-f2ae0d087cce",
+        "b45225be-d0e9-4e72-9f14-ac32c483a17d",
+        "c8caab75-17b9-47f5-b431-3198cfb2cbfb",
+        "d1d8a677-da43-42f5-8471-31f750dadc29",
+        "ddd07444-546f-49f7-9bc1-f0aa79f0ccf0",
+        "e241b976-b217-4e4f-a741-dd91ad3db92c"
+      ],
+      "observed_album_before": "Enema of the State",
+      "resolved_artist_before": "blink‐182",
+      "resolved_album_before": "Enema of the State",
+      "previously_chosen_recording_id": "d1d8a677-da43-42f5-8471-31f750dadc29"
+    },
+    {
+      "file_name": "08 Man Overboard.m4a",
+      "content_hash": "2309d695a10c47eb",
+      "duration_secs": 166,
+      "tag_title": "Man Overboard",
+      "tag_track_number": 8,
+      "candidate_recording_ids": [
+        "1e6c75ff-918c-427b-9643-af55b0e2b5ec",
+        "2c54ae2f-ad3c-4d9d-9f04-d93360a1234e",
+        "2f2e8246-1fe5-4e57-8ff3-8e082daa1847",
+        "4022c74a-6c58-4cf2-ac7a-39aa02614a51",
+        "67a8cd8b-cd3d-4083-a516-91cb0f020b28",
+        "c94ebb20-1a71-4d72-942d-3b32cf18c260",
+        "cab96d61-8d27-44b9-a91b-7cef95274f55",
+        "e61e12a1-118a-4441-9a58-b5eaff2ce9bc"
+      ],
+      "observed_album_before": "Greatest Hits",
+      "resolved_artist_before": "blink‐182",
+      "resolved_album_before": "Greatest Hits",
+      "previously_chosen_recording_id": "1e6c75ff-918c-427b-9643-af55b0e2b5ec"
+    },
+    {
+      "file_name": "09 The Rock Show.m4a",
+      "content_hash": "a46f362ce356a584",
+      "duration_secs": 171,
+      "tag_title": "The Rock Show",
+      "tag_track_number": 9,
+      "candidate_recording_ids": [],
+      "observed_album_before": "Greatest Hits",
+      "resolved_artist_before": "blink‐182",
+      "resolved_album_before": "Greatest Hits",
+      "previously_chosen_recording_id": "30b6ffa3-2fd1-4f7a-81f3-d2566c2c3510"
+    },
+    {
+      "file_name": "10 First Date.m4a",
+      "content_hash": "c78ef82bb2de5903",
+      "duration_secs": 171,
+      "tag_title": "First Date",
+      "tag_track_number": 10,
+      "candidate_recording_ids": [
+        "87478339-f592-40ef-a66d-bc5a20b78373",
+        "99bfd38c-6f6d-49a5-8b97-f42b8d5edf89",
+        "e1976280-f09b-44ca-9546-60f603fefcbb",
+        "e61e12a1-118a-4441-9a58-b5eaff2ce9bc"
+      ],
+      "observed_album_before": "Take Off Your Pants and Jacket",
+      "resolved_artist_before": "blink‐182",
+      "resolved_album_before": "Take Off Your Pants and Jacket",
+      "previously_chosen_recording_id": "99bfd38c-6f6d-49a5-8b97-f42b8d5edf89"
+    },
+    {
+      "file_name": "11 Stay Together For The Kids.m4a",
+      "content_hash": "6f984f667f91ac80",
+      "duration_secs": 232,
+      "tag_title": "Stay Together For The Kids",
+      "tag_track_number": 11,
+      "candidate_recording_ids": [
+        "09453f3f-7e1d-421a-8407-5d18b92c9016",
+        "36ba3125-f431-406e-bde8-5d685a80abda",
+        "5887b541-e355-4daa-8b13-da64034cb614",
+        "6b235773-16bd-4fc5-b57e-c966f9d1db6d",
+        "a58b04a2-28c1-490c-87bc-ff3844fe9b1c",
+        "d9dd473a-5774-406d-a375-2fafefe9e976",
+        "e1376517-4e1f-498c-9d5c-84adb444b94e"
+      ],
+      "observed_album_before": "Take Off Your Pants and Jacket",
+      "resolved_artist_before": "blink‐182",
+      "resolved_album_before": "Take Off Your Pants and Jacket",
+      "previously_chosen_recording_id": "a58b04a2-28c1-490c-87bc-ff3844fe9b1c"
+    },
+    {
+      "file_name": "12 Feeling This.m4a",
+      "content_hash": "c7461a3e17c81242",
+      "duration_secs": 173,
+      "tag_title": "Feeling This",
+      "tag_track_number": 12,
+      "candidate_recording_ids": [
+        "34e462fe-67bc-470b-a07e-1d7add23908a",
+        "471dc436-80be-4f06-bc8f-7e2685876cfc",
+        "48280bcd-e11b-470c-b35d-d7d8a273a18c",
+        "4f519610-8e08-4500-81c5-42f41bf4b882",
+        "6249ab4d-69d3-4e5e-bd29-319363bc7f3a",
+        "6878e8d9-7fd8-42c9-bbc1-9146339c4b71",
+        "73cbb729-8bba-4ad0-ad03-6cd59ea2ad6e",
+        "a1a10280-21dd-4695-8e38-1d3410971eb2",
+        "adda7bcc-43b3-4fa2-ac95-c361df8163a7",
+        "fe3036f9-3cd2-4c39-af94-953d7d6dfb4e"
+      ],
+      "observed_album_before": "Greatest Hits",
+      "resolved_artist_before": "blink‐182",
+      "resolved_album_before": "Greatest Hits",
+      "previously_chosen_recording_id": "6878e8d9-7fd8-42c9-bbc1-9146339c4b71"
+    },
+    {
+      "file_name": "13 I Miss You.m4a",
+      "content_hash": "e84d7250dbdbf318",
+      "duration_secs": 227,
+      "tag_title": "I Miss You",
+      "tag_track_number": 13,
+      "candidate_recording_ids": [
+        "10763eef-00fe-4ed4-80b5-7e789cbeec72",
+        "1231a0c3-7090-4216-baf9-44cb9b05ebe7",
+        "19d66b6e-c468-41e1-a61d-ec62e9795fd8",
+        "3b9a9a18-c1cf-4983-8d36-85bbce3ebf56",
+        "403162c7-777b-4269-85db-e32870d9c2f9",
+        "a1eed2cc-cafc-4148-8b2d-2b882fd06961",
+        "a508f926-1399-49a2-a6bc-8696210c6eb3",
+        "b45225be-d0e9-4e72-9f14-ac32c483a17d",
+        "bf6f272b-6e33-437f-8c77-691e255b1215",
+        "f1c3e556-2b57-4aa4-b16d-05b8b5aa87d6"
+      ],
+      "observed_album_before": "blink‐182",
+      "resolved_artist_before": "blink‐182",
+      "resolved_album_before": "blink‐182",
+      "previously_chosen_recording_id": "a1eed2cc-cafc-4148-8b2d-2b882fd06961"
+    },
+    {
+      "file_name": "14 Down.m4a",
+      "content_hash": "1b15e15fe251c5f1",
+      "duration_secs": 193,
+      "tag_title": "Down",
+      "tag_track_number": 14,
+      "candidate_recording_ids": [
+        "141d8160-0815-4783-98f7-484342057a5a",
+        "c01846e0-fca6-4530-a2dc-0d321e3258f3",
+        "ecf7e461-1fea-41be-874f-3d279c9320f9",
+        "fd69655e-91e3-42d5-8cb5-27e3a3784067"
+      ],
+      "observed_album_before": "Greatest Hits",
+      "resolved_artist_before": "blink‐182",
+      "resolved_album_before": "Greatest Hits",
+      "previously_chosen_recording_id": "c01846e0-fca6-4530-a2dc-0d321e3258f3"
+    },
+    {
+      "file_name": "15 Always.m4a",
+      "content_hash": "7de87bf3f0d2dd52",
+      "duration_secs": 257,
+      "tag_title": "Always",
+      "tag_track_number": 15,
+      "candidate_recording_ids": [
+        "0d538e7c-9261-46ec-bde9-cae13e42372c",
+        "26a3f484-ddbf-4f30-9548-9518bdcf9857",
+        "43313dec-f06b-41a2-a222-2ee3064d7e2c",
+        "8c7ce461-5559-4586-a932-bc0fcbba0dde",
+        "9991a16b-0af5-4d25-a462-7982d6f8e1d0",
+        "ebb4faf3-0d55-45f7-bfac-9d4dfb7ccea8",
+        "f3f4597c-6332-4509-b88e-7609d4d4a48f"
+      ],
+      "observed_album_before": "blink‐182",
+      "resolved_artist_before": "blink‐182",
+      "resolved_album_before": "blink‐182",
+      "previously_chosen_recording_id": "9991a16b-0af5-4d25-a462-7982d6f8e1d0"
+    },
+    {
+      "file_name": "16 Not Now.m4a",
+      "content_hash": "81e45164c65b2ad1",
+      "duration_secs": 263,
+      "tag_title": "Not Now",
+      "tag_track_number": 16,
+      "candidate_recording_ids": [
+        "0d538e7c-9261-46ec-bde9-cae13e42372c",
+        "10ae98f8-9bd7-49da-8d72-a14be1cf82c4",
+        "1fce8cc3-c447-4b3f-926a-449b86337277",
+        "28ad9682-a88a-4004-b09b-efcc4f019216",
+        "2f47bf31-d4b6-4ade-b869-a66640da4e8e",
+        "7ffd3432-9f45-4c40-a4aa-806db8f2cfcb",
+        "aef13871-7622-4295-b4c3-5e97481e846d",
+        "c7a79863-919a-45af-be7d-a8aaf03beefa"
+      ],
+      "observed_album_before": "Greatest Hits",
+      "resolved_artist_before": "blink‐182",
+      "resolved_album_before": "Greatest Hits",
+      "previously_chosen_recording_id": "2f47bf31-d4b6-4ade-b869-a66640da4e8e"
+    },
+    {
+      "file_name": "17 Another Girl Another Planet.m4a",
+      "content_hash": "ba053c964263a12f",
+      "duration_secs": 162,
+      "tag_title": "Another Girl Another Planet",
+      "tag_track_number": 17,
+      "candidate_recording_ids": [
+        "671be436-ebcd-418a-b85e-46703f747c4b",
+        "9dae8b26-1313-4c53-b579-a3ee4ece3384",
+        "c46ec1d1-cfb6-4a7c-a4d0-caf6ef78ef9b",
+        "f5e8a8b3-6b0c-4fbd-a1f1-aedf90ef94ac"
+      ],
+      "observed_album_before": "Greatest Hits",
+      "resolved_artist_before": "blink‐182",
+      "resolved_album_before": "Greatest Hits",
+      "previously_chosen_recording_id": "c46ec1d1-cfb6-4a7c-a4d0-caf6ef78ef9b"
+    },
+    {
+      "file_name": "18 I Won't Be Home For Christmas.m4a",
+      "content_hash": "4c483337e0552545",
+      "duration_secs": 199,
+      "tag_title": "I Won't Be Home For Christmas",
+      "tag_track_number": 18,
+      "candidate_recording_ids": [
+        "71575f06-486d-4b00-ab64-c2e9da632649",
+        "c01846e0-fca6-4530-a2dc-0d321e3258f3",
+        "c93c3673-1805-4d58-a5f9-1da6f2ed3eee"
+      ],
+      "observed_album_before": "Greatest Hits",
+      "resolved_artist_before": "blink‐182",
+      "resolved_album_before": "Greatest Hits",
+      "previously_chosen_recording_id": "71575f06-486d-4b00-ab64-c2e9da632649"
+    },
+    {
+      "file_name": "19 Go.m4a",
+      "content_hash": "99db168dc1ba3f1d",
+      "duration_secs": 111,
+      "tag_title": "Go",
+      "tag_track_number": 19,
+      "candidate_recording_ids": [
+        "5280aa73-d1c0-491f-b3ef-708d809cd58b",
+        "e7ba28f9-404c-474e-9613-998e1703c819"
+      ],
+      "observed_album_before": "Greatest Hits",
+      "resolved_artist_before": "blink‐182",
+      "resolved_album_before": "Greatest Hits",
+      "previously_chosen_recording_id": "e7ba28f9-404c-474e-9613-998e1703c819"
+    }
+  ],
+  "note": "file_name/tag_title/tag_track_number are parsed from the real relative_path (independent ground truth). duration_secs and candidate_recording_ids come from the real fingerprint/AcoustID data (independent ground truth). resolved_artist_before/resolved_album_before/previously_chosen_recording_id/observed_album_before reflect the PRIOR per-file pipeline's already-computed identification result -- NOT the file's original embedded tag -- and must not be fed into match scoring as if they were independent evidence."
+}

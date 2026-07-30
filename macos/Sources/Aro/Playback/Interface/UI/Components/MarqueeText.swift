@@ -41,16 +41,24 @@ struct MarqueeText: View {
                 }
         }
         .mask {
-            LinearGradient(
-                stops: [
-                    .init(color: .clear, location: 0),
-                    .init(color: .white, location: 0.035),
-                    .init(color: .white, location: 0.965),
-                    .init(color: .clear, location: 1)
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
+            // Only fade the edges while actually scrolling — text that fits within
+            // the container has nothing being clipped, so masking it just dims the
+            // leading/trailing characters (observed directly: "Not Playing"'s "N")
+            // for no reason.
+            if textWidth > containerWidth {
+                LinearGradient(
+                    stops: [
+                        .init(color: .clear, location: 0),
+                        .init(color: .white, location: 0.035),
+                        .init(color: .white, location: 0.965),
+                        .init(color: .clear, location: 1)
+                    ],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+            } else {
+                Color.white
+            }
         }
         .help(text)
         .task(

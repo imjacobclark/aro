@@ -32,7 +32,6 @@ struct StatsView: View {
                         .monospacedDigit()
                     }
                     Spacer()
-                    AppSettingsButton()
                 }
 
                 Picker("Stats View", selection: $mode) {
@@ -58,15 +57,15 @@ struct StatsView: View {
         }
         .task(id: mode) {
             while !Task.isCancelled {
-                refresh()
+                await refresh()
                 try? await Task.sleep(for: .seconds(5))
             }
         }
         .onChange(of: playback.currentSong?.id) {
-            refresh()
+            Task { await refresh() }
         }
         .onChange(of: playback.state) {
-            refresh()
+            Task { await refresh() }
         }
     }
 
@@ -274,8 +273,8 @@ struct StatsView: View {
         BreakdownList(title: "By Decade", values: library.decades)
     }
 
-    private func refresh() {
-        let dashboard = loadStatsDashboard.execute()
+    private func refresh() async {
+        let dashboard = await loadStatsDashboard.execute()
         listening = dashboard.listening
         library = dashboard.library
     }

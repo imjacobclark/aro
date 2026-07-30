@@ -10,6 +10,8 @@ struct UserDefaultsPlaybackPreferenceStore:
         static let outputDeviceUID = "playback.outputDeviceUID"
         static let hogMode = "playback.hogMode"
         static let targetLUFS = "playback.targetLUFS"
+        static let shuffleEnabled = "playback.shuffleEnabled"
+        static let repeatMode = "playback.repeatMode"
     }
 
     private let defaults: UserDefaults
@@ -32,7 +34,11 @@ struct UserDefaultsPlaybackPreferenceStore:
                 : min(
                     max(defaults.double(forKey: Key.targetLUFS), -24),
                     -8
-                )
+                ),
+            shuffleEnabled: defaults.bool(forKey: Key.shuffleEnabled),
+            repeatMode: defaults.string(forKey: Key.repeatMode)
+                .flatMap(PlaybackRepeatMode.init(rawValue:))
+                ?? .off
         )
     }
 
@@ -40,7 +46,12 @@ struct UserDefaultsPlaybackPreferenceStore:
         defaults.set(values.mode.rawValue, forKey: Key.mode)
         defaults.set(values.outputDeviceUID, forKey: Key.outputDeviceUID)
         defaults.set(values.hogModeEnabled, forKey: Key.hogMode)
-        defaults.set(values.targetLUFS, forKey: Key.targetLUFS)
+        defaults.set(
+            min(max(values.targetLUFS, -24), -8),
+            forKey: Key.targetLUFS
+        )
+        defaults.set(values.shuffleEnabled, forKey: Key.shuffleEnabled)
+        defaults.set(values.repeatMode.rawValue, forKey: Key.repeatMode)
     }
 }
 

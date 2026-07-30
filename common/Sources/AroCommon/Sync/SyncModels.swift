@@ -13,16 +13,14 @@ public enum SyncReplicaMode: String, Codable, CaseIterable, Sendable {
 /// library host. `SyncReplicaMode` remains on the wire for protocol v2
 /// compatibility; new UI should use this type.
 public enum OfflineDownloadPolicy: Hashable, Codable, Sendable {
+    case streamOnly
     case stream
     case favourites
     case selectedAlbums(Set<String>)
     case fullLibrary
 
     public var keepsTemporaryDownloads: Bool {
-        if case .stream = self {
-            return true
-        }
-        return false
+        self == .stream
     }
 }
 

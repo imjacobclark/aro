@@ -76,7 +76,7 @@ struct SQLiteStatsQuery: StatsQuerying {
                 EXISTS (
                     SELECT 1 FROM file_locations l
                     WHERE l.track_id = t.id
-                      AND l.device_id = '\(deviceID)'
+                      AND l.device_id = ?
                       AND l.available = 1
                 )
                 AND ts.hidden = 0
@@ -102,6 +102,7 @@ struct SQLiteStatsQuery: StatsQuerying {
                 connection: connection
             ) {
                 bind(deviceID, to: statement, at: 1)
+                bind(deviceID, to: statement, at: 2)
                 if sqlite3_step(statement) == SQLITE_ROW {
                     result.trackCount = Int(sqlite3_column_int64(statement, 0))
                     result.albumCount = Int(sqlite3_column_int64(statement, 1))

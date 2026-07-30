@@ -1,0 +1,33 @@
+[package]
+name = "aro-track-id"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+# Dynamically links libchromaprint (LGPLv2.1) via `build.rs` + pkg-config — see
+# src/fingerprint.rs for why the real C library is bound rather than reimplemented,
+# and why dynamic (not static) linking specifically preserves LGPL compliance.
+links = "chromaprint"
+
+[dependencies]
+anyhow.workspace = true
+bs1770.workspace = true
+chrono.workspace = true
+lofty.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+symphonia.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+aro-sync-protocol = { path = "../aro-sync-protocol" }
+aro-sync-store = { path = "../aro-sync-store" }
+
+[build-dependencies]
+pkg-config = "0.3"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

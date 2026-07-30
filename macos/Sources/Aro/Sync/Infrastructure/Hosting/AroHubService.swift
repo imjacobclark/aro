@@ -145,9 +145,15 @@ final class SyncPreferences {
         static let replicaMode = "sync.replicaMode"
         static let cacheLimit = "sync.cacheLimitBytes"
         static let manualAddress = "sync.manualAddress"
+        // Legacy locations, migrated into `LocalHubSecretStore` on first load.
+        static let legacyAdminToken = "sync.host.adminToken"
+        static let legacyAcoustidApiKey = "sync.host.acoustidApiKey"
     }
 
     private let defaults: UserDefaults
+    private let secretStore: LocalHubSecretStore
+    private var secrets: LocalHubSecretStore.Record
+    var errorMessage: String?
 
     static var recommendedDataLocation: String {
         FileManager.default.homeDirectoryForCurrentUser
@@ -179,17 +185,31 @@ final class SyncPreferences {
     var dataLocation: String {
         didSet {
             defaults.set(dataLocation, forKey: Key.dataLocation)
-            try? MacHubConfigurationWriter(defaults: defaults).write(
-                dataLocation: dataLocation
-            )
+            do {
+                secrets = try MacHubConfigurationWriter(
+                    defaults: defaults,
+                    secretStore: secretStore
+                ).write(dataLocation: dataLocation, secrets: secrets)
+                errorMessage = nil
+            } catch {
+                errorMessage = "Aro could not save Background Service settings: "
+                    + error.localizedDescription
+            }
         }
     }
     var importMode: HubImportMode {
         didSet {
             defaults.set(importMode.rawValue, forKey: Key.importMode)
-            try? MacHubConfigurationWriter(defaults: defaults).write(
-                dataLocation: dataLocation
-            )
+            do {
+                secrets = try MacHubConfigurationWriter(
+                    defaults: defaults,
+                    secretStore: secretStore
+                ).write(dataLocation: dataLocation, secrets: secrets)
+                errorMessage = nil
+            } catch {
+                errorMessage = "Aro could not save Background Service settings: "
+                    + error.localizedDescription
+            }
         }
     }
     var replicaMode: SyncReplicaMode {
@@ -201,12 +221,33 @@ final class SyncPreferences {
     var manualAddress: String {
         didSet { defaults.set(manualAddress, forKey: Key.manualAddress) }
     }
+    /// Personal AcoustID API key used for background track identification. Rewrites
+    /// `aro.toml` on change, same as `dataLocation`/`importMode` — the running
+    /// Background Service picks it up on its next restart.
+    var acoustidApiKey: String {
+        didSet {
+            secrets.acoustidApiKey = acoustidApiKey
+            do {
+                secrets = try MacHubConfigurationWriter(
+                    defaults: defaults,
+                    secretStore: secretStore
+                ).write(dataLocation: dataLocation, secrets: secrets)
+                errorMessage = nil
+            } catch {
+                errorMessage = "Aro could not save Background Service settings: "
+                    + error.localizedDescription
+            }
+        }
+    }
     var localAdminToken: String? {
-        defaults.string(forKey: "sync.host.adminToken")
+        secrets.adminToken.isEmpty ? nil : secrets.adminToken
     }
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, secretStore: LocalHubSecretStore = LocalHubSecretStore()) {
         self.defaults = defaults
+        self.secretStore = secretStore
+        let loadedSecrets = Self.loadOrMigrateSecrets(defaults: defaults, secretStore: secretStore)
+        self.secrets = loadedSecrets
         let storedDataLocation = defaults.string(forKey: Key.dataLocation) ?? ""
         if ProcessInfo.processInfo.environment["ARO_UI_TEST_ROOT"] == nil,
            storedDataLocation.contains("aro-redesign-ui-profile") {
@@ -225,26 +266,65 @@ final class SyncPreferences {
             : defaults.object(forKey: Key.cacheLimit) as? Int64
                 ?? CacheEvictionPolicy.defaultLimitBytes
         manualAddress = defaults.string(forKey: Key.manualAddress) ?? ""
-        try? MacHubConfigurationWriter(defaults: defaults).write(
-            dataLocation: dataLocation
+        acoustidApiKey = loadedSecrets.acoustidApiKey
+        do {
+            secrets = try MacHubConfigurationWriter(
+                defaults: defaults,
+                secretStore: secretStore
+            ).write(dataLocation: dataLocation, secrets: secrets)
+        } catch {
+            errorMessage = "Aro could not save Background Service settings: "
+                + error.localizedDescription
+        }
+    }
+
+    /// Loads the admin token / AcoustID key from `LocalHubSecretStore`, or —
+    /// the first time this runs after upgrading — migrates them out of
+    /// UserDefaults (where they were previously stored in plaintext) and
+    /// removes the legacy keys.
+    private static func loadOrMigrateSecrets(
+        defaults: UserDefaults,
+        secretStore: LocalHubSecretStore
+    ) -> LocalHubSecretStore.Record {
+        if let existing = try? secretStore.load() {
+            return existing
+        }
+        let migrated = LocalHubSecretStore.Record(
+            adminToken: defaults.string(forKey: Key.legacyAdminToken) ?? "",
+            acoustidApiKey: defaults.string(forKey: Key.legacyAcoustidApiKey) ?? ""
         )
+        try? secretStore.save(migrated)
+        defaults.removeObject(forKey: Key.legacyAdminToken)
+        defaults.removeObject(forKey: Key.legacyAcoustidApiKey)
+        return migrated
     }
 }
 
 private struct MacHubConfigurationWriter {
     private let defaults: UserDefaults
+    private let secretStore: LocalHubSecretStore
 
-    init(defaults: UserDefaults) {
+    init(defaults: UserDefaults, secretStore: LocalHubSecretStore) {
         self.defaults = defaults
+        self.secretStore = secretStore
     }
 
-    func write(dataLocation: String) throws {
-        guard !dataLocation.isEmpty else { return }
+    /// Writes `aro.toml` for the Background Service and returns the secrets
+    /// record actually used — generating and persisting a fresh admin token
+    /// via `LocalHubSecretStore` the first time this runs, if one isn't set yet.
+    @discardableResult
+    func write(
+        dataLocation: String,
+        secrets: LocalHubSecretStore.Record
+    ) throws -> LocalHubSecretStore.Record {
+        guard !dataLocation.isEmpty else { return secrets }
+        var secrets = secrets
+        if secrets.adminToken.isEmpty {
+            secrets.adminToken = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        }
+        try secretStore.save(secrets)
         let hubID = stableValue(key: "sync.host.hubID") {
             UUID().uuidString
-        }
-        let adminToken = stableValue(key: "sync.host.adminToken") {
-            UUID().uuidString.replacingOccurrences(of: "-", with: "")
         }
         let configDirectory = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(
@@ -258,6 +338,9 @@ private struct MacHubConfigurationWriter {
         let escapedDataLocation = dataLocation
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
+        let escapedAcoustidApiKey = secrets.acoustidApiKey
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
         let content = """
         hub_id = "\(hubID)"
         display_name = "\(Host.current().localizedName ?? "Aro")"
@@ -266,10 +349,11 @@ private struct MacHubConfigurationWriter {
         tls_cert = "\(escapedDataLocation)/tls/cert.pem"
         tls_key = "\(escapedDataLocation)/tls/key.pem"
         control_socket = "\(escapedDataLocation)/control.sock"
-        admin_token = "\(adminToken)"
+        admin_token = "\(secrets.adminToken)"
         advertise_mdns = true
         storage_mode = "\(defaults.string(forKey: "sync.host.importMode") ?? "managed")"
         source_rescan_seconds = 300
+        acoustid_api_key = "\(escapedAcoustidApiKey)"
         """
         let configURL = configDirectory.appendingPathComponent("aro.toml")
         try Data(content.utf8).write(
@@ -280,6 +364,7 @@ private struct MacHubConfigurationWriter {
             [.posixPermissions: 0o600],
             ofItemAtPath: configURL.path
         )
+        return secrets
     }
 
     private func stableValue(

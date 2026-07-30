@@ -368,6 +368,38 @@ actor AroSyncClient {
         )
     }
 
+    /// Triggers (re-)identification on a *remote* hub for the given content hashes —
+    /// the network equivalent of `HubControlClient.identifyTracks(_:)`, which only
+    /// reaches a *local* `aro-server` over its Unix control socket. Deliberately takes
+    /// content hashes only, not file paths: a path on this Mac's filesystem is
+    /// meaningless to a remote server, which resolves its own on-disk path from the
+    /// hash instead (see `aro-server`'s `POST /v1/identify` handler doc comment).
+    /// Returns the number of hashes the hub could actually resolve to a live file and
+    /// queue; a hash the hub doesn't recognize or whose file is currently unavailable
+    /// is silently skipped rather than failing the whole batch.
+    func identifyTracks(
+        contentHashes: [String],
+        credential: HubDeviceCredential
+    ) async throws -> Int {
+        let response: AroIdentifyTracksResponse = try await postAuthenticated(
+            "v1/identify",
+            body: AroIdentifyTracksRequest(contentHashes: contentHashes),
+            credential: credential
+        )
+        return response.queued
+    }
+
+    /// Remote equivalent of `HubControlClient.identificationStatus()` — lets a pure
+    /// remote client's Metadata page show live queue counts.
+    func identificationStatus(
+        credential: HubDeviceCredential
+    ) async throws -> IdentificationStatus {
+        try await getAuthenticated(
+            "v1/identification/status",
+            credential: credential
+        )
+    }
+
     func downloadBlob(
         hash: String,
         from offset: UInt64,

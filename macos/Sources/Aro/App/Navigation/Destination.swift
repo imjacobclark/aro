@@ -8,6 +8,7 @@ enum Destination: Hashable {
     case albums
     case stats
     case libraryHealth
-    case devices
+    case settings
+    case metadata
     case folder(UUID)
 }

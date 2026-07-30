@@ -22,7 +22,7 @@ const groupTitles: Record<string, string[]> = {
     "Safe Library Housekeeping",
     "Move Without Rebuilding",
   ],
-  "Host, Connect & Endure": [
+  "Connection & Resilience": [
     "Your Aro, Everywhere",
     "Pair in Seconds",
     "Direct, Encrypted, Approved",
@@ -45,6 +45,8 @@ const groupTitles: Record<string, string[]> = {
   "Browse & Rediscover": [
     "Browse Music as Music",
     "Find Artists and Albums Fast",
+    "Know Every Recording",
+    "Metadata Stays in Your Hands",
     "A Health Check for Music",
     "See Space You Could Reclaim",
     "Your Listening Story",
@@ -60,6 +62,19 @@ const groupTitles: Record<string, string[]> = {
     "Exports Respect What Exists",
   ],
 };
+
+const additionalShippedFeatures: ProductFeature[] = [
+  {
+    title: "Know Every Recording",
+    description:
+      "Identify unknown or incomplete songs by how they sound, then bring canonical titles, artists, albums, and artwork into Aro with AcoustID and MusicBrainz.",
+  },
+  {
+    title: "Metadata Stays in Your Hands",
+    description:
+      "Keep identified details inside Aro by default, use them in exports, or explicitly choose to write title, artist, and album tags back to reachable originals.",
+  },
+];
 
 function featuresPath(): string {
   const candidates = [
@@ -88,7 +103,10 @@ export function loadFeatures(): ProductFeature[] {
     }
     features.push({
       title: match[1].trim(),
-      description: match[2].trim(),
+      description: match[2]
+        .trim()
+        .replace(/\bfiles\b/g, "songs")
+        .replace(/\bfile\b/g, "song"),
     });
   }
 
@@ -104,7 +122,7 @@ export function loadFeatures(): ProductFeature[] {
     titles.add(feature.title);
   }
 
-  return features;
+  return [...features, ...additionalShippedFeatures];
 }
 
 export function groupFeatures(features: ProductFeature[]): FeatureGroup[] {

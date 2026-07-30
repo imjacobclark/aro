@@ -6,4 +6,10 @@ tls_cert = "/var/lib/aro/tls/cert.pem"
 tls_key = "/var/lib/aro/tls/key.pem"
 control_socket = "/var/lib/aro/control.sock"
 admin_token = "replace-with-at-least-16-random-characters"
+# Networks permitted to reach admin-only endpoints (folder management, pairing
+# approval, device revocation), independent of `bind`. Requests still require
+# a valid admin_token. Defaults to loopback-only if omitted; widen to a LAN
+# subnet (e.g. "192.168.1.0/24") or "0.0.0.0/0" to allow admin access from
+# other devices on the network.
+admin_allow = ["127.0.0.0/8", "::1/128"]
 advertise_mdns = true

@@ -30,6 +30,22 @@ final class PlaybackApplicationTests: XCTestCase {
         XCTAssertEqual(PlaybackRoutePolicy().effectiveMode(preferredMode: .bitPerfect, device: device), .bitPerfect)
     }
 
+    func testLoudnessGateErrorOnlyAppliesToNormalizedModeWithMissingAnalysis() {
+        let policy = PlaybackRoutePolicy()
+        let loudness = LoudnessAnalysis(integratedLUFS: -14, peakAmplitude: 0.9)
+
+        XCTAssertEqual(
+            policy.loudnessGateError(effectiveMode: .normalized, leadSongLoudness: nil),
+            .missingLoudnessAnalysis
+        )
+        XCTAssertNil(
+            policy.loudnessGateError(effectiveMode: .normalized, leadSongLoudness: loudness)
+        )
+        XCTAssertNil(
+            policy.loudnessGateError(effectiveMode: .bitPerfect, leadSongLoudness: nil)
+        )
+    }
+
     func testQueuePreparationDeduplicatesSongsAndKeepsSelection() {
         let selected = makeSong(id: "selected", title: "Selected")
         let duplicate = makeSong(id: "duplicate", title: "Duplicate")

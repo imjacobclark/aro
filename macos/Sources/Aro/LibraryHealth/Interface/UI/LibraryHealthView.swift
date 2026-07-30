@@ -25,7 +25,7 @@ struct LibraryHealthView: View {
         }
         .task {
             while !Task.isCancelled {
-                report = reviewLibraryHealth.execute()
+                report = await reviewLibraryHealth.execute()
                 try? await Task.sleep(for: .seconds(5))
             }
         }
@@ -45,7 +45,6 @@ struct LibraryHealthView: View {
                 .monospacedDigit()
             }
             Spacer(minLength: 12)
-            AppSettingsButton()
         }
     }
 
@@ -80,6 +79,11 @@ struct LibraryHealthView: View {
                 label: "Missing",
                 value: "\(report.missingFiles.count)",
                 symbol: "questionmark.folder"
+            )
+            LibraryHealthSummaryCard(
+                label: "Fragmented",
+                value: "\(report.fragmentedFolders.count)",
+                symbol: "square.stack.3d.up.slash"
             )
         }
     }
@@ -120,6 +124,12 @@ struct LibraryHealthView: View {
                 subtitle:
                     "These remain in your library history but have no available local copy.",
                 recommendations: report.missingFiles
+            )
+            recommendationSection(
+                title: "Fragmented Folders",
+                subtitle:
+                    "A folder's tracks span several albums — identification likely hasn't converged on a single release yet.",
+                recommendations: report.fragmentedFolders
             )
         }
     }

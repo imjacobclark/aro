@@ -3,7 +3,7 @@ import { Download } from "lucide-react";
 import { buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-export function SiteHeader({ basePath }: { basePath: string }) {
+export function SiteHeader() {
   return (
     <header className="fixed inset-x-0 top-0 z-50 border-b border-[rgba(18,23,51,0.12)] bg-[#f5f2eb]/90 backdrop-blur-xl">
       <div className="site-shell flex h-[4.6rem] items-center justify-between">
@@ -13,7 +13,7 @@ export function SiteHeader({ basePath }: { basePath: string }) {
           aria-label="Aro home"
         >
           <Image
-            src={`${basePath}/app-icon.png`}
+            src="/app-icon.png"
             alt=""
             width={30}
             height={30}
@@ -26,20 +26,17 @@ export function SiteHeader({ basePath }: { basePath: string }) {
           aria-label="Primary navigation"
           className="hidden items-center gap-7 text-[0.72rem] font-semibold md:flex"
         >
-          <a className="transition-colors hover:text-[#7359e0]" href="#everywhere">
-            Everywhere
+          <a className="transition-colors hover:text-[#7359e0]" href="#resilience">
+            Redundancy
           </a>
-          <a className="transition-colors hover:text-[#7359e0]" href="#durability">
-            Durability
+          <a className="transition-colors hover:text-[#7359e0]" href="#fidelity">
+            Playback
           </a>
-          <a className="transition-colors hover:text-[#7359e0]" href="#sound">
-            Sound
+          <a className="transition-colors hover:text-[#7359e0]" href="#system">
+            Complete system
           </a>
-          <a className="transition-colors hover:text-[#7359e0]" href="#library">
-            Library
-          </a>
-          <a className="transition-colors hover:text-[#7359e0]" href="#features">
-            All features
+          <a className="transition-colors hover:text-[#7359e0]" href="#export">
+            Export
           </a>
         </nav>
         <a
@@ -50,7 +47,7 @@ export function SiteHeader({ basePath }: { basePath: string }) {
           )}
         >
           <Download aria-hidden="true" data-icon="inline-start" />
-          Download preview
+          Download Aro
         </a>
       </div>
     </header>
