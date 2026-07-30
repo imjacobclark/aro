@@ -1,6 +1,6 @@
 import Foundation
 
-public struct DailyListeningStat: Identifiable, Sendable {
+public struct DailyListeningStat: Identifiable, Codable, Sendable {
     public let date: Date
     public let seconds: TimeInterval
 
@@ -12,7 +12,7 @@ public struct DailyListeningStat: Identifiable, Sendable {
     public var id: Date { date }
 }
 
-public struct LibraryBreakdownStat: Identifiable, Sendable {
+public struct LibraryBreakdownStat: Identifiable, Codable, Sendable {
     public let name: String
     public let trackCount: Int
     public let fileSizeBytes: Int64
@@ -26,7 +26,7 @@ public struct LibraryBreakdownStat: Identifiable, Sendable {
     public var id: String { name }
 }
 
-public struct RankedListeningStat: Identifiable, Sendable {
+public struct RankedListeningStat: Identifiable, Codable, Sendable {
     public let id: String
     public let title: String
     public let subtitle: String
@@ -45,7 +45,7 @@ public struct RankedListeningStat: Identifiable, Sendable {
     }
 }
 
-public struct RecentPlayStat: Identifiable, Sendable {
+public struct RecentPlayStat: Identifiable, Codable, Sendable {
     public let id: String
     public let title: String
     public let subtitle: String
@@ -64,7 +64,7 @@ public struct RecentPlayStat: Identifiable, Sendable {
     }
 }
 
-public struct ListeningStats: Sendable {
+public struct ListeningStats: Codable, Sendable {
     public var totalSeconds: TimeInterval
     public var last30DaysSeconds: TimeInterval
     public var loggedPlays: Int
@@ -98,7 +98,7 @@ public struct ListeningStats: Sendable {
     }
 }
 
-public struct LibraryStats: Sendable {
+public struct LibraryStats: Codable, Sendable {
     public var trackCount: Int
     public var albumCount: Int
     public var artistCount: Int
@@ -169,7 +169,7 @@ public protocol StatsQuerying: Sendable {
     func libraryStats() -> LibraryStats
 }
 
-public struct StatsDashboard: Sendable {
+public struct StatsDashboard: Codable, Sendable {
     public let listening: ListeningStats
     public let library: LibraryStats
 

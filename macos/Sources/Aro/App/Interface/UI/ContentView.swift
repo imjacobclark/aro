@@ -59,7 +59,24 @@ struct ContentView: View {
                     .frame(width: 1)
 
                 Group {
-                if store.selection == .artists {
+                if store.selection == .home {
+                    HomeView(
+                        allSongs: { store.allSongs },
+                        playback: playback,
+                        mediaCache: mediaCache,
+                        usesStreamOnlyIcon:
+                            profileRegistry.activeProfile?.offlinePolicy
+                                == .streamOnly,
+                        storesLibraryCopy:
+                            profileRegistry.activeProfile?.managedMusicPath != nil,
+                        loadPlaylists: {
+                            identificationLocalServers.refresh()
+                            return await homePlaylistsBridge.playlists()
+                        },
+                        removeSong: removeSong,
+                        syncTrackData: syncTrackData
+                    )
+                } else if store.selection == .artists {
                     ArtistsView(
                         songs: store.allSongs,
                         playback: playback,
@@ -451,6 +468,18 @@ struct ContentView: View {
     /// socket `identificationControlClient` below uses.
     private var identificationSyncBridge: IdentificationSyncBridge {
         IdentificationSyncBridge(
+            dataLocation: syncPreferences.dataLocation,
+            localServers: identificationLocalServers.servers,
+            remoteProfile: profileRegistry.activeProfile,
+            syncStore: syncStore,
+            libraryDeviceID: libraryDeviceID
+        )
+    }
+
+    /// Same local-or-remote transport split as `identificationSyncBridge`, for the Home
+    /// screen's server-generated playlists.
+    private var homePlaylistsBridge: HomePlaylistsBridge {
+        HomePlaylistsBridge(
             dataLocation: syncPreferences.dataLocation,
             localServers: identificationLocalServers.servers,
             remoteProfile: profileRegistry.activeProfile,

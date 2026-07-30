@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 pub const MIN_PROTOCOL_VERSION: u16 = 2;
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 pub const SERVICE_TYPE: &str = "_aro-sync._tcp.local.";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -327,6 +327,41 @@ pub enum JobState {
     Completed,
     Failed,
     Cancelled,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PlaybackActivitySnapshot {
+    pub session_id: Uuid,
+    pub revision: u64,
+    pub content_hash: String,
+    pub state: PlaybackActivityState,
+    pub position_seconds: f64,
+    pub duration_seconds: Option<f64>,
+    pub buffered_fraction: Option<f64>,
+    pub observed_at: DateTime<Utc>,
+    pub started_at: DateTime<Utc>,
+    #[serde(default)]
+    pub completed: bool,
+    #[serde(default)]
+    pub output: Option<PlaybackOutputSnapshot>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaybackActivityState {
+    Playing,
+    Buffering,
+    Stopped,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PlaybackOutputSnapshot {
+    pub route_name: Option<String>,
+    pub playback_mode: Option<String>,
+    pub sample_rate: Option<f64>,
+    pub bit_depth: Option<u32>,
+    pub exclusive: Option<bool>,
+    pub wireless: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

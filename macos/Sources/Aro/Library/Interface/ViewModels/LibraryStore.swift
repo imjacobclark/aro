@@ -5,7 +5,7 @@ import Observation
 @MainActor
 @Observable
 final class LibraryStore {
-    var selection: Destination? = .songs
+    var selection: Destination? = .home
     private(set) var folders: [WatchedFolder] = []
     private(set) var songsByFolder: [UUID: [Song]] = [:]
     private(set) var scanStates: [UUID: FolderScanState] = [:]
@@ -46,7 +46,7 @@ final class LibraryStore {
         switch selection {
         case .folder(let id):
             return songsByFolder[id] ?? []
-        case .songs, .artists, .albums, .stats, .libraryHealth, .settings, .metadata, .none:
+        case .home, .songs, .artists, .albums, .stats, .libraryHealth, .settings, .metadata, .none:
             return SongLibrary.aggregate(songsByFolder)
         }
     }
@@ -65,6 +65,8 @@ final class LibraryStore {
         switch selection {
         case .folder(let id):
             return folders.first(where: { $0.id == id })?.displayName ?? "Songs"
+        case .home:
+            return "Home"
         case .stats:
             return "Stats"
         case .artists:
@@ -86,7 +88,7 @@ final class LibraryStore {
         switch selection {
         case .folder(let id):
             return scanStates[id] ?? .idle
-        case .songs, .artists, .albums, .stats, .libraryHealth, .settings, .metadata, .none:
+        case .home, .songs, .artists, .albums, .stats, .libraryHealth, .settings, .metadata, .none:
             if scanStates.values.contains(.scanning) {
                 return .scanning
             }
@@ -156,7 +158,9 @@ final class LibraryStore {
                     album: result.album,
                     musicbrainzRecordingID: result.musicbrainzRecordingID,
                     acoustidID: result.acoustidID,
-                    artworkData: artworkData
+                    artworkData: artworkData,
+                    musicbrainzGenresJSON: result.musicbrainzGenres,
+                    moodTagsJSON: result.moodTags
                 )
             }.value
             appliedAny = appliedAny || applied

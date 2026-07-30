@@ -124,6 +124,12 @@ struct SQLiteSchemaMigrator {
         try? execute("ALTER TABLE track_state ADD COLUMN album_override TEXT")
         try? execute("ALTER TABLE track_state ADD COLUMN musicbrainz_recording_id TEXT")
         try? execute("ALTER TABLE track_state ADD COLUMN acoustid_id TEXT")
+        // JSON-array-encoded genre/mood tags from background MusicBrainz identification
+        // (see `aro_track_id::musicbrainz::canonicalize_tags` server-side) — drives
+        // auto-generated mood/genre playlists (`GeneratePlaylists`). Same
+        // survives-rescan rationale as the two columns above.
+        try? execute("ALTER TABLE track_state ADD COLUMN mb_genres_json TEXT")
+        try? execute("ALTER TABLE track_state ADD COLUMN mood_tags_json TEXT")
 
         try execute(
             """

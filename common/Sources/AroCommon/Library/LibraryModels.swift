@@ -104,6 +104,15 @@ public struct Song: Identifiable, Hashable, Sendable {
     public let contentHash: String?
     public let isFavourite: Bool
     public var loudness: LoudnessAnalysis?
+    /// MusicBrainz's own curated genre subset for this track, from background AcoustID/
+    /// MusicBrainz identification (see `aro_track_id::musicbrainz::canonicalize_tags`
+    /// server-side) — distinct from `genre`, which is the file's own single ID3-style tag.
+    /// Empty until identification has run and found matching data.
+    public let musicbrainzGenres: [String]
+    /// Up to 2 canonical mood tags (e.g. "relaxed", "energetic") derived server-side from
+    /// MusicBrainz folksonomy tags — drives auto-generated mood playlists. Empty until
+    /// identification has run and found a matching mood.
+    public let moodTags: [String]
 
     public init(
         libraryID: UUID = UUID(),
@@ -120,7 +129,9 @@ public struct Song: Identifiable, Hashable, Sendable {
         fileFingerprint: AudioFileFingerprint? = nil,
         contentHash: String? = nil,
         isFavourite: Bool = false,
-        loudness: LoudnessAnalysis? = nil
+        loudness: LoudnessAnalysis? = nil,
+        musicbrainzGenres: [String] = [],
+        moodTags: [String] = []
     ) {
         self.libraryID = libraryID
         self.url = url
@@ -137,6 +148,8 @@ public struct Song: Identifiable, Hashable, Sendable {
         self.contentHash = contentHash ?? fileFingerprint?.contentHash
         self.isFavourite = isFavourite
         self.loudness = loudness
+        self.musicbrainzGenres = musicbrainzGenres
+        self.moodTags = moodTags
     }
 
     public var id: String {
@@ -159,7 +172,9 @@ public struct Song: Identifiable, Hashable, Sendable {
             fileFingerprint: fileFingerprint,
             contentHash: contentHash,
             isFavourite: isFavourite,
-            loudness: loudness
+            loudness: loudness,
+            musicbrainzGenres: musicbrainzGenres,
+            moodTags: moodTags
         )
     }
 }

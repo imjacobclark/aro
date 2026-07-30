@@ -1,6 +1,9 @@
 name: Marketing Website
 
 on:
+  push:
+    branches:
+      - main
   workflow_run:
     workflows:
       - Development Release
@@ -21,6 +24,7 @@ jobs:
   build:
     name: Build release-aware website
     if: >-
+      github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
@@ -112,8 +116,6 @@ jobs:
       - name: Build static website
         run: npm run build
         working-directory: marketing-website
-        env:
-          NEXT_PUBLIC_BASE_PATH: /aro
 
       - name: Upload website
         uses: actions/upload-pages-artifact@v4

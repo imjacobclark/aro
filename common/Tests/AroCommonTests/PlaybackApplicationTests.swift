@@ -4,6 +4,42 @@ import XCTest
 @testable import AroCommon
 
 final class PlaybackApplicationTests: XCTestCase {
+    @MainActor
+    func testListeningTrackerUsesOneLifecycleForHistoryAndLiveActivity() {
+        let history = RecordingHistory()
+        let activity = RecordingActivity()
+        let tracker = ListeningSessionTracker(
+            history: history,
+            activity: activity
+        )
+        let start = Date(timeIntervalSince1970: 1_000)
+        tracker.begin(
+            trackID: UUID(),
+            contentHash: String(repeating: "a", count: 64),
+            outputStatus: PlaybackOutputStatus(deviceName: "DAC"),
+            now: start
+        )
+        tracker.heartbeatIfNeeded(
+            position: 6,
+            duration: 120,
+            bufferedFraction: 0.5,
+            buffering: true,
+            outputStatus: PlaybackOutputStatus(deviceName: "DAC"),
+            at: start.addingTimeInterval(6)
+        )
+        tracker.end(completed: true)
+
+        XCTAssertEqual(history.begins, 1)
+        XCTAssertEqual(history.heartbeats, 1)
+        XCTAssertEqual(history.ends, 1)
+        XCTAssertEqual(activity.snapshots.map(\.revision), [1, 2, 3])
+        XCTAssertEqual(
+            activity.snapshots.map(\.state),
+            [.playing, .buffering, .stopped]
+        )
+        XCTAssertTrue(activity.snapshots.last?.completed == true)
+    }
+
     func testWirelessRoutesUseSharedNormalizedPlayback() {
         let device = AudioOutputDevice(
             id: 1,
@@ -96,6 +132,39 @@ final class PlaybackApplicationTests: XCTestCase {
             artist: "Artist",
             duration: 60
         )
+    }
+}
+
+private final class RecordingHistory:
+    ListeningHistoryRecording,
+    @unchecked Sendable
+{
+    var begins = 0
+    var heartbeats = 0
+    var ends = 0
+
+    func beginSession(trackID: UUID) -> UUID {
+        begins += 1
+        return UUID()
+    }
+
+    func heartbeat(sessionID: UUID) {
+        heartbeats += 1
+    }
+
+    func endSession(sessionID: UUID, completed: Bool) {
+        ends += 1
+    }
+}
+
+private final class RecordingActivity:
+    PlaybackActivityReporting,
+    @unchecked Sendable
+{
+    var snapshots: [PlaybackActivitySnapshot] = []
+
+    func report(_ snapshot: PlaybackActivitySnapshot) {
+        snapshots.append(snapshot)
     }
 }
 #endif

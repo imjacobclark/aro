@@ -1,7 +1,9 @@
 mod audio_metadata;
 mod config;
+mod playlists;
 #[cfg(unix)]
 mod control;
+mod dashboard;
 mod http;
 mod sources;
 
@@ -206,6 +208,37 @@ async fn serve(config: Config) -> Result<()> {
         jobs: JobRegistry::default(),
         store,
         sources,
+        telemetry: http::RuntimeTelemetry::default(),
+    };
+    let _dashboard = if config.dashboard.enabled {
+        let listener = tokio::net::TcpListener::bind(config.dashboard.bind)
+            .await
+            .with_context(|| {
+                format!(
+                    "could not bind unauthenticated dashboard at {}",
+                    config.dashboard.bind
+                )
+            })?;
+        let dashboard = dashboard::router(dashboard::DashboardState::new(
+            state.clone(),
+            config.storage_mode.as_str(),
+        ));
+        tracing::warn!(
+            address = %config.dashboard.bind,
+            "Unauthenticated full-detail dashboard enabled"
+        );
+        Some(tokio::spawn(async move {
+            if let Err(error) = axum::serve(
+                listener,
+                dashboard.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            {
+                tracing::error!(%error, "Dashboard listener stopped");
+            }
+        }))
+    } else {
+        None
     };
     #[cfg(unix)]
     let _control =
@@ -457,6 +490,14 @@ fn status(path: &Path) -> Result<()> {
     println!("Data: {}", config.data_dir.display());
     println!("Storage: {}", config.storage_mode.as_str());
     println!("Bind: {}", config.bind);
+    println!(
+        "Dashboard: {}",
+        if config.dashboard.enabled {
+            format!("http://{}", config.dashboard.bind)
+        } else {
+            "disabled".into()
+        }
+    );
     println!("Sequence: {}", store.latest_sequence()?);
     let folders = store.source_folders()?;
     println!(

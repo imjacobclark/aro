@@ -54,7 +54,9 @@ struct SQLiteLibraryCatalogRepository: LibraryCatalogRepository {
         album: String?,
         musicbrainzRecordingID: String?,
         acoustidID: String?,
-        artworkData: Data?
+        artworkData: Data?,
+        musicbrainzGenresJSON: String?,
+        moodTagsJSON: String?
     ) -> Bool {
         database.applyIdentification(
             contentHash: contentHash,
@@ -63,7 +65,9 @@ struct SQLiteLibraryCatalogRepository: LibraryCatalogRepository {
             album: album,
             musicbrainzRecordingID: musicbrainzRecordingID,
             acoustidID: acoustidID,
-            artworkData: artworkData
+            artworkData: artworkData,
+            musicbrainzGenresJSON: musicbrainzGenresJSON,
+            moodTagsJSON: moodTagsJSON
         )
     }
 

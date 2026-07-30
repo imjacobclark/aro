@@ -99,10 +99,28 @@ struct IdentificationResult: Codable, Sendable {
     let musicbrainzRecordingID: String?
     let acoustidID: String?
     let identifiedAt: Int64
+    /// JSON-array-encoded text (e.g. `["dream pop","shoegaze"]`), matching the server's
+    /// `IdentificationResult.musicbrainz_genres` storage — decoded into `[String]` only at
+    /// `Song` hydration time (see `SQLiteLibraryCatalogRepository`), same as `moodTags`.
+    let musicbrainzGenres: String?
+    /// JSON-array-encoded text of up to 2 canonical mood tags (see
+    /// `aro_track_id::musicbrainz::canonicalize_tags` server-side).
+    let moodTags: String?
+}
+
+/// One auto-generated playlist as computed by the hub (see `aro-server`'s `playlists`
+/// module) — the server is the canonical generator; this app only maps the returned
+/// content hashes onto its local catalog and renders. Hashes the local library doesn't
+/// hold are simply dropped.
+struct ServerGeneratedPlaylist: Identifiable, Codable, Sendable {
+    let id: String
+    let title: String
+    let subtitle: String
+    let contentHashes: [String]
 }
 
 struct HubControlClient: Sendable {
-    static let controlProtocolVersion = 6
+    static let controlProtocolVersion = 7
 
     let socketURL: URL
 
@@ -260,6 +278,17 @@ struct HubControlClient: Sendable {
         ])
         let data = try JSONSerialization.data(withJSONObject: result)
         return try JSONDecoder.aroSyncProtocol().decode([IdentificationResult].self, from: data)
+    }
+
+    /// The hub's current auto-generated playlists — local-socket equivalent of the
+    /// remote `/v1/playlists` endpoint (`AroSyncClient.playlists(credential:)`).
+    func playlists() async throws -> [ServerGeneratedPlaylist] {
+        let result = try await sendValue(["command": "playlists"])
+        let data = try JSONSerialization.data(withJSONObject: result)
+        return try JSONDecoder.aroSyncProtocol().decode(
+            [ServerGeneratedPlaylist].self,
+            from: data
+        )
     }
 
     func setSetting(key: String, value: Bool) async throws {

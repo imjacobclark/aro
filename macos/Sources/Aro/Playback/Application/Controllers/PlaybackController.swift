@@ -64,6 +64,8 @@ final class PlaybackController {
         loudnessService: any LoudnessAnalyzing = NoOpLoudnessAnalyzer(),
         listeningHistory: any ListeningHistoryRecording =
             NoOpListeningHistoryRecorder(),
+        playbackActivity: any PlaybackActivityReporting =
+            NoOpPlaybackActivityReporter(),
         nowPlayingPublisher: any NowPlayingPublishing =
             NoOpNowPlayingPublisher(),
         queuePolicy: PlaybackQueuePolicy = PlaybackQueuePolicy(),
@@ -86,7 +88,10 @@ final class PlaybackController {
         isShuffleEnabled = preferences.shuffleEnabled
         repeatMode = preferences.repeatMode
         self.loudnessService = loudnessService
-        listeningSession = ListeningSessionTracker(history: listeningHistory)
+        listeningSession = ListeningSessionTracker(
+            history: listeningHistory,
+            activity: playbackActivity
+        )
         self.nowPlayingPublisher = nowPlayingPublisher
         self.queuePolicy = queuePolicy
         self.visualizerSmoother = visualizerSmoother
@@ -780,7 +785,13 @@ final class PlaybackController {
                 }
                 self.elapsedTime = updatedTime
                 self.bufferedFraction = engine.bufferedFraction
-                self.listeningSession.heartbeatIfNeeded()
+                self.listeningSession.heartbeatIfNeeded(
+                    position: self.elapsedTime,
+                    duration: self.duration,
+                    bufferedFraction: self.bufferedFraction,
+                    buffering: self.state == .buffering,
+                    outputStatus: self.outputStatus
+                )
             }
         }
     }
@@ -871,7 +882,11 @@ final class PlaybackController {
         guard let currentSong else {
             return
         }
-        listeningSession.begin(trackID: currentSong.libraryID)
+        listeningSession.begin(
+            trackID: currentSong.libraryID,
+            contentHash: currentSong.contentHash,
+            outputStatus: outputStatus
+        )
     }
 
     private func restartCurrentSongAfterQueueChange() {

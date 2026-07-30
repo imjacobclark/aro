@@ -2,7 +2,8 @@ use aro_sync_core::{BlobError, hash_file, validate_hash, verify_file};
 use aro_sync_protocol::{
     ConflictChoice, DeviceSummary, ExportManifest, ExportTrack, FieldConflict, HybridTimestamp,
     JoinCommitRequest, JoinPreview, JoinPreviewRequest, ManifestEntry, Operation,
-    SequencedOperation, SourceHealthReport, VersionedValue,
+    PlaybackActivitySnapshot, PlaybackActivityState, SequencedOperation, SourceHealthReport,
+    VersionedValue,
 };
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -86,6 +87,32 @@ pub struct FolderMember {
     pub content_hash: String,
 }
 
+/// One live track eligible for auto-playlist generation, keyed by content hash — the only
+/// identifier shared with client libraries (see [`IdentificationResult`]'s doc comment).
+#[derive(Clone, Debug)]
+pub struct PlaylistSeedTrack {
+    pub content_hash: String,
+    /// From the CRDT-materialized `tracks.metadata` `favourite` field.
+    pub favourite: bool,
+    /// Canonical mood vocabulary from `identification_results.mood_tags` — empty when the
+    /// track hasn't been identified or no folksonomy tag matched a known mood.
+    pub mood_tags: Vec<String>,
+}
+
+/// Everything [`HubStore::playlist_seeds`] can tell an auto-playlist generator, all keyed
+/// by content hash.
+#[derive(Clone, Debug, Default)]
+pub struct PlaylistSeeds {
+    /// Every live, content-addressed track, in stable `hub_track_id` order.
+    pub tracks: Vec<PlaylistSeedTrack>,
+    /// Content hashes by descending play count.
+    pub most_played: Vec<String>,
+    /// Content hashes by most recent play first.
+    pub recently_played: Vec<String>,
+    /// Every content hash with at least one logged listening event.
+    pub played: HashSet<String>,
+}
+
 /// The outcome of identifying one file, keyed by `content_hash` rather than
 /// `hub_track_id`. Content hash is the only identifier genuinely shared between this
 /// database and the macOS app's separate local library catalog (their track IDs are
@@ -116,6 +143,15 @@ pub struct IdentificationResult {
     pub resolution_generation: i64,
     pub release_id: Option<String>,
     pub release_group_id: Option<String>,
+    /// MusicBrainz's curated genre subset for this recording, JSON-array-encoded (e.g.
+    /// `["dream pop","shoegaze"]`) — see `aro_track_id::musicbrainz::canonicalize_tags`.
+    /// `None` for rows predating this column, or when MusicBrainz had no genre data.
+    pub musicbrainz_genres: Option<String>,
+    /// Up to 2 canonical mood tags (from a small fixed vocabulary — "relaxed", "energetic",
+    /// etc.) derived from MusicBrainz folksonomy tags, JSON-array-encoded. Drives
+    /// auto-generated mood playlists client-side. `None` for rows predating this column, or
+    /// when no folksonomy tag matched a known mood.
+    pub mood_tags: Option<String>,
 }
 
 /// Shared row-mapper for the three `identification_results` read paths — keeps the column
@@ -135,6 +171,8 @@ fn identification_result_from_row(row: &rusqlite::Row) -> rusqlite::Result<Ident
         resolution_generation: row.get(10)?,
         release_id: row.get(11)?,
         release_group_id: row.get(12)?,
+        musicbrainz_genres: row.get(13)?,
+        mood_tags: row.get(14)?,
     })
 }
 
@@ -939,6 +977,545 @@ impl HubStore {
             .collect::<Result<_, _>>()?)
     }
 
+    pub fn record_playback_activity(
+        &self,
+        device_id: Uuid,
+        snapshot: &PlaybackActivitySnapshot,
+        peer_address: Option<&str>,
+    ) -> Result<bool, StoreError> {
+        let Some(track_id) = self.track_id_for_hash(&snapshot.content_hash)? else {
+            return Ok(false);
+        };
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction()?;
+        let current: Option<u64> = transaction
+            .query_row(
+                "SELECT revision FROM playback_activity_latest
+                 WHERE session_id = ?1 AND device_id = ?2",
+                params![snapshot.session_id.to_string(), device_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if current.is_some_and(|revision| revision >= snapshot.revision) {
+            return Ok(false);
+        }
+        let state = match snapshot.state {
+            PlaybackActivityState::Playing => "playing",
+            PlaybackActivityState::Buffering => "buffering",
+            PlaybackActivityState::Stopped => "stopped",
+        };
+        let payload = serde_json::to_string(snapshot).expect("playback snapshot serialization");
+        transaction.execute(
+            r#"
+            INSERT INTO playback_activity_events
+                (session_id, revision, device_id, track_id, state, observed_at,
+                 peer_address, payload)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+            params![
+                snapshot.session_id.to_string(),
+                snapshot.revision,
+                device_id.to_string(),
+                track_id.to_string(),
+                state,
+                snapshot.observed_at.timestamp_millis(),
+                peer_address,
+                payload,
+            ],
+        )?;
+        transaction.execute(
+            r#"
+            INSERT INTO playback_activity_latest
+                (session_id, device_id, track_id, revision, state, observed_at,
+                 peer_address, payload)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(session_id, device_id) DO UPDATE SET
+                track_id = excluded.track_id,
+                revision = excluded.revision,
+                state = excluded.state,
+                observed_at = excluded.observed_at,
+                peer_address = excluded.peer_address,
+                payload = excluded.payload
+            WHERE excluded.revision > playback_activity_latest.revision
+            "#,
+            params![
+                snapshot.session_id.to_string(),
+                device_id.to_string(),
+                track_id.to_string(),
+                snapshot.revision,
+                state,
+                snapshot.observed_at.timestamp_millis(),
+                peer_address,
+                payload,
+            ],
+        )?;
+        if snapshot.state == PlaybackActivityState::Stopped {
+            let listened_seconds = snapshot.position_seconds.max(0.0);
+            let event_payload = serde_json::json!({
+                "track_id": track_id,
+                "started_at": snapshot.started_at.timestamp_millis() as f64 / 1_000.0,
+                "ended_at": snapshot.observed_at.timestamp_millis() as f64 / 1_000.0,
+                "listened_seconds": listened_seconds,
+                "completed": snapshot.completed,
+            });
+            transaction.execute(
+                r#"
+                INSERT INTO listening_events
+                    (event_id, track_id, device_id, payload, started_at,
+                     ended_at, listened_seconds, completed)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                ON CONFLICT(event_id) DO NOTHING
+                "#,
+                params![
+                    snapshot.session_id.to_string(),
+                    track_id.to_string(),
+                    device_id.to_string(),
+                    event_payload.to_string(),
+                    snapshot.started_at.timestamp_millis() as f64 / 1_000.0,
+                    snapshot.observed_at.timestamp_millis() as f64 / 1_000.0,
+                    listened_seconds,
+                    snapshot.completed,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    /// Seed data for server-side auto-playlist generation (see `aro-server`'s `playlists`
+    /// module): every live content-addressed track with its favourite flag and mood tags,
+    /// plus play-count/recency orderings from `listening_events` — all keyed by content
+    /// hash, since that's the only identifier client libraries share with this database.
+    pub fn playlist_seeds(&self) -> Result<PlaylistSeeds, StoreError> {
+        let connection = self.connection.lock();
+        let mut seeds = PlaylistSeeds::default();
+
+        let mut tracks = connection.prepare(
+            r#"
+            SELECT t.content_hash, t.metadata, ir.mood_tags
+            FROM tracks t
+            LEFT JOIN identification_results ir ON ir.content_hash = t.content_hash
+            WHERE t.content_hash IS NOT NULL
+              AND t.tombstoned_at IS NULL
+              AND t.purged_at IS NULL
+            ORDER BY t.hub_track_id
+            "#,
+        )?;
+        let track_rows = tracks.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        for row in track_rows {
+            let (content_hash, metadata, mood_tags) = row?;
+            let metadata: serde_json::Map<String, Value> =
+                serde_json::from_str(&metadata).unwrap_or_default();
+            let favourite = metadata
+                .get("favourite")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let mood_tags: Vec<String> = mood_tags
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_default();
+            seeds.tracks.push(PlaylistSeedTrack {
+                content_hash,
+                favourite,
+                mood_tags,
+            });
+        }
+        drop(tracks);
+
+        let mut listening = connection.prepare(
+            r#"
+            SELECT t.content_hash, COUNT(*), MAX(l.started_at)
+            FROM listening_events l
+            JOIN tracks t ON t.hub_track_id = l.track_id
+            WHERE t.content_hash IS NOT NULL
+            GROUP BY t.content_hash
+            "#,
+        )?;
+        let listening_rows = listening.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<f64>>(2)?,
+            ))
+        })?;
+        let mut tallies: Vec<(String, i64, f64)> = Vec::new();
+        for row in listening_rows {
+            let (content_hash, play_count, last_played_at) = row?;
+            tallies.push((content_hash, play_count, last_played_at.unwrap_or(0.0)));
+        }
+        drop(listening);
+
+        // Descending count, then hash, so equal counts order identically across calls.
+        tallies.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        seeds.most_played = tallies.iter().map(|(hash, _, _)| hash.clone()).collect();
+        tallies.sort_by(|a, b| b.2.total_cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+        seeds.recently_played = tallies.iter().map(|(hash, _, _)| hash.clone()).collect();
+        seeds.played = tallies.into_iter().map(|(hash, _, _)| hash).collect();
+
+        Ok(seeds)
+    }
+
+    pub fn dashboard_stats(&self) -> Result<Value, StoreError> {
+        let connection = self.connection.lock();
+        let mut tracks = connection.prepare(
+            r#"
+            SELECT t.metadata, COALESCE(b.size, rb.size, 0)
+            FROM tracks t
+            LEFT JOIN blobs b ON b.hash = t.content_hash
+            LEFT JOIN referenced_blobs rb
+                ON rb.hash = t.content_hash AND rb.available = 1
+            WHERE t.tombstoned_at IS NULL AND t.purged_at IS NULL
+            "#,
+        )?;
+        let rows = tracks.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+        })?;
+        let mut track_count = 0_u64;
+        let mut total_duration = 0_f64;
+        let mut file_size_bytes = 0_u64;
+        let mut artists = HashSet::new();
+        let mut albums = HashSet::new();
+        let mut formats: HashMap<String, (u64, u64)> = HashMap::new();
+        let mut genres: HashMap<String, (u64, u64)> = HashMap::new();
+        let mut decades: HashMap<String, (u64, u64)> = HashMap::new();
+        let mut sample_rates: HashMap<String, u64> = HashMap::new();
+        let mut bit_depths: HashMap<String, u64> = HashMap::new();
+        let mut complete_title = 0_u64;
+        let mut complete_artist = 0_u64;
+        let mut complete_album = 0_u64;
+        for row in rows {
+            let (metadata, size) = row?;
+            let metadata: serde_json::Map<String, Value> =
+                serde_json::from_str(&metadata).unwrap_or_default();
+            track_count += 1;
+            file_size_bytes = file_size_bytes.saturating_add(size);
+            total_duration += metadata
+                .get("duration")
+                .and_then(Value::as_f64)
+                .unwrap_or_default();
+            let text = |key: &str| {
+                metadata
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            };
+            if text("title").is_some() {
+                complete_title += 1;
+            }
+            if let Some(artist) = text("artist") {
+                complete_artist += 1;
+                artists.insert(artist.to_owned());
+            }
+            if let Some(album) = text("album") {
+                complete_album += 1;
+                albums.insert(album.to_owned());
+            }
+            let format = text("codec").unwrap_or("unknown").to_ascii_uppercase();
+            let entry = formats.entry(format).or_default();
+            entry.0 += 1;
+            entry.1 = entry.1.saturating_add(size);
+            let genre = text("genre").unwrap_or("Unknown").to_owned();
+            let entry = genres.entry(genre).or_default();
+            entry.0 += 1;
+            entry.1 = entry.1.saturating_add(size);
+            let decade = metadata
+                .get("release_year")
+                .and_then(Value::as_i64)
+                .map(|year| format!("{}s", year / 10 * 10))
+                .unwrap_or_else(|| "Unknown".into());
+            let entry = decades.entry(decade).or_default();
+            entry.0 += 1;
+            entry.1 = entry.1.saturating_add(size);
+            if let Some(rate) = metadata.get("sample_rate").and_then(Value::as_u64) {
+                *sample_rates.entry(rate.to_string()).or_default() += 1;
+            }
+            if let Some(depth) = metadata.get("bit_depth").and_then(Value::as_u64) {
+                *bit_depths.entry(depth.to_string()).or_default() += 1;
+            }
+        }
+        drop(tracks);
+
+        let mut listening = connection.query_row(
+            r#"
+            SELECT COALESCE(SUM(listened_seconds), 0),
+                   COALESCE(SUM(CASE WHEN started_at >= unixepoch() - 2592000
+                                    THEN listened_seconds ELSE 0 END), 0),
+                   COUNT(*), COUNT(DISTINCT track_id)
+            FROM listening_events
+            "#,
+            [],
+            |row| {
+                Ok(serde_json::json!({
+                    "total_seconds": row.get::<_, f64>(0)?,
+                    "last_30_days_seconds": row.get::<_, f64>(1)?,
+                    "logged_plays": row.get::<_, u64>(2)?,
+                    "unique_tracks_played": row.get::<_, u64>(3)?,
+                }))
+            },
+        )?;
+        let today = chrono::Utc::now().date_naive();
+        let first_day = today - chrono::Days::new(29);
+        let mut seconds_by_day: BTreeMap<chrono::NaiveDate, f64> = BTreeMap::new();
+        let mut top_tracks: HashMap<String, (String, String, u64)> = HashMap::new();
+        let mut top_artists: HashMap<String, (HashSet<String>, u64)> = HashMap::new();
+        let mut recent = Vec::new();
+        let mut history = connection.prepare(
+            r#"
+            SELECT l.event_id, l.track_id, l.started_at, l.listened_seconds,
+                   COALESCE(t.metadata, '{}')
+            FROM listening_events l
+            LEFT JOIN tracks t ON t.hub_track_id = l.track_id
+            ORDER BY l.started_at DESC
+            "#,
+        )?;
+        let history_rows = history.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<f64>>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+        for row in history_rows {
+            let (event_id, track_id, started_at, listened_seconds, metadata) = row?;
+            let metadata: Value = serde_json::from_str(&metadata).unwrap_or_default();
+            let title = metadata["title"].as_str().unwrap_or("Unknown Track");
+            let artist = metadata["artist"].as_str().unwrap_or("Unknown Artist");
+            let album = metadata["album"].as_str().unwrap_or("Unknown Album");
+            if let Some(started_at) = started_at {
+                if let Some(date) = chrono::DateTime::from_timestamp(
+                    started_at as i64,
+                    ((started_at.fract() * 1_000_000_000.0) as u32).min(999_999_999),
+                ) {
+                    *seconds_by_day.entry(date.date_naive()).or_default() += listened_seconds;
+                    if recent.len() < 8 {
+                        recent.push(serde_json::json!({
+                            "id": event_id,
+                            "title": title,
+                            "subtitle": format!("{artist} — {album}"),
+                            "played_at": date,
+                        }));
+                    }
+                }
+            }
+            let entry = top_tracks.entry(track_id.clone()).or_insert_with(|| {
+                (title.to_owned(), format!("{artist} — {album}"), 0)
+            });
+            entry.2 += 1;
+            let entry = top_artists
+                .entry(artist.to_owned())
+                .or_insert_with(|| (HashSet::new(), 0));
+            entry.0.insert(track_id);
+            entry.1 += 1;
+        }
+        drop(history);
+        let mut ranked_tracks = top_tracks
+            .into_iter()
+            .map(|(id, (title, subtitle, play_count))| {
+                serde_json::json!({
+                    "id": id, "title": title, "subtitle": subtitle,
+                    "play_count": play_count
+                })
+            })
+            .collect::<Vec<_>>();
+        ranked_tracks.sort_by_key(|value| std::cmp::Reverse(value["play_count"].as_u64()));
+        ranked_tracks.truncate(5);
+        let mut ranked_artists = top_artists
+            .into_iter()
+            .map(|(artist, (tracks, play_count))| {
+                serde_json::json!({
+                    "id": artist, "title": artist,
+                    "subtitle": format!("{} songs", tracks.len()),
+                    "play_count": play_count
+                })
+            })
+            .collect::<Vec<_>>();
+        ranked_artists.sort_by_key(|value| std::cmp::Reverse(value["play_count"].as_u64()));
+        ranked_artists.truncate(5);
+        let daily = (0..30)
+            .map(|offset| {
+                let day = first_day + chrono::Days::new(offset);
+                serde_json::json!({
+                    "date": format!("{day}T00:00:00Z"),
+                    "seconds": seconds_by_day.get(&day).copied().unwrap_or_default(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut cursor = if seconds_by_day.contains_key(&today) {
+            today
+        } else {
+            today - chrono::Days::new(1)
+        };
+        let mut streak = 0_u64;
+        while seconds_by_day.get(&cursor).is_some_and(|seconds| *seconds > 0.0) {
+            streak += 1;
+            cursor = cursor - chrono::Days::new(1);
+        }
+        listening["current_streak"] = serde_json::json!(streak);
+        listening["daily"] = serde_json::json!(daily);
+        listening["top_tracks"] = serde_json::json!(ranked_tracks);
+        listening["top_artists"] = serde_json::json!(ranked_artists);
+        listening["recent"] = serde_json::json!(recent);
+        let active_cutoff = chrono::Utc::now().timestamp_millis() - 15_000;
+        let active: u64 = connection.query_row(
+            "SELECT COUNT(*) FROM playback_activity_latest
+             WHERE state IN ('playing', 'buffering') AND observed_at >= ?1",
+            [active_cutoff],
+            |row| row.get(0),
+        )?;
+        let connected_cutoff = (chrono::Utc::now() - chrono::Duration::seconds(60)).to_rfc3339();
+        let connected: u64 = connection.query_row(
+            "SELECT COUNT(*) FROM device_credentials
+             WHERE revoked_at IS NULL AND last_seen_at >= ?1",
+            [connected_cutoff],
+            |row| row.get(0),
+        )?;
+        let source_count: u64 =
+            connection.query_row("SELECT COUNT(*) FROM sources WHERE detached_at IS NULL", [], |r| {
+                r.get(0)
+            })?;
+        let unavailable_sources: u64 = connection.query_row(
+            "SELECT COUNT(*) FROM sources
+             WHERE detached_at IS NULL AND available = 0",
+            [],
+            |row| row.get(0),
+        )?;
+        let breakdown = |values: HashMap<String, (u64, u64)>| {
+            let mut values = values
+                .into_iter()
+                .map(|(name, (track_count, file_size_bytes))| {
+                    serde_json::json!({
+                        "name": name,
+                        "track_count": track_count,
+                        "file_size_bytes": file_size_bytes,
+                    })
+                })
+                .collect::<Vec<_>>();
+            values.sort_by_key(|value| std::cmp::Reverse(value["track_count"].as_u64()));
+            values
+        };
+        Ok(serde_json::json!({
+            "generated_at": chrono::Utc::now(),
+            "scope": "authoritative_hub",
+            "live": {
+                "active_listeners": active,
+                "connected_devices": connected,
+            },
+            "listening": listening,
+            "library": {
+                "track_count": track_count,
+                "album_count": albums.len(),
+                "artist_count": artists.len(),
+                "total_duration": total_duration,
+                "file_size_bytes": file_size_bytes,
+                "formats": breakdown(formats),
+                "genres": breakdown(genres),
+                "decades": breakdown(decades),
+                "sample_rates": sample_rates,
+                "bit_depths": bit_depths,
+            },
+            "metadata": {
+                "title_coverage": ratio(complete_title, track_count),
+                "artist_coverage": ratio(complete_artist, track_count),
+                "album_coverage": ratio(complete_album, track_count),
+            },
+            "sources": {
+                "total": source_count,
+                "unavailable": unavailable_sources,
+            }
+        }))
+    }
+
+    pub fn dashboard_live_activity(&self) -> Result<Vec<Value>, StoreError> {
+        let connection = self.connection.lock();
+        let cutoff = chrono::Utc::now().timestamp_millis() - 15_000;
+        let mut statement = connection.prepare(
+            r#"
+            SELECT p.session_id, p.device_id, COALESCE(d.name, 'Local Host'),
+                   COALESCE(d.device_type, 'Mac'), p.state, p.observed_at,
+                   p.peer_address, p.payload, t.metadata
+            FROM playback_activity_latest p
+            LEFT JOIN device_credentials d ON d.device_id = p.device_id
+            LEFT JOIN tracks t ON t.hub_track_id = p.track_id
+            WHERE p.state IN ('playing', 'buffering') AND p.observed_at >= ?1
+            ORDER BY p.observed_at DESC
+            "#,
+        )?;
+        let rows = statement.query_map([cutoff], |row| {
+            let payload: String = row.get(7)?;
+            let metadata: String = row.get(8)?;
+            Ok(serde_json::json!({
+                "session_id": row.get::<_, String>(0)?,
+                "device_id": row.get::<_, String>(1)?,
+                "device_name": row.get::<_, String>(2)?,
+                "device_type": row.get::<_, String>(3)?,
+                "state": row.get::<_, String>(4)?,
+                "observed_at_millis": row.get::<_, i64>(5)?,
+                "peer_address": row.get::<_, Option<String>>(6)?,
+                "playback": serde_json::from_str::<Value>(&payload).unwrap_or_default(),
+                "track": serde_json::from_str::<Value>(&metadata).unwrap_or_default(),
+            }))
+        })?;
+        rows.collect::<Result<_, _>>().map_err(Into::into)
+    }
+
+    pub fn record_http_request(
+        &self,
+        method: &str,
+        path: &str,
+        peer_address: &str,
+        status: u16,
+        latency_micros: u64,
+    ) -> Result<(), StoreError> {
+        self.connection.lock().execute(
+            r#"
+            INSERT INTO http_request_events
+                (observed_at, method, path, peer_address, status, latency_micros)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                chrono::Utc::now().timestamp_millis(),
+                method,
+                path,
+                peer_address,
+                status,
+                latency_micros
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn dashboard_traffic(&self) -> Result<Value, StoreError> {
+        let connection = self.connection.lock();
+        let (total, errors, last_day, average_latency): (u64, u64, u64, f64) =
+            connection.query_row(
+                r#"
+                SELECT COUNT(*),
+                       COALESCE(SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN observed_at >=
+                           (unixepoch() - 86400) * 1000 THEN 1 ELSE 0 END), 0),
+                       COALESCE(AVG(latency_micros), 0)
+                FROM http_request_events
+                "#,
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+        Ok(serde_json::json!({
+            "generated_at": chrono::Utc::now(),
+            "requests_total": total,
+            "errors_total": errors,
+            "requests_last_24_hours": last_day,
+            "average_latency_milliseconds": average_latency / 1_000.0,
+        }))
+    }
+
     pub fn register_host_source(
         &self,
         source_id: Uuid,
@@ -1584,7 +2161,7 @@ impl HubStore {
                 SELECT content_hash, title, artist, album, artwork_url,
                        musicbrainz_recording_id, acoustid_id, identified_at,
                        resolution_source, resolution_score, resolution_generation,
-                       release_id, release_group_id
+                       release_id, release_group_id, musicbrainz_genres, mood_tags
                 FROM identification_results
                 WHERE content_hash = ?1
                 "#,
@@ -1638,8 +2215,8 @@ impl HubStore {
                 (content_hash, title, artist, album, artwork_url,
                  musicbrainz_recording_id, acoustid_id, identified_at,
                  resolution_source, resolution_score, resolution_generation,
-                 release_id, release_group_id)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 release_id, release_group_id, musicbrainz_genres, mood_tags)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
             ON CONFLICT(content_hash) DO UPDATE SET
                 title = excluded.title,
                 artist = excluded.artist,
@@ -1652,7 +2229,9 @@ impl HubStore {
                 resolution_score = excluded.resolution_score,
                 resolution_generation = excluded.resolution_generation,
                 release_id = excluded.release_id,
-                release_group_id = excluded.release_group_id
+                release_group_id = excluded.release_group_id,
+                musicbrainz_genres = excluded.musicbrainz_genres,
+                mood_tags = excluded.mood_tags
             "#,
             params![
                 result.content_hash,
@@ -1668,6 +2247,8 @@ impl HubStore {
                 result.resolution_generation,
                 result.release_id,
                 result.release_group_id,
+                result.musicbrainz_genres,
+                result.mood_tags,
             ],
         )?;
         Ok(())
@@ -1687,7 +2268,7 @@ impl HubStore {
             SELECT content_hash, title, artist, album, artwork_url,
                    musicbrainz_recording_id, acoustid_id, identified_at,
                    resolution_source, resolution_score, resolution_generation,
-                   release_id, release_group_id
+                   release_id, release_group_id, musicbrainz_genres, mood_tags
             FROM identification_results
             WHERE identified_at > ?1
             ORDER BY identified_at
@@ -2020,8 +2601,48 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
             event_id TEXT PRIMARY KEY,
             track_id TEXT NOT NULL,
             device_id TEXT NOT NULL,
-            payload TEXT NOT NULL
+            payload TEXT NOT NULL,
+            started_at REAL,
+            ended_at REAL,
+            listened_seconds REAL NOT NULL DEFAULT 0,
+            completed INTEGER NOT NULL DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS playback_activity_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            device_id TEXT NOT NULL,
+            track_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            observed_at INTEGER NOT NULL,
+            peer_address TEXT,
+            payload TEXT NOT NULL,
+            UNIQUE(session_id, device_id, revision)
+        );
+        CREATE INDEX IF NOT EXISTS playback_activity_events_observed
+            ON playback_activity_events(observed_at);
+        CREATE TABLE IF NOT EXISTS playback_activity_latest (
+            session_id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            track_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            observed_at INTEGER NOT NULL,
+            peer_address TEXT,
+            payload TEXT NOT NULL,
+            PRIMARY KEY(session_id, device_id)
+        );
+        CREATE TABLE IF NOT EXISTS http_request_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            observed_at INTEGER NOT NULL,
+            method TEXT NOT NULL,
+            path TEXT NOT NULL,
+            peer_address TEXT NOT NULL,
+            status INTEGER NOT NULL,
+            latency_micros INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS http_request_events_observed
+            ON http_request_events(observed_at);
         CREATE TABLE IF NOT EXISTS loudness (
             content_hash TEXT NOT NULL,
             algorithm_version INTEGER NOT NULL,
@@ -2141,6 +2762,71 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
         "ALTER TABLE identification_cache ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 0",
         [],
     );
+    let _ = connection.execute("ALTER TABLE listening_events ADD COLUMN started_at REAL", []);
+    let _ = connection.execute("ALTER TABLE listening_events ADD COLUMN ended_at REAL", []);
+    let _ = connection.execute(
+        "ALTER TABLE listening_events ADD COLUMN listened_seconds REAL NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = connection.execute(
+        "ALTER TABLE listening_events ADD COLUMN completed INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    connection.execute_batch(
+        r#"
+        CREATE INDEX IF NOT EXISTS listening_events_started
+            ON listening_events(started_at);
+        CREATE TABLE IF NOT EXISTS playback_activity_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            device_id TEXT NOT NULL,
+            track_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            observed_at INTEGER NOT NULL,
+            peer_address TEXT,
+            payload TEXT NOT NULL,
+            UNIQUE(session_id, device_id, revision)
+        );
+        CREATE INDEX IF NOT EXISTS playback_activity_events_observed
+            ON playback_activity_events(observed_at);
+        CREATE TABLE IF NOT EXISTS playback_activity_latest (
+            session_id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            track_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            observed_at INTEGER NOT NULL,
+            peer_address TEXT,
+            payload TEXT NOT NULL,
+            PRIMARY KEY(session_id, device_id)
+        );
+        CREATE TABLE IF NOT EXISTS http_request_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            observed_at INTEGER NOT NULL,
+            method TEXT NOT NULL,
+            path TEXT NOT NULL,
+            peer_address TEXT NOT NULL,
+            status INTEGER NOT NULL,
+            latency_micros INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS http_request_events_observed
+            ON http_request_events(observed_at);
+        INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+            VALUES (10, unixepoch());
+        "#,
+    )?;
+    connection.execute(
+        r#"
+        UPDATE listening_events
+        SET started_at = json_extract(payload, '$.started_at'),
+            ended_at = json_extract(payload, '$.ended_at'),
+            listened_seconds = COALESCE(json_extract(payload, '$.listened_seconds'), 0),
+            completed = COALESCE(json_extract(payload, '$.completed'), 0)
+        WHERE started_at IS NULL
+        "#,
+        [],
+    )?;
     let _ = connection.execute(
         "ALTER TABLE device_credentials ADD COLUMN device_type TEXT NOT NULL DEFAULT 'Device'",
         [],
@@ -2206,6 +2892,22 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
         "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (9, unixepoch())",
         [],
     );
+    // JSON-array-encoded genre/mood tags derived from MusicBrainz folksonomy data (see
+    // `aro_track_id::musicbrainz::canonicalize_tags`), consumed client-side to drive
+    // auto-generated mood/genre playlists. `NULL` for rows predating this column or
+    // recordings with no matching MusicBrainz tag data.
+    let _ = connection.execute(
+        "ALTER TABLE identification_results ADD COLUMN musicbrainz_genres TEXT",
+        [],
+    );
+    let _ = connection.execute(
+        "ALTER TABLE identification_results ADD COLUMN mood_tags TEXT",
+        [],
+    );
+    let _ = connection.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (10, unixepoch())",
+        [],
+    );
     connection.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS source_files (
@@ -2250,6 +2952,14 @@ fn optional_timestamp(
         .transpose()
 }
 
+fn ratio(value: u64, total: u64) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        value as f64 / total as f64
+    }
+}
+
 fn materialize_operation(
     transaction: &rusqlite::Transaction<'_>,
     operation: &Operation,
@@ -2257,9 +2967,18 @@ fn materialize_operation(
     if operation.entity_type == "listening_session" {
         transaction.execute(
             r#"
-            INSERT OR IGNORE INTO listening_events
-                (event_id, track_id, device_id, payload)
-            VALUES (?1, ?2, ?3, ?4)
+            INSERT INTO listening_events
+                (event_id, track_id, device_id, payload, started_at,
+                 ended_at, listened_seconds, completed)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(event_id) DO UPDATE SET
+                track_id = excluded.track_id,
+                device_id = excluded.device_id,
+                payload = excluded.payload,
+                started_at = excluded.started_at,
+                ended_at = excluded.ended_at,
+                listened_seconds = excluded.listened_seconds,
+                completed = excluded.completed
             "#,
             params![
                 operation.entity_id,
@@ -2270,6 +2989,18 @@ fn materialize_operation(
                     .unwrap_or_default(),
                 operation.device_id.to_string(),
                 operation.payload.to_string(),
+                operation.payload.get("started_at").and_then(Value::as_f64),
+                operation.payload.get("ended_at").and_then(Value::as_f64),
+                operation
+                    .payload
+                    .get("listened_seconds")
+                    .and_then(Value::as_f64)
+                    .unwrap_or_default(),
+                operation
+                    .payload
+                    .get("completed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             ],
         )?;
         return Ok(());
@@ -2514,6 +3245,8 @@ mod tests {
                 resolution_generation: 0,
                 release_id: None,
                 release_group_id: None,
+                musicbrainz_genres: None,
+                mood_tags: None,
             })
             .unwrap();
 
@@ -2542,6 +3275,8 @@ mod tests {
                 resolution_generation: 3,
                 release_id: Some("release-1".into()),
                 release_group_id: Some("rg-1".into()),
+                musicbrainz_genres: None,
+                mood_tags: None,
             })
             .unwrap();
 
@@ -2608,6 +3343,8 @@ mod tests {
                     resolution_generation: generation,
                     release_id: None,
                     release_group_id: None,
+                    musicbrainz_genres: None,
+                    mood_tags: None,
                 })
                 .unwrap();
         };
@@ -2657,6 +3394,8 @@ mod tests {
                     resolution_generation: 0,
                     release_id: None,
                     release_group_id: None,
+                    musicbrainz_genres: None,
+                    mood_tags: None,
                 })
                 .unwrap();
         }
@@ -2698,6 +3437,8 @@ mod tests {
                 resolution_generation: 0,
                 release_id: None,
                 release_group_id: None,
+                musicbrainz_genres: None,
+                mood_tags: None,
             })
             .unwrap();
 
@@ -2727,6 +3468,8 @@ mod tests {
                 resolution_generation: 5,
                 release_id: None,
                 release_group_id: None,
+                musicbrainz_genres: None,
+                mood_tags: None,
             })
             .unwrap();
 
@@ -2776,6 +3519,53 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         HubStore::open(directory.path()).unwrap();
         HubStore::open(directory.path()).unwrap();
+    }
+
+    #[test]
+    fn migration_upgrades_legacy_listening_events_before_indexing_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = Connection::open(directory.path().join("hub.sqlite3")).unwrap();
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE listening_events (
+                    event_id TEXT PRIMARY KEY,
+                    track_id TEXT NOT NULL,
+                    device_id TEXT NOT NULL,
+                    payload TEXT NOT NULL
+                );
+                "#,
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = HubStore::open(directory.path()).unwrap();
+        let connection = store.connection.lock();
+        connection
+            .execute(
+                "INSERT INTO listening_events (event_id, track_id, device_id, payload)
+                 VALUES ('legacy-event', 'track', 'device', '{}')",
+                [],
+            )
+            .unwrap();
+        let defaults: (Option<f64>, Option<f64>, f64, i64) = connection
+            .query_row(
+                "SELECT started_at, ended_at, listened_seconds, completed
+                 FROM listening_events WHERE event_id = 'legacy-event'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(defaults, (None, None, 0.0, 0));
+        let index_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'listening_events_started'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index_count, 1);
     }
 
     #[test]
@@ -3209,6 +3999,8 @@ mod tests {
                 resolution_generation: 0,
                 release_id: None,
                 release_group_id: None,
+                musicbrainz_genres: None,
+                mood_tags: None,
             })
             .unwrap();
         assert!(store.has_identification_result("hash-a").unwrap());
@@ -3228,6 +4020,8 @@ mod tests {
                 resolution_generation: 0,
                 release_id: None,
                 release_group_id: None,
+                musicbrainz_genres: None,
+                mood_tags: None,
             })
             .unwrap();
 
@@ -3256,6 +4050,8 @@ mod tests {
                 resolution_generation: 0,
                 release_id: None,
                 release_group_id: None,
+                musicbrainz_genres: None,
+                mood_tags: None,
             })
             .unwrap();
         let all = store.identification_results_since(0, 10).unwrap();
@@ -3263,5 +4059,85 @@ mod tests {
         let updated = all.iter().find(|r| r.content_hash == "hash-a").unwrap();
         assert_eq!(updated.title.as_deref(), Some("Song A (corrected)"));
         assert_eq!(updated.album.as_deref(), Some("Album A"));
+    }
+
+    #[test]
+    fn playback_activity_is_revisioned_and_feeds_existing_listening_stats() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let track_id = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+        let hash = "a".repeat(64);
+        let timestamp = HybridTimestamp {
+            physical_millis: 100,
+            logical: 0,
+            device_id,
+        };
+        store
+            .append_operations(&[Operation {
+                operation_id: Uuid::new_v4(),
+                device_id,
+                entity_type: "track".into(),
+                entity_id: track_id.to_string(),
+                kind: "upsert".into(),
+                payload: serde_json::json!({
+                    "content_hash": hash,
+                    "title": "Dashboard Track",
+                    "artist": "Aro",
+                    "duration": 120.0,
+                    "codec": "flac",
+                }),
+                field_versions: BTreeMap::from([
+                    ("content_hash".into(), timestamp.clone()),
+                    ("title".into(), timestamp.clone()),
+                    ("artist".into(), timestamp.clone()),
+                    ("duration".into(), timestamp.clone()),
+                    ("codec".into(), timestamp),
+                ]),
+            }])
+            .unwrap();
+        let started = chrono::Utc::now() - chrono::Duration::seconds(60);
+        let session_id = Uuid::new_v4();
+        let snapshot = PlaybackActivitySnapshot {
+            session_id,
+            revision: 1,
+            content_hash: "a".repeat(64),
+            state: PlaybackActivityState::Playing,
+            position_seconds: 30.0,
+            duration_seconds: Some(120.0),
+            buffered_fraction: Some(0.75),
+            observed_at: chrono::Utc::now(),
+            started_at: started,
+            completed: false,
+            output: None,
+        };
+        assert!(
+            store
+                .record_playback_activity(device_id, &snapshot, Some("127.0.0.1:1"))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .record_playback_activity(device_id, &snapshot, None)
+                .unwrap()
+        );
+        let stopped = PlaybackActivitySnapshot {
+            revision: 2,
+            state: PlaybackActivityState::Stopped,
+            position_seconds: 60.0,
+            observed_at: chrono::Utc::now(),
+            completed: true,
+            ..snapshot
+        };
+        assert!(
+            store
+                .record_playback_activity(device_id, &stopped, None)
+                .unwrap()
+        );
+        let stats = store.dashboard_stats().unwrap();
+        assert_eq!(stats["listening"]["logged_plays"], 1);
+        assert_eq!(stats["library"]["track_count"], 1);
+        assert_eq!(stats["library"]["formats"][0]["name"], "FLAC");
+        assert!(store.dashboard_live_activity().unwrap().is_empty());
     }
 }

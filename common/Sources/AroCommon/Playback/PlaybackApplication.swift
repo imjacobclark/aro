@@ -160,6 +160,15 @@ public struct NoOpListeningHistoryRecorder: ListeningHistoryRecording, Sendable 
     public func endSession(sessionID: UUID, completed: Bool) {}
 }
 
+public protocol PlaybackActivityReporting: Sendable {
+    func report(_ snapshot: PlaybackActivitySnapshot)
+}
+
+public struct NoOpPlaybackActivityReporter: PlaybackActivityReporting, Sendable {
+    public init() {}
+    public func report(_ snapshot: PlaybackActivitySnapshot) {}
+}
+
 public protocol NowPlayingPublishing: Sendable {
     func publish(
         song: Song?,
@@ -233,29 +242,112 @@ public protocol PlaybackPreferenceStoring: Sendable {
 @MainActor
 public final class ListeningSessionTracker {
     private let history: any ListeningHistoryRecording
+    private let activity: any PlaybackActivityReporting
     private var sessionID: UUID?
     private var lastHeartbeat = Date.distantPast
+    private var startedAt = Date.distantPast
+    private var contentHash: String?
+    private var revision: UInt64 = 0
+    private var position: TimeInterval = 0
+    private var duration: TimeInterval?
+    private var bufferedFraction: Double?
+    private var output: PlaybackOutputSnapshot?
 
-    public init(history: any ListeningHistoryRecording) {
+    public init(
+        history: any ListeningHistoryRecording,
+        activity: any PlaybackActivityReporting =
+            NoOpPlaybackActivityReporter()
+    ) {
         self.history = history
+        self.activity = activity
+    }
+
+    public func begin(
+        trackID: UUID,
+        contentHash: String?,
+        outputStatus: PlaybackOutputStatus,
+        now: Date = Date()
+    ) {
+        guard sessionID == nil else { return }
+        sessionID = history.beginSession(trackID: trackID)
+        self.contentHash = contentHash
+        startedAt = now
+        lastHeartbeat = now
+        revision = 0
+        position = 0
+        output = PlaybackOutputSnapshot(status: outputStatus)
+        emit(state: .playing, completed: false, now: now)
     }
 
     public func begin(trackID: UUID, now: Date = Date()) {
-        guard sessionID == nil else { return }
-        sessionID = history.beginSession(trackID: trackID)
+        begin(
+            trackID: trackID,
+            contentHash: nil,
+            outputStatus: PlaybackOutputStatus(),
+            now: now
+        )
+    }
+
+    public func heartbeatIfNeeded(
+        position: TimeInterval,
+        duration: TimeInterval,
+        bufferedFraction: Double,
+        buffering: Bool,
+        outputStatus: PlaybackOutputStatus,
+        at now: Date = Date()
+    ) {
+        guard now.timeIntervalSince(lastHeartbeat) >= 5, let sessionID else { return }
+        history.heartbeat(sessionID: sessionID)
+        self.position = position
+        self.duration = duration
+        self.bufferedFraction = bufferedFraction
+        output = PlaybackOutputSnapshot(status: outputStatus)
+        emit(state: buffering ? .buffering : .playing, completed: false, now: now)
         lastHeartbeat = now
     }
 
     public func heartbeatIfNeeded(at now: Date = Date()) {
-        guard now.timeIntervalSince(lastHeartbeat) >= 5, let sessionID else { return }
-        history.heartbeat(sessionID: sessionID)
-        lastHeartbeat = now
+        heartbeatIfNeeded(
+            position: position,
+            duration: duration ?? 0,
+            bufferedFraction: bufferedFraction ?? 1,
+            buffering: false,
+            outputStatus: PlaybackOutputStatus(),
+            at: now
+        )
     }
 
     public func end(completed: Bool = false) {
         guard let sessionID else { return }
         history.endSession(sessionID: sessionID, completed: completed)
+        emit(state: .stopped, completed: completed, now: Date())
         self.sessionID = nil
         lastHeartbeat = .distantPast
+        contentHash = nil
+        revision = 0
+    }
+
+    private func emit(
+        state: PlaybackActivityState,
+        completed: Bool,
+        now: Date
+    ) {
+        guard let sessionID, let contentHash else { return }
+        revision += 1
+        activity.report(
+            PlaybackActivitySnapshot(
+                sessionID: sessionID,
+                revision: revision,
+                contentHash: contentHash,
+                state: state,
+                positionSeconds: position,
+                durationSeconds: duration,
+                bufferedFraction: bufferedFraction,
+                observedAt: now,
+                startedAt: startedAt,
+                completed: completed,
+                output: output
+            )
+        )
     }
 }

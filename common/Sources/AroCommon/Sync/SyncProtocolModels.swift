@@ -365,6 +365,70 @@ public enum SyncJobState: String, Codable, Sendable {
     case cancelled
 }
 
+public enum PlaybackActivityState: String, Codable, Sendable {
+    case playing
+    case buffering
+    case stopped
+}
+
+public struct PlaybackOutputSnapshot: Codable, Sendable {
+    public let routeName: String?
+    public let playbackMode: String?
+    public let sampleRate: Double?
+    public let bitDepth: UInt32?
+    public let exclusive: Bool?
+    public let wireless: Bool?
+
+    public init(status: PlaybackOutputStatus) {
+        routeName = status.deviceName
+        playbackMode = status.mode.rawValue
+        sampleRate = status.sampleRate
+        bitDepth = status.bitDepth.map(UInt32.init)
+        exclusive = status.isExclusive
+        wireless = status.transport.isWireless
+    }
+}
+
+public struct PlaybackActivitySnapshot: Codable, Sendable {
+    public let sessionID: UUID
+    public let revision: UInt64
+    public let contentHash: String
+    public let state: PlaybackActivityState
+    public let positionSeconds: Double
+    public let durationSeconds: Double?
+    public let bufferedFraction: Double?
+    public let observedAt: Date
+    public let startedAt: Date
+    public let completed: Bool
+    public let output: PlaybackOutputSnapshot?
+
+    public init(
+        sessionID: UUID,
+        revision: UInt64,
+        contentHash: String,
+        state: PlaybackActivityState,
+        positionSeconds: Double,
+        durationSeconds: Double?,
+        bufferedFraction: Double?,
+        observedAt: Date,
+        startedAt: Date,
+        completed: Bool,
+        output: PlaybackOutputSnapshot?
+    ) {
+        self.sessionID = sessionID
+        self.revision = revision
+        self.contentHash = contentHash
+        self.state = state
+        self.positionSeconds = positionSeconds
+        self.durationSeconds = durationSeconds
+        self.bufferedFraction = bufferedFraction
+        self.observedAt = observedAt
+        self.startedAt = startedAt
+        self.completed = completed
+        self.output = output
+    }
+}
+
 public struct RemoteSyncJob: Codable, Sendable {
     public let jobID: UUID
     public let kind: String

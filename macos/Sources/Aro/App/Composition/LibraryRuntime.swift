@@ -22,7 +22,8 @@ final class LibraryRuntime {
         playbackPreferences: PlaybackPreferences,
         audioDeviceManager: AudioDeviceManager,
         mediaDirectory: URL? = nil,
-        profile: LibraryProfile? = nil
+        profile: LibraryProfile? = nil,
+        localAdminToken: String? = nil
     ) {
         let database = LibraryDatabase(url: databaseURL)
         self.database = database
@@ -50,6 +51,29 @@ final class LibraryRuntime {
         }
         let remoteTLSFingerprint = profile?.baseURL.flatMap {
             operationStore.membership(baseURL: $0)?.tlsFingerprint
+        }
+        let playbackActivity: any PlaybackActivityReporting
+        if let baseURL = profile?.baseURL,
+           let remoteTLSFingerprint,
+           let remoteCredential {
+            playbackActivity = AroPlaybackActivityReporter(
+                client: AroSyncClient(
+                    baseURL: baseURL,
+                    pinnedTLSFingerprint: remoteTLSFingerprint
+                ),
+                credential: remoteCredential
+            )
+        } else if let localAdminToken,
+                  let loopback = URL(string: "https://127.0.0.1:4848") {
+            playbackActivity = AroPlaybackActivityReporter(
+                client: AroSyncClient(
+                    localAdminBaseURL: loopback,
+                    adminToken: localAdminToken
+                ),
+                credential: nil
+            )
+        } else {
+            playbackActivity = NoOpPlaybackActivityReporter()
         }
         let mediaCache = SQLiteMediaCache(database: database)
         let storagePolicyState = MediaStoragePolicyState(
@@ -128,6 +152,7 @@ final class LibraryRuntime {
             listeningHistory: SQLiteListeningHistoryRecorder(
                 database: database
             ),
+            playbackActivity: playbackActivity,
             nowPlayingPublisher: MPNowPlayingPublisher(),
             effectiveModeResolver: {
                 PlaybackRoutePolicy().effectiveMode(

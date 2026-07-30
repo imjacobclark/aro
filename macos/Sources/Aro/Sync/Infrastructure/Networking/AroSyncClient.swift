@@ -133,6 +133,7 @@ actor AroSyncClient {
         )
         encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
+        encoder.dateEncodingStrategy = .iso8601
         decoder = JSONDecoder.aroSyncProtocol()
         adminToken = nil
     }
@@ -150,6 +151,7 @@ actor AroSyncClient {
         )
         encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
+        encoder.dateEncodingStrategy = .iso8601
         decoder = JSONDecoder.aroSyncProtocol()
         adminToken = nil
     }
@@ -167,6 +169,7 @@ actor AroSyncClient {
         )
         encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
+        encoder.dateEncodingStrategy = .iso8601
         decoder = JSONDecoder.aroSyncProtocol()
         adminToken = nil
     }
@@ -184,6 +187,7 @@ actor AroSyncClient {
         )
         encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
+        encoder.dateEncodingStrategy = .iso8601
         decoder = JSONDecoder.aroSyncProtocol()
         self.adminToken = adminToken
     }
@@ -398,6 +402,30 @@ actor AroSyncClient {
             "v1/identification/status",
             credential: credential
         )
+    }
+
+    /// Remote equivalent of `HubControlClient.playlists()` — the hub's auto-generated
+    /// playlists, keyed by content hash, for a pure remote client's Home screen.
+    func playlists(
+        credential: HubDeviceCredential
+    ) async throws -> [ServerGeneratedPlaylist] {
+        try await getAuthenticated(
+            "v1/playlists",
+            credential: credential
+        )
+    }
+
+    func reportPlaybackActivity(
+        _ snapshot: PlaybackActivitySnapshot,
+        credential: HubDeviceCredential?
+    ) async throws {
+        var request = URLRequest(url: try url(for: "v1/playback/activity"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        authenticate(&request, credential: credential)
+        request.httpBody = try encoder.encode(snapshot)
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
     }
 
     func downloadBlob(

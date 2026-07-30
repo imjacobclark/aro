@@ -228,7 +228,8 @@ final class LibraryDatabase: @unchecked Sendable {
                        la.analyzed_at, la.algorithm_version,
                        COALESCE(ts.album_override, sm.album),
                        sm.genre, sm.release_year,
-                       sm.artwork, ts.favourite
+                       sm.artwork, ts.favourite,
+                       ts.mb_genres_json, ts.mood_tags_json
                 FROM file_locations AS l
                 JOIN tracks AS t ON t.id = l.track_id
                 JOIN scan_metadata AS sm ON sm.track_id = t.id
@@ -346,7 +347,11 @@ final class LibraryDatabase: @unchecked Sendable {
                         contentHash: contentHash,
                         isFavourite:
                             sqlite3_column_int(statement, 21) != 0,
-                        loudness: loudness
+                        loudness: loudness,
+                        musicbrainzGenres: stringArray(
+                            from: text(statement, 22)
+                        ),
+                        moodTags: stringArray(from: text(statement, 23))
                     )
                 )
             }
@@ -378,6 +383,7 @@ final class LibraryDatabase: @unchecked Sendable {
                             continue
                         }
                         let favourite = try isFavourite(trackID: trackID)
+                        let tags = try moodAndGenreTags(trackID: trackID)
                         reconciled.append(
                             Song(
                                 libraryID: trackID,
@@ -394,7 +400,9 @@ final class LibraryDatabase: @unchecked Sendable {
                                 fileFingerprint: song.fileFingerprint,
                                 contentHash: song.contentHash,
                                 isFavourite: favourite,
-                                loudness: song.loudness
+                                loudness: song.loudness,
+                                musicbrainzGenres: tags.genres,
+                                moodTags: tags.moods
                             )
                         )
                     }
@@ -472,7 +480,9 @@ final class LibraryDatabase: @unchecked Sendable {
         album: String?,
         musicbrainzRecordingID: String?,
         acoustidID: String?,
-        artworkData: Data?
+        artworkData: Data?,
+        musicbrainzGenresJSON: String? = nil,
+        moodTagsJSON: String? = nil
     ) -> Bool {
         lock.withLock {
             guard let statement = try? prepare(
@@ -497,8 +507,9 @@ final class LibraryDatabase: @unchecked Sendable {
                     """
                     INSERT INTO track_state
                         (track_id, updated_at, title_override, artist_override,
-                         album_override, musicbrainz_recording_id, acoustid_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                         album_override, musicbrainz_recording_id, acoustid_id,
+                         mb_genres_json, mood_tags_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(track_id) DO UPDATE SET
                         updated_at = excluded.updated_at,
                         title_override =
@@ -512,7 +523,11 @@ final class LibraryDatabase: @unchecked Sendable {
                             track_state.musicbrainz_recording_id
                         ),
                         acoustid_id =
-                            COALESCE(excluded.acoustid_id, track_state.acoustid_id)
+                            COALESCE(excluded.acoustid_id, track_state.acoustid_id),
+                        mb_genres_json =
+                            COALESCE(excluded.mb_genres_json, track_state.mb_genres_json),
+                        mood_tags_json =
+                            COALESCE(excluded.mood_tags_json, track_state.mood_tags_json)
                     """
                 ) {
                     bind(trackID, to: $0, at: 1)
@@ -522,6 +537,8 @@ final class LibraryDatabase: @unchecked Sendable {
                     bind(album, to: $0, at: 5)
                     bind(musicbrainzRecordingID, to: $0, at: 6)
                     bind(acoustidID, to: $0, at: 7)
+                    bind(musicbrainzGenresJSON, to: $0, at: 8)
+                    bind(moodTagsJSON, to: $0, at: 9)
                 }
                 if let artworkData {
                     try run(
@@ -714,6 +731,31 @@ final class LibraryDatabase: @unchecked Sendable {
             && sqlite3_column_int(statement, 0) != 0
     }
 
+    /// Background-identification genre/mood tags for `trackID`, re-read from
+    /// `track_state` on every rescan (like `isFavourite` above) rather than carried over
+    /// from the incoming scanned `Song`, since `AudioScanner` never populates them — they
+    /// only ever come from `applyIdentification`.
+    private func moodAndGenreTags(
+        trackID: UUID
+    ) throws -> (genres: [String], moods: [String]) {
+        let statement = try prepare(
+            """
+            SELECT mb_genres_json, mood_tags_json
+            FROM track_state
+            WHERE track_id = ?
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        bind(trackID.uuidString, to: statement, at: 1)
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            return ([], [])
+        }
+        return (
+            stringArray(from: text(statement, 0)),
+            stringArray(from: text(statement, 1))
+        )
+    }
+
     private func volumeIdentifier(for url: URL) -> String? {
         let values = try? url.resourceValues(forKeys: [.volumeUUIDStringKey])
         return values?.volumeUUIDString
@@ -856,6 +898,16 @@ final class LibraryDatabase: @unchecked Sendable {
         sqlite3_column_type(statement, column) == SQLITE_NULL
             ? nil
             : sqlite3_column_int64(statement, column)
+    }
+
+    /// Decodes a `track_state.mb_genres_json`/`mood_tags_json`-style column (a
+    /// JSON-array-encoded string, or `NULL`) into `[String]`. Malformed or missing JSON
+    /// just yields no tags rather than failing the whole song read.
+    private func stringArray(from json: String?) -> [String] {
+        guard let json, let data = json.data(using: .utf8) else {
+            return []
+        }
+        return (try? JSONDecoder().decode([String].self, from: data)) ?? []
     }
 
     private func bind(

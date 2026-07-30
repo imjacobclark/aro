@@ -12,6 +12,7 @@ use axum::{
     routing::{get, post},
 };
 use chrono::Duration;
+use futures_util::Stream;
 use ipnet::IpNet;
 use serde::Deserialize;
 use serde_json::json;
@@ -19,7 +20,12 @@ use sha2::{Digest, Sha256};
 use std::{
     net::{IpAddr, SocketAddr},
     path::PathBuf,
-    sync::Arc,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    task::{Context, Poll},
 };
 use subtle::ConstantTimeEq;
 use tokio::{
@@ -42,6 +48,79 @@ pub struct AppState {
     pub jobs: JobRegistry,
     pub store: HubStore,
     pub sources: SourceManager,
+    pub telemetry: RuntimeTelemetry,
+}
+
+#[derive(Clone, Default)]
+pub struct RuntimeTelemetry {
+    inner: Arc<RuntimeTelemetryInner>,
+}
+
+#[derive(Default)]
+struct RuntimeTelemetryInner {
+    active_transfers: AtomicU64,
+    bytes_served: AtomicU64,
+    completed_transfers: AtomicU64,
+}
+
+impl RuntimeTelemetry {
+    pub fn active_transfers(&self) -> u64 {
+        self.inner.active_transfers.load(Ordering::Relaxed)
+    }
+
+    pub fn bytes_served(&self) -> u64 {
+        self.inner.bytes_served.load(Ordering::Relaxed)
+    }
+
+    pub fn completed_transfers(&self) -> u64 {
+        self.inner.completed_transfers.load(Ordering::Relaxed)
+    }
+
+    fn track<S>(&self, stream: S) -> TrackedStream<S> {
+        self.inner.active_transfers.fetch_add(1, Ordering::Relaxed);
+        TrackedStream {
+            inner: stream,
+            telemetry: self.clone(),
+        }
+    }
+}
+
+struct TrackedStream<S> {
+    inner: S,
+    telemetry: RuntimeTelemetry,
+}
+
+impl<S, E> Stream for TrackedStream<S>
+where
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+{
+    type Item = Result<Bytes, E>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                self.telemetry
+                    .inner
+                    .bytes_served
+                    .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                Poll::Ready(Some(Ok(bytes)))
+            }
+            other => other,
+        }
+    }
+}
+
+impl<S> Drop for TrackedStream<S> {
+    fn drop(&mut self) {
+        self.telemetry
+            .inner
+            .active_transfers
+            .fetch_sub(1, Ordering::Relaxed);
+        self.telemetry
+            .inner
+            .completed_transfers
+            .fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 fn is_peer_allowed(allow: &[IpNet], peer: IpAddr) -> bool {
@@ -113,9 +192,60 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/identify", post(identify_tracks))
         .route("/v1/identification/status", get(identification_status))
         .route("/v1/loudness/status", get(loudness_status))
+        .route("/v1/playback/activity", post(playback_activity))
+        .route("/v1/playlists", get(playlists))
         .route("/v1/jobs/{id}", get(job_status).delete(cancel_job));
 
-    admin_only.merge(shared).with_state(state)
+    admin_only
+        .merge(shared)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            request_telemetry,
+        ))
+        .with_state(state)
+}
+
+async fn request_telemetry(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let method = request.method().to_string();
+    let path = request.uri().path().to_owned();
+    let started = std::time::Instant::now();
+    let response = next.run(request).await;
+    let _ = state.store.record_http_request(
+        &method,
+        &path,
+        &peer.to_string(),
+        response.status().as_u16(),
+        started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
+    );
+    response
+}
+
+async fn playback_activity(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(snapshot): Json<PlaybackActivitySnapshot>,
+) -> Result<StatusCode, ApiError> {
+    let device_id = if bearer(&headers).is_some_and(|token| token == state.admin_token) {
+        if !is_peer_allowed(&state.admin_allow, peer.ip()) {
+            return Err(ApiError::forbidden(
+                "admin_network_denied",
+                "This network is not permitted to report local playback.",
+            ));
+        }
+        state.hub_id
+    } else {
+        require_device(&state, &headers)?
+    };
+    state
+        .store
+        .record_playback_activity(device_id, &snapshot, Some(&peer.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn pairing_requests(
@@ -544,9 +674,10 @@ async fn download_blob(
         .store
         .blob_path_for_download(&hash)?
         .ok_or_else(|| ApiError::not_found("blob_not_found"))?;
-    download_range(
+    download_range_tracked(
         path,
         headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
+        state.telemetry.clone(),
     )
     .await
 }
@@ -559,6 +690,21 @@ async fn export_manifest(
     state.store.refresh_host_source_health()?;
     state.store.garbage_collect_expired_blobs()?;
     Ok(Json(state.store.export_manifest(&state.display_name)?))
+}
+
+/// Auto-generated playlists from this hub's canonical analytics — see
+/// `crate::playlists`. The hub generates; clients (local or remote) only map the
+/// returned content hashes onto their own catalogs and render.
+async fn playlists(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::playlists::GeneratedPlaylist>>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    let store = state.store.clone();
+    let seeds = tokio::task::spawn_blocking(move || store.playlist_seeds())
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))??;
+    Ok(Json(crate::playlists::generate(&seeds, chrono::Utc::now())))
 }
 
 async fn source_health(
@@ -636,7 +782,24 @@ async fn loudness_status(
     Ok(Json(state.sources.loudness().status().await))
 }
 
+#[cfg(test)]
 async fn download_range(path: PathBuf, range: Option<&str>) -> Result<Response, ApiError> {
+    download_range_inner(path, range, None).await
+}
+
+async fn download_range_tracked(
+    path: PathBuf,
+    range: Option<&str>,
+    telemetry: RuntimeTelemetry,
+) -> Result<Response, ApiError> {
+    download_range_inner(path, range, Some(telemetry)).await
+}
+
+async fn download_range_inner(
+    path: PathBuf,
+    range: Option<&str>,
+    telemetry: Option<RuntimeTelemetry>,
+) -> Result<Response, ApiError> {
     let mut file = fs::File::open(path).await.map_err(ApiError::internal)?;
     let total = file.metadata().await.map_err(ApiError::internal)?.len();
     let requested = match range {
@@ -668,9 +831,14 @@ async fn download_range(path: PathBuf, range: Option<&str>) -> Result<Response, 
             format!("bytes {start}-{end}/{total}"),
         );
     }
-    response
-        .body(Body::from_stream(stream))
-        .map_err(ApiError::internal)
+    match telemetry {
+        Some(telemetry) => response
+            .body(Body::from_stream(telemetry.track(stream)))
+            .map_err(ApiError::internal),
+        None => response
+            .body(Body::from_stream(stream))
+            .map_err(ApiError::internal),
+    }
 }
 
 fn parse_byte_range(value: &str, total: u64) -> Result<(u64, u64), ()> {

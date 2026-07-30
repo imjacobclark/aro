@@ -86,6 +86,11 @@ enum ControlCommand {
     Blob {
         hash: String,
     },
+    /// Auto-generated playlists derived from this hub's canonical analytics (listening
+    /// events, favourites, MusicBrainz mood tags) — see `crate::playlists`. Keyed by
+    /// content hash; the macOS app maps hashes onto its local catalog and renders. The
+    /// hub generates, clients never do.
+    Playlists,
     Status,
 }
 
@@ -108,7 +113,7 @@ struct ControlResponse {
     error: Option<String>,
 }
 
-const CONTROL_PROTOCOL_VERSION: u16 = 6;
+const CONTROL_PROTOCOL_VERSION: u16 = 7;
 
 pub async fn start(path: &Path, state: Arc<AppState>) -> Result<JoinHandle<()>> {
     if let Some(parent) = path.parent() {
@@ -266,6 +271,11 @@ async fn handle(stream: &mut UnixStream, state: Arc<AppState>) -> Result<Value> 
                     bytes
                 )
             })
+        }
+        ControlCommand::Playlists => {
+            let store = state.store.clone();
+            let seeds = tokio::task::spawn_blocking(move || store.playlist_seeds()).await??;
+            serde_json::to_value(crate::playlists::generate(&seeds, chrono::Utc::now()))?
         }
         ControlCommand::Status => json!({
             "control_protocol_version": CONTROL_PROTOCOL_VERSION,

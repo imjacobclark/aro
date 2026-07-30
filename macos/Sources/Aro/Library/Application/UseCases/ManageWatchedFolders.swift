@@ -36,7 +36,9 @@ struct ManageWatchedFolders: Sendable {
         album: String?,
         musicbrainzRecordingID: String?,
         acoustidID: String?,
-        artworkData: Data?
+        artworkData: Data?,
+        musicbrainzGenresJSON: String? = nil,
+        moodTagsJSON: String? = nil
     ) -> Bool {
         catalog.applyIdentification(
             contentHash: contentHash,
@@ -45,7 +47,9 @@ struct ManageWatchedFolders: Sendable {
             album: album,
             musicbrainzRecordingID: musicbrainzRecordingID,
             acoustidID: acoustidID,
-            artworkData: artworkData
+            artworkData: artworkData,
+            musicbrainzGenresJSON: musicbrainzGenresJSON,
+            moodTagsJSON: moodTagsJSON
         )
     }
 

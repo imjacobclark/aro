@@ -3,6 +3,7 @@ import AroCommon
 import Foundation
 
 enum Destination: Hashable {
+    case home
     case songs
     case artists
     case albums

@@ -1,7 +1,7 @@
 import Foundation
 
 public enum AroSyncProtocol {
-    public static let currentVersion: UInt16 = 4
+    public static let currentVersion: UInt16 = 5
 }
 
 public enum SyncReplicaMode: String, Codable, CaseIterable, Sendable {

@@ -38,6 +38,29 @@ pub struct RecordingResponse {
     pub artist_credit: Vec<ArtistCredit>,
     #[serde(default)]
     pub releases: Vec<Release>,
+    /// MusicBrainz's own curated genre subset — present once `inc=genres` is requested.
+    /// Unlike [`Self::tags`] (the broader, uncurated folksonomy), these are already genre
+    /// names, not free-form community text, so [`canonicalize_tags`] passes them through
+    /// directly rather than matching them against a keyword table.
+    #[serde(default)]
+    pub genres: Vec<MbTag>,
+    /// The full folksonomy tag list — present once `inc=tags` is requested. Includes moods,
+    /// scenes, and noise ("seen live", "favorites") alongside genre-ish terms; MusicBrainz
+    /// has no dedicated mood vocabulary, so [`canonicalize_tags`] matches these against a
+    /// small keyword table to derive mood instead.
+    #[serde(default)]
+    pub tags: Vec<MbTag>,
+}
+
+/// One community-contributed folksonomy tag or curated genre, as returned by MusicBrainz's
+/// `inc=tags`/`inc=genres`. `count` is the number of users who applied it — used to rank
+/// which tags are actually representative rather than one person's one-off label.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MbTag {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -347,6 +370,75 @@ fn normalize(value: impl AsRef<str>) -> String {
     crate::matching::normalize_matching_key(value)
 }
 
+/// Derives a small canonical genre list and up to 2 canonical mood tags from a
+/// MusicBrainz recording's `genres`/`tags` folksonomy data, for driving auto-generated
+/// playlists (e.g. a "relaxed" mood mix) from real per-track metadata rather than
+/// fabricated categories.
+///
+/// `genres` (MusicBrainz's own curated subset) passes straight through, ranked by vote
+/// count — these are already genre names, not free text. `tags` (the broader, uncurated
+/// folksonomy — includes moods, scenes, and noise like "seen live" or "favorites"
+/// alongside genre-ish terms) is matched against [`mood_for_tag`]'s keyword table instead,
+/// since MusicBrainz has no dedicated mood vocabulary of its own.
+pub fn canonicalize_tags(genres: &[MbTag], tags: &[MbTag]) -> (Vec<String>, Vec<String>) {
+    let mut sorted_genres = genres.to_vec();
+    sorted_genres.sort_by_key(|tag| Reverse(tag.count));
+    let genre_names = sorted_genres
+        .into_iter()
+        .map(|tag| tag.name)
+        .filter(|name| !name.trim().is_empty())
+        .take(5)
+        .collect();
+
+    let mut sorted_tags = tags.to_vec();
+    sorted_tags.sort_by_key(|tag| Reverse(tag.count));
+    let mut moods: Vec<String> = Vec::new();
+    for tag in &sorted_tags {
+        if let Some(mood) = mood_for_tag(&tag.name)
+            && !moods.iter().any(|existing| existing == mood)
+        {
+            moods.push(mood.to_string());
+        }
+        if moods.len() >= 2 {
+            break;
+        }
+    }
+
+    (genre_names, moods)
+}
+
+/// Keyword table mapping raw MusicBrainz folksonomy tag names to a small, fixed mood
+/// vocabulary. Deliberately conservative — an unrecognized tag contributes no mood rather
+/// than a guessed one, since a wrong mood is worse than a missing one for playlist
+/// generation.
+fn mood_for_tag(tag: &str) -> Option<&'static str> {
+    const RELAXED: &[&str] = &[
+        "chillout", "chill", "ambient", "mellow", "downtempo", "acoustic", "lo-fi", "lofi",
+        "calm", "relaxing", "relaxed", "easy listening",
+    ];
+    const MELANCHOLY: &[&str] = &["sad", "melancholy", "melancholic", "moody", "wistful"];
+    const ENERGETIC: &[&str] = &[
+        "party", "dance", "upbeat", "energetic", "anthemic", "high energy", "banger",
+        "workout",
+    ];
+    const FEELGOOD: &[&str] = &[
+        "feel good", "feelgood", "summer", "happy", "uplifting", "sunny", "fun",
+    ];
+
+    let normalized = tag.trim().to_lowercase();
+    if RELAXED.contains(&normalized.as_str()) {
+        Some("relaxed")
+    } else if MELANCHOLY.contains(&normalized.as_str()) {
+        Some("mellow")
+    } else if ENERGETIC.contains(&normalized.as_str()) {
+        Some("energetic")
+    } else if FEELGOOD.contains(&normalized.as_str()) {
+        Some("feelgood")
+    } else {
+        None
+    }
+}
+
 impl MusicBrainzClient {
     pub fn new(user_agent: String) -> Self {
         Self {
@@ -361,8 +453,11 @@ impl MusicBrainzClient {
         // `+media`: verified directly against the live API that this is what puts
         // `media[].track-count`/`track-offset` stubs onto each embedded release stub, at no
         // extra request — see `Release::media`'s doc comment. Absent without it.
+        // `+genres+tags`: adds this recording's own curated genres and folksonomy tags (see
+        // `RecordingResponse::genres`/`tags`) — free on this same request, feeds
+        // `canonicalize_tags` for playlist mood/genre derivation.
         let url = format!(
-            "https://musicbrainz.org/ws/2/recording/{mbid}?fmt=json&inc=artist-credits+releases+release-groups+media"
+            "https://musicbrainz.org/ws/2/recording/{mbid}?fmt=json&inc=artist-credits+releases+release-groups+media+genres+tags"
         );
         let response = self
             .http
@@ -741,5 +836,67 @@ mod tests {
         assert_eq!(index.count("rg-b"), 5);
         assert!(index.is_canonical("rg-a"));
         assert!(index.is_canonical("rg-b"));
+    }
+
+    fn tag(name: &str, count: u32) -> MbTag {
+        MbTag {
+            name: name.to_string(),
+            count,
+        }
+    }
+
+    #[test]
+    fn canonicalize_tags_ranks_genres_by_count_and_caps_at_five() {
+        let genres = vec![
+            tag("shoegaze", 2),
+            tag("dream pop", 9),
+            tag("indie rock", 5),
+            tag("noise pop", 4),
+            tag("alternative rock", 3),
+            tag("britpop", 1),
+        ];
+
+        let (genre_names, _) = canonicalize_tags(&genres, &[]);
+
+        assert_eq!(
+            genre_names,
+            vec!["dream pop", "indie rock", "noise pop", "alternative rock", "shoegaze"]
+        );
+    }
+
+    #[test]
+    fn canonicalize_tags_maps_folksonomy_tags_to_known_moods() {
+        let tags = vec![tag("chillout", 10), tag("seen live", 20), tag("summer", 3)];
+
+        let (_, moods) = canonicalize_tags(&[], &tags);
+
+        assert_eq!(moods, vec!["relaxed".to_string(), "feelgood".to_string()]);
+    }
+
+    #[test]
+    fn canonicalize_tags_ignores_unrecognized_tags_and_caps_at_two_moods() {
+        let tags = vec![
+            tag("party", 10),
+            tag("favorites", 9),
+            tag("sad", 8),
+            tag("upbeat", 7),
+        ];
+
+        let (_, moods) = canonicalize_tags(&[], &tags);
+
+        // "party" and "sad" are the two highest-count recognized tags; "upbeat" (also
+        // "energetic") is dropped once two moods are already collected, and the
+        // unrecognized "favorites" tag never contributes.
+        assert_eq!(moods, vec!["energetic".to_string(), "mellow".to_string()]);
+    }
+
+    #[test]
+    fn canonicalize_tags_returns_empty_when_nothing_recognized() {
+        let tags = vec![tag("favorites", 5), tag("seen live", 3)];
+
+        let (genre_names, moods) = canonicalize_tags(&[], &tags);
+
+        assert!(genre_names.is_empty());
+        assert!(moods.is_empty());
     }
 }

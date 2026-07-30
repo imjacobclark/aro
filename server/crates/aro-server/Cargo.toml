@@ -19,6 +19,7 @@ chrono.workspace = true
 clap.workspace = true
 hex.workspace = true
 fs2.workspace = true
+futures-util.workspace = true
 http.workspace = true
 ipnet.workspace = true
 mdns-sd.workspace = true

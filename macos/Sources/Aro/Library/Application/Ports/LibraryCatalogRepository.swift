@@ -27,7 +27,9 @@ protocol LibraryCatalogRepository: Sendable {
         album: String?,
         musicbrainzRecordingID: String?,
         acoustidID: String?,
-        artworkData: Data?
+        artworkData: Data?,
+        musicbrainzGenresJSON: String?,
+        moodTagsJSON: String?
     ) -> Bool
 
     /// Tracks that learned an artwork URL through a synced track operation (rather

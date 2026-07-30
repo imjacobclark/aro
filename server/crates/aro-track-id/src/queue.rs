@@ -919,6 +919,7 @@ async fn per_file_fields(
     }
 
     if let Some(recording) = &prepared.musicbrainz_recording {
+        insert_mood_and_genre_fields(&mut fields, Some(recording));
         if let Some(title) = &recording.title {
             fields.insert("title".into(), json!(title));
         }
@@ -979,6 +980,31 @@ async fn per_file_fields(
         release_id,
         release_group_id,
     })
+}
+
+/// Adds `musicbrainz_genres`/`mood_tags` JSON-array-encoded string fields to `fields` from
+/// `recording`'s MusicBrainz genre/tag data, via [`musicbrainz::canonicalize_tags`] — shared
+/// by both the per-file ([`per_file_fields`]) and group (`identify_group`) resolution paths
+/// so mood/genre derivation isn't duplicated between them. A no-op if `recording` is `None`
+/// or has no matching genre/tag data.
+fn insert_mood_and_genre_fields(
+    fields: &mut serde_json::Map<String, Value>,
+    recording: Option<&musicbrainz::RecordingResponse>,
+) {
+    let Some(recording) = recording else { return };
+    let (genres, moods) = musicbrainz::canonicalize_tags(&recording.genres, &recording.tags);
+    if !genres.is_empty() {
+        fields.insert(
+            "musicbrainz_genres".into(),
+            json!(serde_json::to_string(&genres).unwrap_or_default()),
+        );
+    }
+    if !moods.is_empty() {
+        fields.insert(
+            "mood_tags".into(),
+            json!(serde_json::to_string(&moods).unwrap_or_default()),
+        );
+    }
 }
 
 /// How an identification result was produced, so [`should_revise`] can decide whether a new
@@ -1116,6 +1142,8 @@ async fn persist_result(
         resolution_generation: i64::from(crate::IDENTIFICATION_GENERATION),
         release_id: meta.release_id.clone(),
         release_group_id: meta.release_group_id.clone(),
+        musicbrainz_genres: text_field(&fields, "musicbrainz_genres"),
+        mood_tags: text_field(&fields, "mood_tags"),
     };
     tracing::info!(
         content_hash = %content_hash,
@@ -1404,6 +1432,7 @@ async fn identify_group(
             fields.insert("acoustid_id".into(), json!(file.acoustid_id));
             fields.insert("musicbrainz_recording_id".into(), json!(assignment.recording_id));
             fields.insert("title".into(), json!(assignment.title));
+            insert_mood_and_genre_fields(&mut fields, file.musicbrainz_recording.as_ref());
             if let Some(artist) = assignment
                 .track_artist
                 .clone()
@@ -1643,6 +1672,8 @@ mod tests {
             resolution_generation: 0,
             release_id: None,
             release_group_id: None,
+            musicbrainz_genres: None,
+            mood_tags: None,
         }
     }
 

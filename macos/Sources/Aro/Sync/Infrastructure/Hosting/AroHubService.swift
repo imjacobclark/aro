@@ -341,6 +341,13 @@ private struct MacHubConfigurationWriter {
         let escapedAcoustidApiKey = secrets.acoustidApiKey
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
+        let configURL = configDirectory.appendingPathComponent("aro.toml")
+        let existing = try? String(contentsOf: configURL, encoding: .utf8)
+        let dashboard = existing.flatMap(Self.dashboardSection) ?? """
+        [dashboard]
+        enabled = false
+        bind = "0.0.0.0:4849"
+        """
         let content = """
         hub_id = "\(hubID)"
         display_name = "\(Host.current().localizedName ?? "Aro")"
@@ -354,8 +361,9 @@ private struct MacHubConfigurationWriter {
         storage_mode = "\(defaults.string(forKey: "sync.host.importMode") ?? "managed")"
         source_rescan_seconds = 300
         acoustid_api_key = "\(escapedAcoustidApiKey)"
+
+        \(dashboard)
         """
-        let configURL = configDirectory.appendingPathComponent("aro.toml")
         try Data(content.utf8).write(
             to: configURL,
             options: .atomic
@@ -365,6 +373,26 @@ private struct MacHubConfigurationWriter {
             ofItemAtPath: configURL.path
         )
         return secrets
+    }
+
+    private static func dashboardSection(_ contents: String) -> String? {
+        let lines = contents.components(separatedBy: .newlines)
+        guard let start = lines.firstIndex(where: {
+            $0.trimmingCharacters(in: .whitespaces) == "[dashboard]"
+        }) else {
+            return nil
+        }
+        var end = lines.count
+        for index in lines.index(after: start)..<lines.endIndex {
+            let line = lines[index].trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("[") && line.hasSuffix("]") {
+                end = index
+                break
+            }
+        }
+        return lines[start..<end]
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func stableValue(

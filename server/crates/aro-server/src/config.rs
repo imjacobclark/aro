@@ -45,6 +45,7 @@ pub struct Config {
     pub advertise_mdns: bool,
     pub storage_mode: StorageMode,
     pub source_rescan_seconds: u64,
+    pub dashboard: DashboardConfig,
     /// Personal AcoustID API key used for background track identification. Empty
     /// disables identification entirely (its background queue is never started) —
     /// this is the expected state until a user enters a key in Settings.
@@ -55,6 +56,22 @@ pub struct Config {
     /// identify the app and include real contact information.
     #[serde(default = "default_musicbrainz_user_agent")]
     pub musicbrainz_user_agent: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DashboardConfig {
+    pub enabled: bool,
+    pub bind: SocketAddr,
+}
+
+impl Default for DashboardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 4849),
+        }
+    }
 }
 
 fn default_musicbrainz_user_agent() -> String {
@@ -84,6 +101,7 @@ impl Default for Config {
             advertise_mdns: true,
             storage_mode: StorageMode::Managed,
             source_rescan_seconds: 300,
+            dashboard: DashboardConfig::default(),
             acoustid_api_key: String::new(),
             musicbrainz_user_agent: default_musicbrainz_user_agent(),
         }
@@ -153,18 +171,26 @@ impl Config {
         if self.source_rescan_seconds < 10 {
             bail!("source_rescan_seconds must be at least 10");
         }
-        if let IpAddr::V4(ip) = self.bind.ip()
-            && !(ip.is_unspecified() || ip.is_private() || ip.is_loopback())
-        {
-            bail!("refusing non-private bind address; WAN hosting is out of scope");
+        if self.dashboard.enabled {
+            validate_lan_bind(self.dashboard.bind, "dashboard.bind")?;
+            if self.dashboard.bind.port() == self.bind.port() {
+                bail!("dashboard.bind must use a different port from the sync listener");
+            }
         }
-        if let IpAddr::V6(ip) = self.bind.ip()
-            && !(ip.is_unspecified() || ip.is_loopback() || ip.is_unique_local())
-        {
-            bail!("refusing non-private bind address; WAN hosting is out of scope");
-        }
+        validate_lan_bind(self.bind, "bind")?;
         Ok(())
     }
+}
+
+fn validate_lan_bind(bind: SocketAddr, field: &str) -> Result<()> {
+    let allowed = match bind.ip() {
+        IpAddr::V4(ip) => ip.is_unspecified() || ip.is_private() || ip.is_loopback(),
+        IpAddr::V6(ip) => ip.is_unspecified() || ip.is_loopback() || ip.is_unique_local(),
+    };
+    if !allowed {
+        bail!("{field} must be a private, loopback, or unspecified LAN address");
+    }
+    Ok(())
 }
 
 pub fn default_config_path() -> PathBuf {
@@ -231,6 +257,25 @@ mod admin_allow_tests {
     fn accepts_a_widened_lan_subnet() {
         let mut config = Config::default();
         config.admin_allow = vec!["192.168.1.0/24".parse().unwrap()];
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn dashboard_is_disabled_on_a_separate_port_by_default() {
+        let config = Config::default();
+        assert!(!config.dashboard.enabled);
+        assert_eq!(config.dashboard.bind.port(), 4849);
+    }
+
+    #[test]
+    fn enabled_dashboard_rejects_public_addresses_and_sync_port() {
+        let mut config = Config::default();
+        config.dashboard.enabled = true;
+        config.dashboard.bind = "8.8.8.8:4849".parse().unwrap();
+        assert!(config.validate().is_err());
+        config.dashboard.bind = "127.0.0.1:4848".parse().unwrap();
+        assert!(config.validate().is_err());
+        config.dashboard.bind = "127.0.0.1:4849".parse().unwrap();
         assert!(config.validate().is_ok());
     }
 }

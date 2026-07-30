@@ -41,9 +41,8 @@ struct AroApp: App {
         } ?? .standard
         _playbackPreferences = State(initialValue: preferences)
         _audioDeviceManager = State(initialValue: deviceManager)
-        _syncPreferences = State(
-            initialValue: SyncPreferences(defaults: syncDefaults)
-        )
+        let syncPreferences = SyncPreferences(defaults: syncDefaults)
+        _syncPreferences = State(initialValue: syncPreferences)
         let registry = LibraryProfileRegistry(defaults: syncDefaults)
         let selectedProfile = registry.activeProfile
         let databaseURL = selectedProfile.map {
@@ -57,7 +56,8 @@ struct AroApp: App {
             mediaDirectory: selectedProfile.map {
                 URL(fileURLWithPath: $0.mediaPath)
             },
-            profile: selectedProfile
+            profile: selectedProfile,
+            localAdminToken: syncPreferences.localAdminToken
         )
         registry.migrateLegacyState(
             databaseURL: databaseURL,
@@ -166,7 +166,8 @@ struct AroApp: App {
             playbackPreferences: playbackPreferences,
             audioDeviceManager: audioDeviceManager,
             mediaDirectory: URL(fileURLWithPath: profile.mediaPath),
-            profile: profile
+            profile: profile,
+            localAdminToken: syncPreferences.localAdminToken
         )
         let initialPaths = profile.managedMusicPath.map { [$0] }
             ?? profile.referencedMusicPaths

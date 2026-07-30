@@ -14,6 +14,8 @@ struct NavigationSidebar: View {
     var body: some View {
         List(selection: $selection) {
             Section {
+                navigationRow("Home", systemImage: "house.fill")
+                    .tag(Destination.home)
                 navigationRow("Songs", systemImage: "music.note.list")
                     .tag(Destination.songs)
                 navigationRow("Artists", systemImage: "music.mic")

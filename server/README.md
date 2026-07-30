@@ -18,6 +18,28 @@ public bind addresses. Bonjour advertises `_aro-sync._tcp.local.` with only
 the Aro ID, display name, protocol version, and pairing availability. Manual
 `https://hostname:4848` entry is supported by clients when multicast is absent.
 
+### Optional LAN intelligence dashboard
+
+The server can expose a read-only, unauthenticated dashboard on a separate
+plain-HTTP listener. It is disabled by default and configuration changes take
+effect after restarting the server:
+
+```toml
+[dashboard]
+enabled = true
+bind = "0.0.0.0:4849"
+```
+
+Open `http://hostname:4849/` for live listeners and transfers, consolidated
+listening/library statistics, metadata coverage, source and host health.
+Machine-readable data is available under `/api/v1/`; Prometheus can scrape
+`/metrics`.
+
+The dashboard intentionally reveals library metadata, device identity, peer
+addresses, and local paths to anyone who can reach its port. Its bind address
+must be private or loopback. Do not forward it to the public internet. Device
+and local playback reporting remains authenticated on the TLS sync listener.
+
 The storage mode belongs to the entire Aro and is fixed at initialization.
 Managed storage always copies files and publishes them only after SHA-256
 verification; it never creates hard links. Referenced storage records verified
