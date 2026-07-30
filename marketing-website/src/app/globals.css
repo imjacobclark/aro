@@ -404,6 +404,159 @@ button:focus-visible {
   display: block;
 }
 
+.intelligence-section {
+  position: relative;
+  padding: clamp(8rem, 14vw, 13rem) 0;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 8% 18%, rgba(255, 176, 59, 0.28), transparent 24rem),
+    radial-gradient(circle at 88% 78%, rgba(115, 89, 224, 0.19), transparent 30rem),
+    var(--paper-bright);
+  border-top: 1px solid rgba(18, 23, 51, 0.14);
+}
+
+.intelligence-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.82fr) minmax(30rem, 1.18fr);
+  gap: clamp(3rem, 8vw, 8rem);
+  align-items: center;
+}
+
+.intelligence-copy .story-copy {
+  margin-top: 2rem;
+}
+
+.intelligence-principle {
+  display: flex;
+  gap: 0.9rem;
+  align-items: flex-start;
+  max-width: 31rem;
+  margin-top: 2.4rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid rgba(18, 23, 51, 0.22);
+}
+
+.intelligence-principle > svg {
+  width: 1.15rem;
+  flex: 0 0 1.15rem;
+  margin-top: 0.15rem;
+  color: var(--violet);
+}
+
+.intelligence-principle strong,
+.intelligence-principle span {
+  display: block;
+}
+
+.intelligence-principle strong {
+  font-size: 0.82rem;
+}
+
+.intelligence-principle span {
+  margin-top: 0.35rem;
+  color: #626477;
+  font-size: 0.74rem;
+  line-height: 1.55;
+}
+
+.mix-board {
+  position: relative;
+  padding: clamp(1rem, 2vw, 1.4rem);
+  color: white;
+  background: #0b0e20;
+  box-shadow:
+    1.15rem 1.15rem 0 rgba(255, 115, 130, 0.22),
+    2.3rem 2.3rem 0 rgba(115, 89, 224, 0.12);
+}
+
+.mix-board-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.2rem 0.15rem 1rem;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 0.57rem;
+  font-weight: 730;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.mix-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem;
+}
+
+.mix-card {
+  min-height: 15rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: clamp(1rem, 2.2vw, 1.45rem);
+  overflow: hidden;
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.mix-card.violet {
+  background:
+    radial-gradient(circle at 78% 18%, rgba(255, 176, 59, 0.9), transparent 30%),
+    linear-gradient(145deg, #7359e0, #2b245c);
+}
+
+.mix-card.coral {
+  background:
+    radial-gradient(circle at 18% 16%, rgba(255, 255, 255, 0.32), transparent 28%),
+    linear-gradient(145deg, #ff7382, #8e263e);
+}
+
+.mix-card.amber {
+  color: var(--ink);
+  border-color: rgba(18, 23, 51, 0.14);
+  background:
+    radial-gradient(circle at 82% 18%, rgba(115, 89, 224, 0.5), transparent 28%),
+    linear-gradient(145deg, #ffd46f, #ff9d28);
+}
+
+.mix-card.night {
+  background:
+    radial-gradient(circle at 18% 18%, rgba(115, 89, 224, 0.85), transparent 30%),
+    linear-gradient(145deg, #252b52, #080a17);
+}
+
+.mix-art {
+  width: 3.25rem;
+  height: 3.25rem;
+  display: grid;
+  place-items: center;
+  margin-bottom: auto;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  opacity: 0.88;
+}
+
+.mix-art svg {
+  width: 1.15rem;
+}
+
+.mix-card > span {
+  max-width: 22ch;
+  margin-bottom: 0.55rem;
+  font-size: 0.6rem;
+  font-weight: 660;
+  letter-spacing: 0.04em;
+  line-height: 1.45;
+  opacity: 0.72;
+  text-transform: uppercase;
+}
+
+.mix-card h3 {
+  margin: 0;
+  font-size: clamp(1rem, 2vw, 1.45rem);
+  letter-spacing: -0.045em;
+  line-height: 1.08;
+}
+
 .difference-section {
   padding: clamp(7rem, 12vw, 11rem) 0;
   background: var(--paper-bright);
@@ -1015,8 +1168,14 @@ button:focus-visible {
   .story-grid,
   .download-grid,
   .product-heading,
+  .intelligence-grid,
   .difference-heading {
     grid-template-columns: 1fr;
+  }
+
+  .mix-board {
+    width: min(100% - 1.2rem, 40rem);
+    justify-self: center;
   }
 
   .sleeve {
@@ -1091,6 +1250,14 @@ button:focus-visible {
 
   .feature-grid {
     grid-template-columns: 1fr;
+  }
+
+  .mix-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .mix-card {
+    min-height: 12rem;
   }
 
   .feature-card {

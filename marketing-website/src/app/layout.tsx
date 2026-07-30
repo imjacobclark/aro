@@ -13,9 +13,9 @@ const siteUrl = "https://listenaro.xyz/";
 
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
-  title: "Aro — A complete music system for people who own their music",
+  title: "Aro — Your music, fully alive",
   description:
-    "Host, play, organise, replicate, and export the music you own with one complete system.",
+    "Original-quality playback, made-for-you mixes, private multi-Mac access, and complete ownership for the music collection you already have.",
   alternates: {
     canonical: siteUrl,
   },
@@ -26,9 +26,9 @@ export const metadata: Metadata = {
   openGraph: {
     type: "website",
     url: siteUrl,
-    title: "Aro — A complete music system for people who own their music",
+    title: "Aro — Your music, fully alive",
     description:
-      "Host your library, play every song bit-perfect, keep verified copies across Aros, and export everything whenever you want.",
+      "Hear your collection in original quality, rediscover it through your own listening, and keep it private, portable, and completely yours.",
     siteName: "Aro",
     images: [
       {
@@ -41,9 +41,9 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: "Aro — A complete music system for people who own their music",
+    title: "Aro — Your music, fully alive",
     description:
-      "Host, play, organise, replicate, and export the music you own.",
+      "Original-quality playback and made-for-you rediscovery for the music you own.",
     images: [`${siteUrl}og.png`],
   },
 };

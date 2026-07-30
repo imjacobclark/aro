@@ -26,17 +26,17 @@ export function SiteHeader() {
           aria-label="Primary navigation"
           className="hidden items-center gap-7 text-[0.72rem] font-semibold md:flex"
         >
-          <a className="transition-colors hover:text-[#7359e0]" href="#resilience">
-            Redundancy
+          <a className="transition-colors hover:text-[#7359e0]" href="#intelligence">
+            Made for you
           </a>
           <a className="transition-colors hover:text-[#7359e0]" href="#fidelity">
-            Playback
+            Sound
           </a>
-          <a className="transition-colors hover:text-[#7359e0]" href="#system">
-            Complete system
+          <a className="transition-colors hover:text-[#7359e0]" href="#resilience">
+            Your library
           </a>
           <a className="transition-colors hover:text-[#7359e0]" href="#export">
-            Export
+            No lock-in
           </a>
         </nav>
         <a

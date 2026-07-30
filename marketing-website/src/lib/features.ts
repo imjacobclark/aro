@@ -22,15 +22,27 @@ const groupTitles: Record<string, string[]> = {
     "Safe Library Housekeeping",
     "Move Without Rebuilding",
   ],
-  "Connection & Resilience": [
+  "Home & Rediscovery": [
+    "Made From Your Listening",
+    "Rediscover the Forgotten",
+    "Your Listening Story",
+    "Know Your Collection",
+    "Know Every Recording",
+    "Metadata Stays in Your Hands",
+    "A Health Check for Music",
+    "See Space You Could Reclaim",
+  ],
+  "Private Connection & Resilience": [
     "Your Aro, Everywhere",
     "Pair in Seconds",
     "Direct, Encrypted, Approved",
     "You Control Every Device",
     "Every Aro Carries the Library",
+    "Keep What Matters Nearby",
     "Switch Libraries in One App",
     "Runs Beyond the App",
     "Host Aro Almost Anywhere",
+    "See Aro at a Glance",
   ],
   "Sound & Playback": [
     "Bit-Perfect by Default",
@@ -40,41 +52,22 @@ const groupTitles: Record<string, string[]> = {
     "Albums Flow Without Gaps",
     "Your Output, Your Choice",
     "See the Signal Path",
-    "A Queue That Follows You",
-  ],
-  "Browse & Rediscover": [
+    "Press Play Without Waiting",
+    "Playback That Recovers",
+    "Shuffle, Repeat, Favourite",
     "Browse Music as Music",
     "Find Artists and Albums Fast",
-    "Know Every Recording",
-    "Metadata Stays in Your Hands",
-    "A Health Check for Music",
-    "See Space You Could Reclaim",
-    "Your Listening Story",
-    "Know Your Collection",
   ],
   "Offline & Recovery": [
     "Offline Music That Protects Itself",
     "Storage Without the Guesswork",
-    "Every Download Checked",
-    "Interrupted Downloads Recover",
+    "Completed Copies Are Checked",
+    "Interrupted Transfers Recover",
     "Durability Without Waste",
     "Take the Whole Library Back",
     "Exports Respect What Exists",
   ],
 };
-
-const additionalShippedFeatures: ProductFeature[] = [
-  {
-    title: "Know Every Recording",
-    description:
-      "Identify unknown or incomplete songs by how they sound, then bring canonical titles, artists, albums, and artwork into Aro with AcoustID and MusicBrainz.",
-  },
-  {
-    title: "Metadata Stays in Your Hands",
-    description:
-      "Keep identified details inside Aro by default, use them in exports, or explicitly choose to write title, artist, and album tags back to reachable originals.",
-  },
-];
 
 function featuresPath(): string {
   const candidates = [
@@ -122,7 +115,7 @@ export function loadFeatures(): ProductFeature[] {
     titles.add(feature.title);
   }
 
-  return [...features, ...additionalShippedFeatures];
+  return features;
 }
 
 export function groupFeatures(features: ProductFeature[]): FeatureGroup[] {

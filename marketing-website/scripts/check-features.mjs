@@ -14,9 +14,9 @@ const bulletLines = source
   .filter((line) => line.startsWith("- "));
 const titles = new Set(features.map((feature) => feature.title));
 
-if (features.length !== 37) {
+if (features.length !== 45) {
   throw new Error(
-    `Expected all 37 audited features, found ${features.length} in ${featurePath}`,
+    `Expected all 45 audited features, found ${features.length} in ${featurePath}`,
   );
 }
 

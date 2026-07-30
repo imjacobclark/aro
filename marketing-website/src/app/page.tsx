@@ -4,16 +4,21 @@ import {
   Check,
   Download,
   ExternalLink,
+  Heart,
   Music2,
+  Radio,
   ShieldCheck,
+  Sparkles,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { CopyCommand } from "@/components/copy-command";
+import { FeatureIndex } from "@/components/feature-index";
 import { Reveal } from "@/components/reveal";
 import { SiteHeader } from "@/components/site-header";
 import { SpectrumWave } from "@/components/spectrum-wave";
+import { loadFeatures } from "@/lib/features";
 import { releaseDownload } from "@/lib/release";
 import { cn } from "@/lib/utils";
 
@@ -31,51 +36,51 @@ open "$HOME/Applications/Aro.app"`;
 const stories = [
   {
     id: "resilience",
-    number: "01",
-    eyebrow: "Redundancy",
-    title: "Your library gets safer with every Aro.",
-    copy: "Choose which albums—or the entire library—each Aro should keep. Every copy is complete, verified against the original, and independently playable when another device goes offline.",
+    number: "02",
+    eyebrow: "One private library",
+    title: "Every Aro makes your music more available.",
+    copy: "Press play from another Mac and the song starts as it arrives. Keep recent listening, favourite albums, or a complete independently playable copy wherever you choose.",
     points: [
-      "Keep full, playable copies on the devices you choose",
-      "Every copied song is checked against the original",
-      "Interrupted replication continues where it stopped",
+      "Private, encrypted connections with no Aro cloud",
+      "Fast read-ahead for playback, seeking, and the next song",
+      "Complete copies stay playable when another device is offline",
     ],
     tone: "amber",
     visual: "copies",
   },
   {
     id: "fidelity",
-    number: "02",
+    number: "03",
     eyebrow: "Playback",
-    title: "Every song, complete and bit-perfect.",
-    copy: "Aro verifies the complete song before it reaches the player, then plays it without recompression or added processing. Native sample rates follow the music whenever the audio path supports them.",
+    title: "Hear the file you chose. Not a substitute.",
+    copy: "Aro plays your original format without a transcoded stand-in or hidden processing. Native sample rates follow the music whenever the audio path supports them.",
     points: [
-      "No partial playback and no transcoded substitute",
       "Bit-perfect, native-rate playback by default",
-      "See the complete path from the song to your output",
+      "Optional measured loudness matching for mixed queues",
+      "See the complete signal path to your output",
     ],
     tone: "dark",
     visual: "resolution",
   },
   {
     id: "system",
-    number: "03",
-    eyebrow: "Complete by design",
-    title: "Hosting, playback, and organisation in one system.",
-    copy: "Point Aro at a music folder and start listening. Aro hosts the library, plays it, watches for changes, identifies incomplete metadata, and keeps the collection organised without a separate server, client, or plugin stack.",
+    number: "04",
+    eyebrow: "Collection intelligence",
+    title: "Aro does the archaeology. You enjoy the collection.",
+    copy: "Point Aro at a folder. It watches for changes, identifies incomplete music by sound, restores useful details and artwork, and shows where duplicates or missing songs need attention.",
     points: [
-      "Browse albums, artists, artwork, and listening history",
-      "Identify songs with AcoustID and MusicBrainz",
-      "macOS now, with Linux and Windows clients coming soon",
+      "Canonical albums, artwork, genres, and mood signals",
+      "Exact duplicates and alternate encodings surfaced clearly",
+      "Your originals change only when you explicitly choose",
     ],
     tone: "coral",
     visual: "system",
   },
   {
     id: "export",
-    number: "04",
+    number: "05",
     eyebrow: "No lock-in",
-    title: "Easy to join. Easy to leave.",
+    title: "A library with an exit door.",
     copy: "Your collection never becomes dependent on Aro. Export the whole library into ordinary Artist and Album folders, in the original formats, with a manifest that records what came with you.",
     points: [
       "Repeatable, resumable whole-library exports",
@@ -86,6 +91,38 @@ const stories = [
     visual: "export",
   },
 ] as const;
+
+const mixes = [
+  {
+    title: "Heavy Rotation",
+    subtitle: "The songs you keep coming back to",
+    className: "violet",
+  },
+  {
+    title: "Deep Cuts",
+    subtitle: "Music waiting to be heard again",
+    className: "coral",
+  },
+  {
+    title: "Recently Loved",
+    subtitle: "Every favourite, close at hand",
+    className: "amber",
+  },
+  {
+    title: "Quiet Hours",
+    subtitle: "A mood found inside your library",
+    className: "night",
+  },
+] as const;
+
+const spotlightFeatureTitles = new Set([
+  "Press Play Without Waiting",
+  "Know Every Recording",
+  "A Health Check for Music",
+  "Your Listening Story",
+  "Pair in Seconds",
+  "See Aro at a Glance",
+]);
 
 function StoryVisual({ visual, number }: { visual: string; number: string }) {
   if (visual === "formats") {
@@ -179,6 +216,9 @@ function StoryVisual({ visual, number }: { visual: string; number: string }) {
 
 export default function Home() {
   const release = releaseDownload();
+  const spotlightFeatures = loadFeatures().filter((feature) =>
+    spotlightFeatureTitles.has(feature.title),
+  );
 
   const structuredData = {
     "@context": "https://schema.org",
@@ -187,7 +227,7 @@ export default function Home() {
     applicationCategory: "MultimediaApplication",
     operatingSystem: "macOS 26 or later",
     description:
-      "A complete music system that hosts, plays, organises, replicates, and exports the songs you own.",
+      "A private, intelligent music system that makes the collection you own feel alive again.",
     downloadUrl: release.arm64Url,
     softwareVersion: release.version.replace(/^v/, ""),
   };
@@ -199,23 +239,25 @@ export default function Home() {
         <section className="hero" aria-labelledby="hero-title">
           <div className="site-shell hero-grid">
             <Reveal className="hero-copy">
-              <p className="eyebrow">Meet Aro</p>
+              <p className="eyebrow">The music you own, fully alive</p>
               <h1 id="hero-title" className="display-title balanced">
-                A music library built to last.
+                Your collection deserves more.
               </h1>
               <p className="hero-definition balanced">
-                Aro is a complete music system for people who own their music.
+                Aro turns a folder of music into a private, intelligent
+                listening system.
               </p>
               <p className="hero-lede balanced">
-                Aro hosts your library, organises it automatically, plays every
-                song bit-perfect, and keeps verified copies across the Aros you
-                choose. If you ever want to leave, export the whole collection.
+                Hear every song in its original quality. Get mixes made from
+                your own listening. Reach one library across your Macs. Keep
+                complete copies where you choose—and take everything back out
+                whenever you want.
               </p>
-              <div className="hero-hosts" aria-label="Aro hosting options">
-                <span>macOS now</span>
-                <span>Linux soon</span>
-                <span>Windows next</span>
-                <span>Original songs</span>
+              <div className="hero-hosts" aria-label="What makes Aro different">
+                <span>Original quality</span>
+                <span>Made-for-you mixes</span>
+                <span>Private by design</span>
+                <span>No subscription</span>
               </div>
               <div className="hero-actions">
                 <a
@@ -229,13 +271,13 @@ export default function Home() {
                   Download Aro
                 </a>
                 <a
-                  href="#resilience"
+                  href="#intelligence"
                   className={cn(
                     buttonVariants({ variant: "outline", size: "lg" }),
                     "h-12 rounded-none border-[#121733] bg-transparent px-6 text-xs font-bold shadow-none hover:bg-[#121733] hover:text-white",
                   )}
                 >
-                  How Aro works
+                  See what Aro does
                   <ArrowDown aria-hidden="true" data-icon="inline-end" />
                 </a>
               </div>
@@ -250,7 +292,7 @@ export default function Home() {
                   priority
                 />
               </div>
-              <span className="sleeve-label">Host it. Play it. Replicate it. Export it.</span>
+              <span className="sleeve-label">Own it. Hear it. Rediscover it.</span>
             </Reveal>
           </div>
         </section>
@@ -265,12 +307,13 @@ export default function Home() {
               <div>
                 <p className="eyebrow">Inside Aro</p>
                 <h2 id="inside-title" className="section-title balanced">
-                  Your complete music library, ready to play.
+                  Not a folder of files. A living collection.
                 </h2>
               </div>
               <p>
-                Add a folder and Aro does the rest: artwork, albums, artists,
-                listening history, library health, and playback in one app.
+                Home, albums, artists, listening history, collection health,
+                metadata, connected devices, and serious playback live together
+                in one native Mac app.
               </p>
             </Reveal>
             <Reveal className="product-stage" delay={100}>
@@ -289,14 +332,61 @@ export default function Home() {
                   width={1400}
                   height={850}
                 />
-                <span>Your listening story, kept with your library</span>
+                <span>Your listening story belongs to your library</span>
               </div>
               <div className="product-wave-card">
                 <div className="wave-copy">
-                  <span>Now playing</span>
-                  <strong>The sound of your library</strong>
+                  <span>Original signal</span>
+                  <strong>44.1 kHz · 16-bit · Bit-perfect</strong>
                 </div>
                 <SpectrumWave />
+              </div>
+            </Reveal>
+          </div>
+        </section>
+
+        <section
+          id="intelligence"
+          className="intelligence-section"
+          aria-labelledby="intelligence-title"
+        >
+          <div className="site-shell intelligence-grid">
+            <Reveal className="intelligence-copy">
+              <p className="eyebrow">01 / Made from your music</p>
+              <h2 id="intelligence-title" className="section-title balanced">
+                Aro listens to your listening.
+              </h2>
+              <p className="story-copy balanced">
+                Your favourites, play history, moods, and forgotten corners
+                become a Home that changes with you—not a feed designed to keep
+                you inside somebody else’s catalogue.
+              </p>
+              <div className="intelligence-principle">
+                <Sparkles aria-hidden="true" />
+                <div>
+                  <strong>Your data makes your playlists.</strong>
+                  <span>Your library stays private and under your control.</span>
+                </div>
+              </div>
+            </Reveal>
+            <Reveal className="mix-board" delay={100}>
+              <div className="mix-board-header">
+                <span>Made for you</span>
+                <span>From your Aro</span>
+              </div>
+              <div className="mix-grid">
+                {mixes.map((mix, index) => (
+                  <article className={`mix-card ${mix.className}`} key={mix.title}>
+                    <div className="mix-art" aria-hidden="true">
+                      {index === 0 && <Radio />}
+                      {index === 1 && <Music2 />}
+                      {index === 2 && <Heart />}
+                      {index === 3 && <Sparkles />}
+                    </div>
+                    <span>{mix.subtitle}</span>
+                    <h3>{mix.title}</h3>
+                  </article>
+                ))}
               </div>
             </Reveal>
           </div>
@@ -334,6 +424,27 @@ export default function Home() {
           ))}
         </div>
 
+        <section className="feature-index" aria-labelledby="feature-title">
+          <div className="site-shell">
+            <Reveal className="feature-heading">
+              <div>
+                <p className="eyebrow">More than a player</p>
+                <h2 id="feature-title" className="section-title balanced">
+                  Built around the whole life of a collection.
+                </h2>
+              </div>
+              <p>
+                From the first folder you add to the day you export everything,
+                Aro keeps sound, history, metadata, storage, and private access
+                working as one system.
+              </p>
+            </Reveal>
+            <Reveal delay={80}>
+              <FeatureIndex features={spotlightFeatures} />
+            </Reveal>
+          </div>
+        </section>
+
         <section id="download" className="download-section" aria-labelledby="download-title">
           <div className="site-shell download-grid">
             <Reveal>
@@ -342,8 +453,9 @@ export default function Home() {
                 Download the macOS preview.
               </h2>
               <p className="download-copy balanced">
-                Start listening with the early preview for macOS 26 and later.
-                Linux and Windows clients are coming soon.
+                Bring your collection back to life with the early preview for
+                macOS 26 and later. A standalone Aro can host the library from
+                an always-on Linux computer or compatible NAS.
               </p>
               <div className="mt-8 flex flex-wrap gap-2">
                 <Badge className="rounded-none border-white/25 bg-white/10 text-white">
