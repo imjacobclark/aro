@@ -81,6 +81,9 @@ struct NavigationSidebar: View {
         .listStyle(.sidebar)
         .scrollContentBackground(.hidden)
         .background(AroTheme.sidebarSurface)
+        // Sidebar selection is drawn by AppKit and ignores this tint entirely; it
+        // follows the bundle's `NSAccentColorName`/`AccentColor` asset instead (see
+        // scripts/build-app.sh). This still covers the controls inside the sidebar.
         .tint(AroTheme.violet)
     }
 

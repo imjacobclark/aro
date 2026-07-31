@@ -498,6 +498,28 @@ pub fn cover_art_url(release_mbid: &str) -> String {
     format!("https://coverartarchive.org/release/{release_mbid}/front")
 }
 
+/// The Cover Art Archive's release-*group* front-cover redirect — used as a fallback
+/// when the specific release we matched has no art of its own (see
+/// `fetch_cover_art_with_fallback`). The archive resolves this to whichever release in
+/// the group it considers the "front" release, so it's a reasonable stand-in even
+/// though it isn't guaranteed to be pixel-identical to *our* release's packaging.
+pub fn release_group_cover_art_url(release_group_mbid: &str) -> String {
+    format!("https://coverartarchive.org/release-group/{release_group_mbid}/front")
+}
+
+async fn fetch_image(http: &reqwest::Client, user_agent: &str, url: &str) -> Option<Vec<u8>> {
+    let response = http
+        .get(url)
+        .header(reqwest::header::USER_AGENT, user_agent)
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response.bytes().await.ok().map(|bytes| bytes.to_vec())
+}
+
 /// Fetches a release's front-cover image bytes from the Cover Art Archive, so
 /// the caller can cache it into the hub's own blob store instead of every
 /// client repeatedly hitting the archive directly (see `queue::cache_artwork`,
@@ -511,16 +533,27 @@ pub async fn fetch_cover_art(
     user_agent: &str,
     release_mbid: &str,
 ) -> Option<Vec<u8>> {
-    let response = http
-        .get(cover_art_url(release_mbid))
-        .header(reqwest::header::USER_AGENT, user_agent)
-        .send()
-        .await
-        .ok()?;
-    if !response.status().is_success() {
-        return None;
+    fetch_image(http, user_agent, &cover_art_url(release_mbid)).await
+}
+
+/// [`fetch_cover_art`], falling back to the release-*group*'s front cover when the
+/// specific release has none archived. This is common, not exceptional: MusicBrainz
+/// often matches us to a release variant (a particular regional pressing, reissue, or
+/// compilation edition) that nobody has individually scanned into the Cover Art
+/// Archive, even though the overall album has art uploaded against a sibling release
+/// in the same group — without this fallback, that release permanently has no
+/// artwork, since nothing else ever revisits a release whose own endpoint 404s.
+pub async fn fetch_cover_art_with_fallback(
+    http: &reqwest::Client,
+    user_agent: &str,
+    release_mbid: &str,
+    release_group_mbid: Option<&str>,
+) -> Option<Vec<u8>> {
+    if let Some(bytes) = fetch_cover_art(http, user_agent, release_mbid).await {
+        return Some(bytes);
     }
-    response.bytes().await.ok().map(|bytes| bytes.to_vec())
+    let release_group_mbid = release_group_mbid?;
+    fetch_image(http, user_agent, &release_group_cover_art_url(release_group_mbid)).await
 }
 
 #[cfg(test)]

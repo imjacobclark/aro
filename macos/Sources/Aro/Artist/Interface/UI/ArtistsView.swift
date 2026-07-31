@@ -5,6 +5,7 @@ struct ArtistsView: View {
     let songs: [Song]
     let playback: PlaybackController
     let syncTrackData: (Song) async -> Void
+    var loadRadio: ((String) async -> ServerGeneratedPlaylist?)?
 
     @State private var selectedArtistID: LibraryArtist.ID?
     @State private var searchText = ""
@@ -20,6 +21,14 @@ struct ArtistsView: View {
 
     private var filteredArtists: [LibraryArtist] {
         artists.filter { FuzzySearch.matches(searchText, in: $0.name) }
+    }
+
+    /// Represents the collection being viewed rather than whatever is playing:
+    /// on an artist or album page the useful question is "what else sounds like
+    /// this record", and a seed that drifted with playback would make the shelf
+    /// contradict its own heading.
+    private func collectionSeed(_ visible: [Song]) -> Song? {
+        visible.first { $0.contentHash != nil }
     }
 
     var body: some View {
@@ -139,6 +148,17 @@ struct ArtistsView: View {
                     }
                     .padding(.horizontal, 28)
                     .padding(.bottom, 24)
+
+                    if let loadRadio {
+                        MoreLikeThisSection(
+                            seed: collectionSeed(artist.albums.flatMap(\.songs)),
+                            seedLabel: artist.name,
+                            allSongs: songs,
+                            loadRadio: loadRadio,
+                            playback: playback
+                        )
+                        .padding(.horizontal, 8)
+                    }
                 }
             }
             .background(AroTheme.contentSurface)

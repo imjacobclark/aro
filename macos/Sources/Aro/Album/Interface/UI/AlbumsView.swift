@@ -6,6 +6,7 @@ struct AlbumsView: View {
     let playback: PlaybackController
     let syncTrackData: (Song) async -> Void
     let syncAlbumData: ([Song]) async -> Void
+    var loadRadio: ((String) async -> ServerGeneratedPlaylist?)?
 
     @State private var selectedAlbumID: LibraryAlbum.ID?
     @State private var searchText = ""
@@ -26,6 +27,12 @@ struct AlbumsView: View {
                 in: $0.name + " " + $0.artistName
             )
         }
+    }
+
+    /// Represents the album being viewed rather than whatever is playing — see
+    /// `ArtistsView.collectionSeed`.
+    private func collectionSeed(_ visible: [Song]) -> Song? {
+        visible.first { $0.contentHash != nil }
     }
 
     var body: some View {
@@ -164,6 +171,17 @@ struct AlbumsView: View {
                     )
                     .padding(.horizontal, 28)
                     .padding(.bottom, 24)
+
+                    if let loadRadio {
+                        MoreLikeThisSection(
+                            seed: collectionSeed(album.songs),
+                            seedLabel: album.name,
+                            allSongs: songs,
+                            loadRadio: loadRadio,
+                            playback: playback
+                        )
+                        .padding(.horizontal, 8)
+                    }
                 }
             }
             .background(AroTheme.contentSurface)

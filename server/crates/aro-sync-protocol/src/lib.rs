@@ -17,6 +17,12 @@ pub struct HubInfo {
     pub protocol_min: u16,
     pub protocol_max: u16,
     pub pairing_available: bool,
+    /// Whether this hub has an AcoustID key configured, so a client can tell
+    /// "identification is off because nobody's turned it on here" apart from
+    /// "identification is off because nothing's queued right now" -- a plain
+    /// capability flag, never the key itself, so it's safe on this
+    /// unauthenticated discovery endpoint.
+    pub identification_available: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

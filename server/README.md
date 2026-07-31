@@ -40,6 +40,34 @@ addresses, and local paths to anyone who can reach its port. Its bind address
 must be private or loopback. Do not forward it to the public internet. Device
 and local playback reporting remains authenticated on the TLS sync listener.
 
+### Optional DLNA media server
+
+The server can also expose the library as a standard DLNA/UPnP media server
+(MediaServer:1 with ContentDirectory:1), so TVs, AV receivers, consoles, and
+UPnP apps can browse and play it without an Aro client. It is disabled by
+default and takes effect after restarting the server:
+
+```toml
+[dlna]
+enabled = true
+bind = "0.0.0.0:4850"
+# friendly_name = "Living Room Aro"   # defaults to display_name
+```
+
+`aro-server config set dlna.enabled true` toggles it without hand-editing
+TOML; `ARO_DLNA_BIND` overrides the bind address.
+
+Renderers browse Artists, Albums, All Tracks, and the server-generated
+Playlists. Files are served in their original format with real MIME types —
+there is no transcoding, so a renderer must support the codec (modern devices
+handle FLAC/MP3/AAC). Discovery uses SSDP on UDP port 1900; the HTTP listener
+answers on the configured bind (default 4850).
+
+DLNA has no authentication: anyone who can reach the port can browse and fetch
+every track. The bind address must be private or loopback, requests from
+non-private peers are refused, and SSDP ignores searches from outside private
+networks. Do not forward either port to the public internet.
+
 The storage mode belongs to the entire Aro and is fixed at initialization.
 Managed storage always copies files and publishes them only after SHA-256
 verification; it never creates hard links. Referenced storage records verified

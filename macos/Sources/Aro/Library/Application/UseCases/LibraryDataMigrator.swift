@@ -8,10 +8,21 @@ struct LibraryDataMigrationResult: Sendable {
 }
 
 struct LibraryDataMigrator: Sendable {
+    /// Moves this Mac's own local library (database, media, Aro-managed music) and,
+    /// if a Background Service is configured, its server data directory.
+    ///
+    /// The server portion runs through the bundled `aro-server migrate` subprocess
+    /// rather than being copied here: that command checkpoints the store, verifies
+    /// every blob before *and* after copying, and only swaps in the new location
+    /// once both verifications pass — a guarantee this method cannot reproduce with
+    /// a plain file copy. It runs first, before anything local-only is touched, so a
+    /// failure there leaves the Mac's own library completely untouched.
     func migrate(
         profile: LibraryProfile,
         libraryFiles: any LibraryFileManaging,
         serverDataPath: String,
+        serverConfigPath: String,
+        serverBinaryURL: URL?,
         into parent: URL
     ) async throws -> LibraryDataMigrationResult {
         let safeName = profile.name
@@ -60,6 +71,23 @@ struct LibraryDataMigrator: Sendable {
             )
         }
 
+        let server = destination.appendingPathComponent(
+            "Server",
+            isDirectory: true
+        )
+        if !serverDataPath.isEmpty {
+            guard let serverBinaryURL,
+                  FileManager.default.isExecutableFile(atPath: serverBinaryURL.path)
+            else {
+                throw LibraryDataMigrationError.serverBinaryUnavailable
+            }
+            try await runServerMigrate(
+                binaryURL: serverBinaryURL,
+                configPath: serverConfigPath,
+                destination: server
+            )
+        }
+
         do {
             try FileManager.default.createDirectory(
                 at: stage,
@@ -87,21 +115,24 @@ struct LibraryDataMigrator: Sendable {
             } else {
                 music = nil
             }
-            let server = stage.appendingPathComponent(
-                "Server",
-                isDirectory: true
-            )
-            if !serverDataPath.isEmpty {
-                try copyIfPresent(
-                    URL(fileURLWithPath: serverDataPath),
-                    to: server,
-                    excluding: ["control.sock", "instance.lock"]
-                )
-            }
             guard FileManager.default.fileExists(atPath: database.path) else {
                 throw LibraryDataMigrationError.verificationFailed
             }
-            try FileManager.default.moveItem(at: stage, to: destination)
+            // `moveItem(at:to:)` requires `destination` not to already exist. When
+            // the server step above ran, it already created `destination/Server` (and
+            // therefore `destination` itself), so each local item is moved in
+            // individually instead of swapping the whole staged directory in at once.
+            if FileManager.default.fileExists(atPath: destination.path) {
+                for name in try FileManager.default.contentsOfDirectory(atPath: stage.path) {
+                    try FileManager.default.moveItem(
+                        at: stage.appendingPathComponent(name),
+                        to: destination.appendingPathComponent(name)
+                    )
+                }
+                try FileManager.default.removeItem(at: stage)
+            } else {
+                try FileManager.default.moveItem(at: stage, to: destination)
+            }
 
             var updated = profile
             updated.databasePath = destination
@@ -114,15 +145,47 @@ struct LibraryDataMigrator: Sendable {
             }
             return LibraryDataMigrationResult(
                 profile: updated,
-                serverDataPath: destination
-                    .appendingPathComponent("Server", isDirectory: true).path,
+                serverDataPath: serverDataPath.isEmpty ? "" : server.path,
                 root: destination,
                 retainedPaths: oldPaths.sorted()
             )
         } catch {
+            // `destination` is deliberately left alone: if the server step above
+            // ran, it may already hold validly migrated, verified server data that
+            // would be unrecoverable if deleted here.
             try? FileManager.default.removeItem(at: stage)
             throw error
         }
+    }
+
+    private func runServerMigrate(
+        binaryURL: URL,
+        configPath: String,
+        destination: URL
+    ) async throws {
+        try await Task.detached(priority: .utility) {
+            let process = Process()
+            process.executableURL = binaryURL
+            process.arguments = [
+                "--config", configPath,
+                "migrate", "--to", destination.path,
+            ]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else {
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(decoding: data, as: UTF8.self)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                throw LibraryDataMigrationError.serverMigrateFailed(
+                    output.isEmpty
+                        ? "aro-server migrate exited with status \(process.terminationStatus)."
+                        : output
+                )
+            }
+        }.value
     }
 
     private func copyIfPresent(
@@ -203,6 +266,8 @@ enum LibraryDataMigrationError: LocalizedError {
     case insufficientSpace(required: Int64, available: Int64)
     case verificationFailed
     case invalidNesting
+    case serverBinaryUnavailable
+    case serverMigrateFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -215,6 +280,11 @@ enum LibraryDataMigrationError: LocalizedError {
         case .invalidNesting:
             "The new Library Data location cannot contain an existing "
                 + "Aro data location, or be inside one."
+        case .serverBinaryUnavailable:
+            "The Background Service's aro-server binary is not included in this "
+                + "build, so its Library Data could not be moved."
+        case .serverMigrateFailed(let message):
+            "Moving the Background Service's Library Data failed: \(message)"
         }
     }
 }

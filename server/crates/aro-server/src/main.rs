@@ -4,6 +4,7 @@ mod playlists;
 #[cfg(unix)]
 mod control;
 mod dashboard;
+mod dlna;
 mod http;
 mod sources;
 
@@ -77,6 +78,16 @@ enum Command {
         #[arg(long)]
         to: PathBuf,
     },
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCommand {
+    Get { key: String },
+    Set { key: String, value: String },
 }
 
 #[derive(Subcommand)]
@@ -130,7 +141,7 @@ async fn main() -> Result<()> {
             display_name,
             mode,
         } => init(&config_path, data_dir, display_name, mode),
-        Command::Serve => serve(Config::load(&config_path)?).await,
+        Command::Serve => serve(Config::load(&config_path)?, config_path).await,
         Command::Folders { command } => folders(&config_path, command).await,
         Command::Pairing { command } => pairing(&config_path, command).await,
         Command::Pair => open_pairing(&config_path).await,
@@ -141,7 +152,29 @@ async fn main() -> Result<()> {
         Command::Verify => verify(&config_path),
         Command::Purge { hash } => purge(&config_path, &hash),
         Command::Migrate { to } => migrate_instance(&config_path, &to),
+        Command::Config { command } => config_command(&config_path, command),
     }
+}
+
+fn config_command(path: &Path, command: ConfigCommand) -> Result<()> {
+    match command {
+        ConfigCommand::Get { key } => {
+            let config = Config::load(path)?;
+            let value = serde_json::to_value(&config)?;
+            let field = key.split('.').try_fold(&value, |current, part| current.get(part));
+            match field {
+                Some(field) => println!("{field}"),
+                None => bail!("unknown config field: {key}"),
+            }
+        }
+        ConfigCommand::Set { key, value } => {
+            let mut config = Config::load(path)?;
+            config.set_field(&key, &value)?;
+            config.save(path)?;
+            println!("Set {key}; restart the server to apply it");
+        }
+    }
+    Ok(())
 }
 
 fn init(
@@ -173,7 +206,7 @@ fn init(
     Ok(())
 }
 
-async fn serve(config: Config) -> Result<()> {
+async fn serve(config: Config, config_path: PathBuf) -> Result<()> {
     let _instance_lock = lock_instance(&config.data_dir)?;
     ensure_certificate(&config)?;
     let fingerprint = certificate_fingerprint(&config.tls_cert)?;
@@ -190,6 +223,20 @@ async fn serve(config: Config) -> Result<()> {
     );
     let loudness =
         aro_track_id::loudness::LoudnessQueue::start(store.clone(), config.hub_id);
+    let audio_features = {
+        let success_store = store.clone();
+        let failure_store = store.clone();
+        aro_track_id::audio_features::AudioFeatureQueue::start(
+            std::sync::Arc::new(move |hash: &str, version: i64, features: &aro_track_id::audio_features::AudioFeatures| {
+                let payload = serde_json::to_string(features)?;
+                success_store.put_audio_features(hash, version, &payload)?;
+                Ok(())
+            }),
+            std::sync::Arc::new(move |hash: &str, version: i64, error: &str| {
+                failure_store.record_audio_feature_failure(hash, version, error).ok();
+            }),
+        )
+    };
     let sources = sources::SourceManager::start(
         store.clone(),
         config.hub_id,
@@ -197,9 +244,11 @@ async fn serve(config: Config) -> Result<()> {
         config.source_rescan_seconds,
         identification.clone(),
         loudness,
+        audio_features,
     )?;
     let pairing = PairingManager::new(fingerprint.clone());
     let state = AppState {
+        config_path: config_path.clone(),
         hub_id: config.hub_id,
         display_name: config.display_name.clone(),
         admin_token: config.admin_token.clone(),
@@ -209,6 +258,7 @@ async fn serve(config: Config) -> Result<()> {
         store,
         sources,
         telemetry: http::RuntimeTelemetry::default(),
+        identification_available: !config.acoustid_api_key.is_empty(),
     };
     let _dashboard = if config.dashboard.enabled {
         let listener = tokio::net::TcpListener::bind(config.dashboard.bind)
@@ -237,6 +287,11 @@ async fn serve(config: Config) -> Result<()> {
                 tracing::error!(%error, "Dashboard listener stopped");
             }
         }))
+    } else {
+        None
+    };
+    let _dlna = if config.dlna.enabled {
+        Some(dlna::start(&config, state.clone()).await?)
     } else {
         None
     };

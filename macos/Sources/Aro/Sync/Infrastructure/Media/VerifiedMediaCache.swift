@@ -52,17 +52,30 @@ actor URLSessionMediaDownloader: RemoteMediaDownloading {
         self.cacheDirectory = cacheDirectory
         if let session {
             self.session = session
-        } else if let pinnedTLSFingerprint,
-                  !pinnedTLSFingerprint.isEmpty {
-            self.session = URLSession(
-                configuration: .default,
-                delegate: PinnedTLSDelegate(
-                    fingerprint: pinnedTLSFingerprint
-                ),
-                delegateQueue: nil
-            )
         } else {
-            self.session = URLSession(configuration: .default)
+            let configuration = URLSessionConfiguration.default
+            // `timeoutIntervalForRequest` is a stall timeout (time allowed between
+            // successive bytes arriving), not a total-duration cap, so a short value
+            // is safe even for a large file — it only fires if no progress happens
+            // for that long. `timeoutIntervalForResource` bounds the whole transfer;
+            // 5 minutes comfortably covers even a large lossless file on a slow
+            // connection while still failing rather than hanging indefinitely
+            // (Foundation's own defaults are 60s / 7 days, and this app's other
+            // networking clients — `AroSyncClient`, `ProgressiveMediaCoordinator` —
+            // already override both for the same reason).
+            configuration.timeoutIntervalForRequest = 15
+            configuration.timeoutIntervalForResource = 300
+            if let pinnedTLSFingerprint, !pinnedTLSFingerprint.isEmpty {
+                self.session = URLSession(
+                    configuration: configuration,
+                    delegate: PinnedTLSDelegate(
+                        fingerprint: pinnedTLSFingerprint
+                    ),
+                    delegateQueue: nil
+                )
+            } else {
+                self.session = URLSession(configuration: configuration)
+            }
         }
         self.credential = credential
     }

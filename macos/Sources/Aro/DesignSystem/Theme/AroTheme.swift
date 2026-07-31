@@ -85,6 +85,19 @@ enum AroTheme {
     static let hairline = Color.primary.opacity(0.09)
     static let selectedTint = violet.opacity(0.11)
 
+    /// AppKit equivalent of `violet`, for views (e.g. `NSTableView` selection,
+    /// `NSImageView` tints) that read `NSColor` directly rather than SwiftUI's
+    /// environment `.tint()`. `.controlAccentColor`/`.selectedContentBackgroundColor`
+    /// follow the user's system-wide accent color preference (blue by default),
+    /// which fights the app's purple identity — this keeps AppKit call sites in
+    /// sync with the SwiftUI-side `.tint(AroTheme.violet)`.
+    static let violetNSColor = NSColor(
+        calibratedRed: 0.45,
+        green: 0.35,
+        blue: 0.88,
+        alpha: 1
+    )
+
     static let orbitGradient = Gradient(
         colors: [violet, coral, amber]
     )

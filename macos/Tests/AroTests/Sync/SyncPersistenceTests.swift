@@ -391,5 +391,131 @@ final class SyncPersistenceTests: XCTestCase {
             .string("Remote Artist")
         )
     }
+
+    func testLocalHubTrackAppliesOnceWithARealFilePathNotAnHTTPSURL() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = LibraryDatabase(
+            url: directory.appendingPathComponent("Library.sqlite3")
+        )
+        let store = SQLiteSyncOperationStore(database: database)
+        let hubID = UUID()
+        store.ensureLocalHubMembership(hubID: hubID, displayName: "This Mac")
+        XCTAssertEqual(store.localHubServerCursor(hubID: hubID), 0)
+
+        let hubTrackID = UUID()
+        let localPath = "/Users/test/Music/Song.flac"
+        let local = SequencedSyncOperation(
+            sequence: 7,
+            operationID: UUID(),
+            deviceID: UUID(),
+            entityType: "track",
+            entityID: hubTrackID.uuidString,
+            kind: "upsert",
+            payload: .object([
+                "content_hash": .string("local-hash"),
+                "byte_count": .number(2_048),
+                "title": .string("Local Track"),
+                "artist": .string("Local Artist"),
+            ]),
+            fieldVersions: [:]
+        )
+
+        XCTAssertTrue(
+            try store.applyLocalHub(local, hubID: hubID, localPath: localPath)
+        )
+        XCTAssertFalse(
+            try store.applyLocalHub(local, hubID: hubID, localPath: localPath)
+        )
+        XCTAssertEqual(store.localHubServerCursor(hubID: hubID), 7)
+
+        var foundRow = false
+        var path: String?
+        var folderID: String?
+        var blobLocalPath: String?
+        _ = database.withReadConnection { connection -> Bool in
+            var statement: OpaquePointer?
+            XCTAssertEqual(
+                sqlite3_prepare_v2(
+                    connection,
+                    """
+                    SELECT file_locations.path, file_locations.folder_id,
+                           blob_availability.local_path
+                    FROM file_locations
+                    JOIN tracks ON tracks.id = file_locations.track_id
+                    JOIN blob_availability
+                        ON blob_availability.content_hash = tracks.content_hash
+                    WHERE tracks.content_hash = 'local-hash'
+                    """,
+                    -1,
+                    &statement,
+                    nil
+                ),
+                SQLITE_OK
+            )
+            defer { sqlite3_finalize(statement) }
+            guard sqlite3_step(statement) == SQLITE_ROW else { return false }
+            foundRow = true
+            path = sqlite3_column_text(statement, 0).map(String.init(cString:))
+            folderID = sqlite3_column_text(statement, 1).map(String.init(cString:))
+            blobLocalPath = sqlite3_column_text(statement, 2).map(String.init(cString:))
+            return true
+        }
+        XCTAssertTrue(foundRow)
+        XCTAssertEqual(path, localPath)
+        XCTAssertEqual(folderID, hubID.uuidString)
+        XCTAssertEqual(blobLocalPath, localPath)
+    }
+
+    func testLocalHubTrackStateAppliesUsingLocalHubTrackMappings() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = LibraryDatabase(
+            url: directory.appendingPathComponent("Library.sqlite3")
+        )
+        let store = SQLiteSyncOperationStore(database: database)
+        let hubID = UUID()
+        store.ensureLocalHubMembership(hubID: hubID, displayName: "This Mac")
+        let hubTrackID = UUID()
+
+        let track = SequencedSyncOperation(
+            sequence: 1,
+            operationID: UUID(),
+            deviceID: UUID(),
+            entityType: "track",
+            entityID: hubTrackID.uuidString,
+            kind: "upsert",
+            payload: .object(["content_hash": .string("hash-1")]),
+            fieldVersions: [:]
+        )
+        XCTAssertTrue(
+            try store.applyLocalHub(track, hubID: hubID, localPath: nil)
+        )
+
+        let trackState = SequencedSyncOperation(
+            sequence: 2,
+            operationID: UUID(),
+            deviceID: UUID(),
+            entityType: "track_state",
+            entityID: hubTrackID.uuidString,
+            kind: "upsert",
+            payload: .object(["favourite": .bool(true)]),
+            fieldVersions: [:]
+        )
+        XCTAssertTrue(
+            try store.applyLocalHub(trackState, hubID: hubID, localPath: nil)
+        )
+        XCTAssertEqual(store.localHubServerCursor(hubID: hubID), 2)
+    }
 }
 #endif

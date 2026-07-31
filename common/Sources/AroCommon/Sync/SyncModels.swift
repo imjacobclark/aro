@@ -60,19 +60,49 @@ public struct AroHubInfo: Hashable, Codable, Sendable {
     public let protocolMin: UInt16
     public let protocolMax: UInt16
     public let pairingAvailable: Bool
+    /// Whether this hub has an AcoustID key configured -- lets a client tell
+    /// "identification is off because nobody's turned it on" apart from
+    /// "nothing's queued right now". Never the key itself.
+    public let identificationAvailable: Bool
 
     public init(
         hubID: UUID,
         displayName: String,
         protocolMin: UInt16,
         protocolMax: UInt16,
-        pairingAvailable: Bool
+        pairingAvailable: Bool,
+        identificationAvailable: Bool = false
     ) {
         self.hubID = hubID
         self.displayName = displayName
         self.protocolMin = protocolMin
         self.protocolMax = protocolMax
         self.pairingAvailable = pairingAvailable
+        self.identificationAvailable = identificationAvailable
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case hubID, displayName, protocolMin, protocolMax, pairingAvailable
+        case identificationAvailable
+    }
+
+    /// Custom decode so a hub running an older build -- one that predates
+    /// this field -- doesn't take down every `/v1/hub` call across the app
+    /// (including the compatibility check every sync pass opens with) just
+    /// because one new, non-essential field is missing from its response.
+    /// Protocol fields added here should default rather than requiring a
+    /// perfectly version-matched hub.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        hubID = try container.decode(UUID.self, forKey: .hubID)
+        displayName = try container.decode(String.self, forKey: .displayName)
+        protocolMin = try container.decode(UInt16.self, forKey: .protocolMin)
+        protocolMax = try container.decode(UInt16.self, forKey: .protocolMax)
+        pairingAvailable = try container.decode(Bool.self, forKey: .pairingAvailable)
+        identificationAvailable = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .identificationAvailable
+        ) ?? false
     }
 }
 

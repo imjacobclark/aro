@@ -1,5 +1,6 @@
 import AroCommon
 import Foundation
+import OSLog
 
 /// Fetches the Home screen's auto-generated playlists from whichever transport can
 /// actually reach `aro-server`: the local Unix control socket when this Mac is
@@ -14,6 +15,11 @@ import Foundation
 /// every real call site is already a `@MainActor` view.
 @MainActor
 struct HomePlaylistsBridge {
+    private static let logger = Logger(
+        subsystem: "com.othyn.aro",
+        category: "HomePlaylists"
+    )
+
     let dataLocation: String
     let localServers: [LocalAroServer]
     let remoteProfile: LibraryProfile?
@@ -60,14 +66,68 @@ struct HomePlaylistsBridge {
     /// next poll succeeds; there is deliberately no client-side generation fallback.
     func playlists() async -> [ServerGeneratedPlaylist] {
         if remoteProfile?.kind == .remote {
-            guard let remoteContext else { return [] }
-            return (try? await remoteContext.client.playlists(
-                credential: remoteContext.credential
-            )) ?? []
+            guard let remoteContext else {
+                Self.logger.debug("playlists: no remote context available")
+                return []
+            }
+            do {
+                return try await remoteContext.client.playlists(
+                    credential: remoteContext.credential
+                )
+            } catch {
+                Self.logger.error(
+                    "playlists: remote fetch failed: \(String(describing: error), privacy: .public)"
+                )
+                return []
+            }
         }
         if let localClient {
-            return (try? await localClient.playlists()) ?? []
+            do {
+                return try await localClient.playlists()
+            } catch {
+                Self.logger.error(
+                    "playlists: local fetch failed: \(String(describing: error), privacy: .public)"
+                )
+                return []
+            }
         }
+        Self.logger.debug("playlists: no local client available")
         return []
+    }
+
+    /// Tier 3 "seed-track radio" (see `aro-server`'s `playlists::radio`) — the tracks
+    /// most similar to `contentHash`, nearest first, seed itself in front. `nil` if
+    /// no server is reachable or the seed hasn't been analyzed yet.
+    func radio(contentHash: String, limit: Int = 30) async -> ServerGeneratedPlaylist? {
+        if remoteProfile?.kind == .remote {
+            guard let remoteContext else {
+                Self.logger.debug("radio: no remote context available")
+                return nil
+            }
+            do {
+                return try await remoteContext.client.radio(
+                    contentHash: contentHash,
+                    limit: limit,
+                    credential: remoteContext.credential
+                )
+            } catch {
+                Self.logger.error(
+                    "radio: remote fetch failed: \(String(describing: error), privacy: .public)"
+                )
+                return nil
+            }
+        }
+        if let localClient {
+            do {
+                return try await localClient.radio(contentHash: contentHash, limit: limit)
+            } catch {
+                Self.logger.error(
+                    "radio: local fetch failed: \(String(describing: error), privacy: .public)"
+                )
+                return nil
+            }
+        }
+        Self.logger.debug("radio: no local client available")
+        return nil
     }
 }

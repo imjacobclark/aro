@@ -59,7 +59,7 @@ use std::{
 };
 use tokio::{
     sync::{Mutex, mpsc},
-    time::Instant,
+    time::{Instant, interval},
 };
 use uuid::Uuid;
 
@@ -71,8 +71,24 @@ const CACHE_TTL_SECS: i64 = 30 * 24 * 60 * 60;
 /// A folder must stop receiving newly-staged files for at least this long before the
 /// coalescer flushes it as one group — long enough that a full-folder scan (which
 /// enqueues every file in a tight burst) reliably lands in a single group rather than
-/// splitting across several.
-const GROUP_DEBOUNCE_SECS: u64 = 5;
+/// splitting across several. On slower hardware (a Raspberry Pi hashing/copying
+/// managed-mode files off SD storage) consecutive files in one folder's scan pass can
+/// legitimately be spaced several seconds apart; too short a debounce here means the
+/// same folder gets flushed as multiple waves, and every wave re-fingerprints the
+/// *entire* folder — including members a previous wave already finished — via
+/// `send_group`'s union with `HubStore::folder_members`. `fingerprint_cache` (below)
+/// bounds the cost of that when it still happens; this constant is the first line of
+/// defense against it happening as often.
+const GROUP_DEBOUNCE_SECS: u64 = 20;
+/// How long a computed fingerprint is kept keyed by content hash, so a file
+/// re-offered while its folder's group is still being (re-)flushed (see
+/// `GROUP_DEBOUNCE_SECS`) skips the CPU-bound fingerprinting step it already paid —
+/// fingerprinting is a pure function of file bytes, so any reuse within this window
+/// is always correct, never stale, unlike the AcoustID/MusicBrainz response cache
+/// below. Bounded to this TTL rather than kept for the process lifetime because
+/// fingerprints are a few KB each and this service targets a ~900MB Raspberry Pi;
+/// it only needs to survive the bursty re-flush window, not the library's lifetime.
+const FINGERPRINT_CACHE_TTL_SECS: u64 = 600;
 /// Upper bound on how long a folder can keep accepting newly-staged files before it's
 /// flushed regardless of debounce — bounds a slow or unusually large scan.
 const MAX_GROUP_STAGING_SECS: u64 = 60;
@@ -147,6 +163,16 @@ struct Inner {
     /// entry blocks not just one file but an entire folder from ever being
     /// re-enqueued until restart.
     pending: StdMutex<HashSet<String>>,
+    /// Content hash -> already-computed fingerprint, so `prepare_file` can skip
+    /// re-fingerprinting a file it's already paid the CPU cost for within
+    /// `FINGERPRINT_CACHE_TTL_SECS`. See that constant's doc comment.
+    fingerprint_cache: StdMutex<HashMap<String, CachedFingerprint>>,
+}
+
+struct CachedFingerprint {
+    fingerprint_base64: String,
+    duration_secs: u32,
+    cached_at: Instant,
 }
 
 impl IdentificationQueue {
@@ -165,6 +191,7 @@ impl IdentificationQueue {
             groups_queued: AtomicU64::new(0),
             last_group: Mutex::new(None),
             pending: StdMutex::new(HashSet::new()),
+            fingerprint_cache: StdMutex::new(HashMap::new()),
         });
 
         if let Some(config) = config {
@@ -452,8 +479,42 @@ async fn run(
     // since startup) — the trigger condition for scheduling the next one. Local to this
     // loop, not shared state: only `run` ever decides to sweep.
     let mut groups_accepted_since_sweep = false;
+    let mut reconcile_tick = interval(Duration::from_secs(RECONCILE_TICK_SECS));
+    // The first tick fires immediately (`interval` schedules its first tick at construction
+    // time, not one period later) — harmless (a sweep this early just finds nothing to do
+    // yet), but not the intent, so skip it explicitly rather than relying on that timing
+    // detail to happen to be convenient.
+    reconcile_tick.tick().await;
 
-    while let Some(item) = receiver.recv().await {
+    loop {
+        let item = tokio::select! {
+            item = receiver.recv() => match item {
+                Some(item) => item,
+                None => break,
+            },
+            _ = reconcile_tick.tick() => {
+                let revised = reconcile_sweep(
+                    &store,
+                    hub_id,
+                    &acoustid,
+                    &musicbrainz,
+                    &artwork_http,
+                    &musicbrainz_user_agent,
+                    &inner.fingerprint_cache,
+                )
+                .await;
+                // A tick-driven sweep runs regardless of `groups_accepted_since_sweep` —
+                // unlike the idle-after-item trigger below, it has no other signal to key
+                // off of, and `reconcile_sweep` is cheap (a couple of indexed queries) when
+                // there's genuinely nothing to revisit. Still worth folding its own result
+                // in here so an immediately-following idle-after-item sweep doesn't
+                // needlessly re-run for folders this tick already covered.
+                groups_accepted_since_sweep = groups_accepted_since_sweep || revised > 0;
+                backfill_missing_artwork(&store, &artwork_http, &musicbrainz_user_agent).await;
+                continue;
+            },
+        };
+
         inner.queued.fetch_sub(item.member_count(), Ordering::Relaxed);
         inner.in_flight.store(true, Ordering::Relaxed);
         let _pending_guard = PendingGuard::new(&inner, item.content_hashes());
@@ -468,6 +529,7 @@ async fn run(
                     &musicbrainz,
                     &artwork_http,
                     &musicbrainz_user_agent,
+                    &inner.fingerprint_cache,
                     job,
                 )
                 .await
@@ -493,6 +555,7 @@ async fn run(
                     &musicbrainz,
                     &artwork_http,
                     &musicbrainz_user_agent,
+                    &inner.fingerprint_cache,
                     group,
                 )
                 .await;
@@ -531,12 +594,25 @@ async fn run(
                 &musicbrainz,
                 &artwork_http,
                 &musicbrainz_user_agent,
+                &inner.fingerprint_cache,
             )
             .await;
             groups_accepted_since_sweep = revised > 0;
         }
     }
 }
+
+/// How often `run` wakes up on its own to give `reconcile_sweep` a chance to run, independent
+/// of ordinary queue traffic. Without this, a library that has fully converged on its
+/// *ordinary* work (nothing new to scan or fingerprint — `sources.rs::maybe_enqueue_identification`
+/// only ever enqueues files with no identification result at all, so an already-per-file-resolved
+/// folder is never re-offered by a normal scan) can leave the work channel empty forever: the
+/// sweep trigger below only runs *after* processing an item, so an empty channel means it's
+/// never even evaluated, and a folder waiting on `folders_needing_group_retry` (see that doc
+/// comment) could sit stuck on its degraded per-file answer indefinitely with no organic event
+/// to ever unstick it. This tick is what makes that retry actually automatic rather than merely
+/// possible.
+const RECONCILE_TICK_SECS: u64 = 300;
 
 const RECONCILE_BATCH: u32 = 25;
 
@@ -555,6 +631,38 @@ const RECONCILE_BATCH: u32 = 25;
 /// `HubStore::touch_identification_generation`), which is what makes each file eligible for
 /// at most one reconcile attempt per generation — the sweep is therefore guaranteed to
 /// terminate rather than relying on a heuristic stopping condition.
+/// A folder whose group match is rejected outright gets at most this many automatic
+/// retries (see `HubStore::folders_needing_group_retry`) before the sweep leaves it alone —
+/// without a cap, a genuine mixed bag (correctly rejected by `album::accept` every time,
+/// e.g. `album::tests::mixed_bag_folder_is_rejected`) would be retried on every sweep
+/// forever, burning AcoustID/MusicBrainz request budget for a folder that can never
+/// converge. Each retry also has a real chance of making no difference at all (per-file
+/// recording selection is influenced by an affinity table that only shifts gradually), so
+/// this needs to be generous enough to let a genuinely-convergeable folder actually get
+/// there rather than giving up after one or two tries.
+const MAX_GROUP_RECONCILE_ATTEMPTS: i64 = 8;
+
+/// Revisits up to [`RECONCILE_BATCH`] folders whose files predate
+/// `crate::IDENTIFICATION_GENERATION` (see `HubStore::folders_needing_reconcile`), plus up
+/// to [`RECONCILE_BATCH`] more whose group match was rejected outright and hasn't yet
+/// exhausted [`MAX_GROUP_RECONCILE_ATTEMPTS`] (see `HubStore::folders_needing_group_retry`)
+/// — running each through the same group-matching path as an ordinary scan. This is what
+/// lets a file whose per-file answer was written before its artist's affinity converged (or
+/// before a sibling folder existed at all) eventually pick up the better group-quality
+/// answer, without needing every file to have been processed in the "right" order to begin
+/// with, and what lets a folder that lost its *first* group attempt outright (see the
+/// module doc's cold-start discussion, and `extra_candidate_releases`'s doc comment on why a
+/// single pass can still come up short even with that widened evidence) get a bounded number
+/// of further chances instead of staying stuck on the per-file fallback forever.
+///
+/// Returns how many files were actually revised (their answer's content changed, not just
+/// their generation marker) — `run`'s trigger uses this to decide whether another sweep is
+/// worth scheduling. Every visited file's `resolution_generation` is advanced to the
+/// current generation regardless of whether it was revised (via
+/// `HubStore::touch_identification_generation`), which is what makes each file eligible for
+/// at most one reconcile attempt per generation on that path — the group-retry path's own
+/// termination comes from `MAX_GROUP_RECONCILE_ATTEMPTS` instead, since those folders are
+/// deliberately revisited across many generations, not just one.
 async fn reconcile_sweep(
     store: &HubStore,
     hub_id: Uuid,
@@ -562,87 +670,147 @@ async fn reconcile_sweep(
     musicbrainz: &musicbrainz::MusicBrainzClient,
     artwork_http: &reqwest::Client,
     musicbrainz_user_agent: &str,
+    fingerprint_cache: &StdMutex<HashMap<String, CachedFingerprint>>,
 ) -> usize {
-    let folders = match store
+    let stale_generation_folders = store
         .folders_needing_reconcile(i64::from(crate::IDENTIFICATION_GENERATION), RECONCILE_BATCH)
-    {
-        Ok(folders) => folders,
-        Err(error) => {
+        .unwrap_or_else(|error| {
             tracing::warn!(%error, "failed to list folders needing reconcile");
-            return 0;
-        }
-    };
-    if folders.is_empty() {
+            Vec::new()
+        });
+    let group_retry_folders = store
+        .folders_needing_group_retry(
+            i64::try_from(MIN_GROUP_MEMBERS_FOR_MATCHING).unwrap_or(i64::MAX),
+            MAX_GROUP_RECONCILE_ATTEMPTS,
+            RECONCILE_BATCH,
+        )
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "failed to list folders needing a group retry");
+            Vec::new()
+        });
+
+    if stale_generation_folders.is_empty() && group_retry_folders.is_empty() {
         return 0;
     }
-    tracing::info!(folder_count = folders.len(), "starting reconcile sweep");
+    tracing::info!(
+        stale_generation_folder_count = stale_generation_folders.len(),
+        group_retry_folder_count = group_retry_folders.len(),
+        "starting reconcile sweep"
+    );
 
     let mut revised = 0usize;
-    for folder in folders {
-        let jobs: Vec<IdentificationJob> = match store.folder_members(&folder) {
-            Ok(members) => members
-                .into_iter()
-                .map(|member| IdentificationJob {
-                    content_hash: member.content_hash,
-                    path: member.path,
-                })
-                .collect(),
-            Err(error) => {
-                tracing::warn!(folder = %folder.display(), %error, "failed to list folder members for reconcile");
-                continue;
-            }
-        };
-        if jobs.is_empty() {
-            continue;
-        }
-
-        // Snapshot the "shape" of each file's current answer, not just its timestamp —
-        // `identified_at` alone could coincidentally collide at second granularity between
-        // an old and a genuinely rewritten answer within the same sweep.
-        let before: HashMap<String, ResultShape> = jobs
-            .iter()
-            .filter_map(|job| {
-                store
-                    .identification_result(&job.content_hash)
-                    .ok()
-                    .flatten()
-                    .map(|result| (job.content_hash.clone(), ResultShape::from(&result)))
-            })
-            .collect();
-
-        identify_group(
+    for folder in stale_generation_folders {
+        revised += reconcile_one_folder(
             store,
             hub_id,
             acoustid,
             musicbrainz,
             artwork_http,
             musicbrainz_user_agent,
-            GroupJob {
-                folder: folder.clone(),
-                jobs: jobs.clone(),
-            },
+            fingerprint_cache,
+            &folder,
         )
         .await;
-
-        for job in &jobs {
-            if let Err(error) = store.touch_identification_generation(
-                &job.content_hash,
-                i64::from(crate::IDENTIFICATION_GENERATION),
-            ) {
-                tracing::warn!(content_hash = %job.content_hash, %error, "failed to advance reconcile generation");
-            }
-
-            let after = store
-                .identification_result(&job.content_hash)
-                .ok()
-                .flatten()
-                .map(|result| ResultShape::from(&result));
-            if after != before.get(&job.content_hash).cloned() {
-                revised += 1;
-            }
+    }
+    for folder in group_retry_folders {
+        revised += reconcile_one_folder(
+            store,
+            hub_id,
+            acoustid,
+            musicbrainz,
+            artwork_http,
+            musicbrainz_user_agent,
+            fingerprint_cache,
+            &folder,
+        )
+        .await;
+        if let Err(error) = store.record_group_reconcile_attempt(&folder) {
+            tracing::warn!(folder = %folder.display(), %error, "failed to record group reconcile attempt");
         }
     }
     tracing::info!(revised, "reconcile sweep complete");
+    revised
+}
+
+/// Runs one folder through `identify_group` and reports how many of its files' answers
+/// actually changed shape (not just generation) — shared by both `reconcile_sweep` loops
+/// (stale-generation and group-retry) since the "run the group path again, diff the
+/// before/after" logic is identical; only what happens *after* differs (advancing
+/// generation vs. counting an attempt), which each caller does for itself.
+async fn reconcile_one_folder(
+    store: &HubStore,
+    hub_id: Uuid,
+    acoustid: &acoustid::AcoustIdClient,
+    musicbrainz: &musicbrainz::MusicBrainzClient,
+    artwork_http: &reqwest::Client,
+    musicbrainz_user_agent: &str,
+    fingerprint_cache: &StdMutex<HashMap<String, CachedFingerprint>>,
+    folder: &Path,
+) -> usize {
+    let jobs: Vec<IdentificationJob> = match store.folder_members(folder) {
+        Ok(members) => members
+            .into_iter()
+            .map(|member| IdentificationJob {
+                content_hash: member.content_hash,
+                path: member.path,
+            })
+            .collect(),
+        Err(error) => {
+            tracing::warn!(folder = %folder.display(), %error, "failed to list folder members for reconcile");
+            return 0;
+        }
+    };
+    if jobs.is_empty() {
+        return 0;
+    }
+
+    // Snapshot the "shape" of each file's current answer, not just its timestamp —
+    // `identified_at` alone could coincidentally collide at second granularity between
+    // an old and a genuinely rewritten answer within the same sweep.
+    let before: HashMap<String, ResultShape> = jobs
+        .iter()
+        .filter_map(|job| {
+            store
+                .identification_result(&job.content_hash)
+                .ok()
+                .flatten()
+                .map(|result| (job.content_hash.clone(), ResultShape::from(&result)))
+        })
+        .collect();
+
+    identify_group(
+        store,
+        hub_id,
+        acoustid,
+        musicbrainz,
+        artwork_http,
+        musicbrainz_user_agent,
+        fingerprint_cache,
+        GroupJob {
+            folder: folder.to_path_buf(),
+            jobs: jobs.clone(),
+        },
+    )
+    .await;
+
+    let mut revised = 0usize;
+    for job in &jobs {
+        if let Err(error) = store.touch_identification_generation(
+            &job.content_hash,
+            i64::from(crate::IDENTIFICATION_GENERATION),
+        ) {
+            tracing::warn!(content_hash = %job.content_hash, %error, "failed to advance reconcile generation");
+        }
+
+        let after = store
+            .identification_result(&job.content_hash)
+            .ok()
+            .flatten()
+            .map(|result| ResultShape::from(&result));
+        if after != before.get(&job.content_hash).cloned() {
+            revised += 1;
+        }
+    }
     revised
 }
 
@@ -683,9 +851,11 @@ async fn identify_file(
     musicbrainz: &musicbrainz::MusicBrainzClient,
     artwork_http: &reqwest::Client,
     musicbrainz_user_agent: &str,
+    fingerprint_cache: &StdMutex<HashMap<String, CachedFingerprint>>,
     job: IdentificationJob,
 ) -> anyhow::Result<bool> {
-    let Some(prepared) = prepare_file(store, acoustid, musicbrainz, job).await? else {
+    let Some(prepared) = prepare_file(store, acoustid, musicbrainz, fingerprint_cache, job).await?
+    else {
         return Ok(false);
     };
     finish_per_file(store, hub_id, artwork_http, musicbrainz_user_agent, &prepared).await
@@ -726,33 +896,62 @@ async fn prepare_file(
     store: &HubStore,
     acoustid: &acoustid::AcoustIdClient,
     musicbrainz: &musicbrainz::MusicBrainzClient,
+    fingerprint_cache: &StdMutex<HashMap<String, CachedFingerprint>>,
     job: IdentificationJob,
 ) -> anyhow::Result<Option<PreparedFile>> {
-    let fingerprinted = {
-        let path = job.path.clone();
-        tokio::task::spawn_blocking(move || fingerprint::fingerprint_file(&path)).await?
-    };
-    let fingerprint::FingerprintResult {
-        fingerprint_base64,
-        duration_secs,
-    } = match fingerprinted {
-        Ok(result) => result,
-        Err(fingerprint::Error::UnsupportedFormat(reason)) => {
-            tracing::debug!(
-                content_hash = %job.content_hash, %reason,
-                "skipping identification: unsupported audio format"
-            );
-            return Ok(None);
+    let cached_fingerprint = {
+        let mut cache = fingerprint_cache.lock().unwrap();
+        match cache.get(&job.content_hash) {
+            Some(entry) if entry.cached_at.elapsed().as_secs() < FINGERPRINT_CACHE_TTL_SECS => {
+                Some((entry.fingerprint_base64.clone(), entry.duration_secs))
+            }
+            Some(_) => {
+                cache.remove(&job.content_hash);
+                None
+            }
+            None => None,
         }
-        Err(error) => return Err(error.into()),
     };
-    tracing::info!(
-        content_hash = %job.content_hash,
-        path = %job.path.display(),
-        fingerprint_len = fingerprint_base64.len(),
-        duration_secs,
-        "fingerprinted; querying acoustid"
-    );
+
+    let (fingerprint_base64, duration_secs) = match cached_fingerprint {
+        Some(cached) => cached,
+        None => {
+            let fingerprinted = {
+                let path = job.path.clone();
+                tokio::task::spawn_blocking(move || fingerprint::fingerprint_file(&path)).await?
+            };
+            let fingerprint::FingerprintResult {
+                fingerprint_base64,
+                duration_secs,
+            } = match fingerprinted {
+                Ok(result) => result,
+                Err(fingerprint::Error::UnsupportedFormat(reason)) => {
+                    tracing::debug!(
+                        content_hash = %job.content_hash, %reason,
+                        "skipping identification: unsupported audio format"
+                    );
+                    return Ok(None);
+                }
+                Err(error) => return Err(error.into()),
+            };
+            tracing::info!(
+                content_hash = %job.content_hash,
+                path = %job.path.display(),
+                fingerprint_len = fingerprint_base64.len(),
+                duration_secs,
+                "fingerprinted; querying acoustid"
+            );
+            fingerprint_cache.lock().unwrap().insert(
+                job.content_hash.clone(),
+                CachedFingerprint {
+                    fingerprint_base64: fingerprint_base64.clone(),
+                    duration_secs,
+                    cached_at: Instant::now(),
+                },
+            );
+            (fingerprint_base64, duration_secs)
+        }
+    };
 
     // Purely a disambiguation hint for `acoustid::best_match` (see its doc comment
     // for why): a single AcoustID fingerprint can carry several unrelated candidate
@@ -959,7 +1158,14 @@ async fn per_file_fields(
                 fields.insert("album".into(), json!(album));
             }
             if let Some(artwork_url) =
-                cache_artwork(artwork_http, musicbrainz_user_agent, store, &release.id).await
+                cache_artwork(
+                    artwork_http,
+                    musicbrainz_user_agent,
+                    store,
+                    &release.id,
+                    release_group_id.as_deref(),
+                )
+                .await
             {
                 fields.insert("artwork_url".into(), json!(artwork_url));
             }
@@ -1241,6 +1447,75 @@ struct GroupOutcome {
 /// Fetches a release's full tracklist, checking the local cache first (see
 /// `HubStore::release_cache_get`/`release_cache_put`) — this is what makes repeated
 /// group passes over an already-processed library cost no network requests at all.
+/// How many of a file's *other* AcoustID candidate recordings (beyond the one already
+/// fetched for its per-file best match) get their own release lists pulled in as extra
+/// group-shortlisting evidence — see `extra_candidate_releases`. Bounded per file so a
+/// group pass's added request cost stays proportional to group size rather than to
+/// however many candidates AcoustID happened to return for one fingerprint; each fetch is
+/// cached by recording id (`musicbrainz_recording_cache`), so a retried group (see
+/// `aro_sync_store::HubStore::folders_needing_group_retry`) re-pays this cost at most once.
+const MAX_EXTRA_RECORDING_FETCHES_PER_FILE: usize = 2;
+
+/// Pulls release lists for up to `MAX_EXTRA_RECORDING_FETCHES_PER_FILE` of a file's other
+/// AcoustID candidate recordings, beyond the one recording already fetched for its per-file
+/// best match (`file.musicbrainz_recording`). Exists because `shortlist_candidates` can only
+/// ever surface a release that appears in `releases_per_file` -- if the *right* release
+/// (the one every other file in the folder is actually on) simply wasn't linked to whichever
+/// single recording each file's per-file heuristic happened to pick, group matching is
+/// structurally blind to it no matter how good the scoring logic is. `candidate_recording_ids`
+/// (every recording AcoustID linked for this fingerprint, not just the best-match pick) is
+/// exactly the evidence needed to recover from that -- this is what actually consults it.
+async fn extra_candidate_releases(
+    store: &HubStore,
+    musicbrainz: &musicbrainz::MusicBrainzClient,
+    file: &PreparedFile,
+) -> Vec<musicbrainz::Release> {
+    let already_fetched = file.acoustid_recording_id.as_deref();
+    let mut releases = Vec::new();
+    let mut fetched = 0usize;
+    for candidate_id in &file.candidate_recording_ids {
+        if fetched >= MAX_EXTRA_RECORDING_FETCHES_PER_FILE {
+            break;
+        }
+        if Some(candidate_id.as_str()) == already_fetched {
+            continue;
+        }
+        if let Some(recording) = fetch_recording_cached(store, musicbrainz, candidate_id).await {
+            releases.extend(recording.releases);
+            fetched += 1;
+        }
+    }
+    releases
+}
+
+async fn fetch_recording_cached(
+    store: &HubStore,
+    musicbrainz: &musicbrainz::MusicBrainzClient,
+    recording_id: &str,
+) -> Option<musicbrainz::RecordingResponse> {
+    if let Ok(Some(entry)) = store.recording_cache_get(recording_id)
+        && entry.schema_version >= crate::CACHE_SCHEMA_VERSION
+        && let Ok(response) = serde_json::from_value(entry.response)
+    {
+        return Some(response);
+    }
+    match musicbrainz.recording(recording_id).await {
+        Ok(response) => {
+            if let Ok(json) = serde_json::to_value(&response)
+                && let Err(error) =
+                    store.recording_cache_put(recording_id, &json, crate::CACHE_SCHEMA_VERSION)
+            {
+                tracing::warn!(recording_id, %error, "failed to cache recording response");
+            }
+            Some(response)
+        }
+        Err(error) => {
+            tracing::debug!(recording_id, %error, "extra candidate recording fetch failed during group matching");
+            None
+        }
+    }
+}
+
 async fn fetch_release_cached(
     store: &HubStore,
     musicbrainz: &musicbrainz::MusicBrainzClient,
@@ -1306,6 +1581,7 @@ async fn identify_group(
     musicbrainz: &musicbrainz::MusicBrainzClient,
     artwork_http: &reqwest::Client,
     musicbrainz_user_agent: &str,
+    fingerprint_cache: &StdMutex<HashMap<String, CachedFingerprint>>,
     job: GroupJob,
 ) -> GroupOutcome {
     let mut processed = 0usize;
@@ -1314,7 +1590,7 @@ async fn identify_group(
     let mut prepared: Vec<Option<PreparedFile>> = Vec::with_capacity(job.jobs.len());
     for file_job in job.jobs {
         let content_hash = file_job.content_hash.clone();
-        match prepare_file(store, acoustid, musicbrainz, file_job).await {
+        match prepare_file(store, acoustid, musicbrainz, fingerprint_cache, file_job).await {
             Ok(result) => prepared.push(result),
             Err(error) => {
                 tracing::warn!(
@@ -1382,15 +1658,16 @@ async fn identify_group(
             candidate_recording_ids: &file.candidate_recording_ids,
         })
         .collect();
-    let releases_per_file: Vec<Vec<musicbrainz::Release>> = group_files
-        .iter()
-        .map(|file| {
-            file.musicbrainz_recording
-                .as_ref()
-                .map(|recording| recording.releases.clone())
-                .unwrap_or_default()
-        })
-        .collect();
+    let mut releases_per_file: Vec<Vec<musicbrainz::Release>> = Vec::with_capacity(group_files.len());
+    for file in &group_files {
+        let mut releases = file
+            .musicbrainz_recording
+            .as_ref()
+            .map(|recording| recording.releases.clone())
+            .unwrap_or_default();
+        releases.extend(extra_candidate_releases(store, musicbrainz, file).await);
+        releases_per_file.push(releases);
+    }
 
     let affinity = dominant_artist_affinity(store, &group_files).unwrap_or_default();
     let shortlisted =
@@ -1444,8 +1721,14 @@ async fn identify_group(
                 fields.insert("album".into(), json!(album_title));
             }
             if artwork_url.is_none() {
-                artwork_url =
-                    cache_artwork(artwork_http, musicbrainz_user_agent, store, &best.release_id).await;
+                artwork_url = cache_artwork(
+                    artwork_http,
+                    musicbrainz_user_agent,
+                    store,
+                    &best.release_id,
+                    best.release_group_id.as_deref(),
+                )
+                .await;
             }
             if let Some(artwork_url) = &artwork_url {
                 fields.insert("artwork_url".into(), json!(artwork_url));
@@ -1579,12 +1862,82 @@ async fn cache_artwork(
     user_agent: &str,
     store: &HubStore,
     release_mbid: &str,
+    release_group_mbid: Option<&str>,
 ) -> Option<String> {
-    let bytes = musicbrainz::fetch_cover_art(http, user_agent, release_mbid).await?;
+    let bytes =
+        musicbrainz::fetch_cover_art_with_fallback(http, user_agent, release_mbid, release_group_mbid)
+            .await?;
     let temp = tempfile::NamedTempFile::new().ok()?;
     std::fs::write(temp.path(), &bytes).ok()?;
     let (hash, _size) = store.import_managed(temp.path()).ok()?;
     Some(format!("/v1/blobs/{hash}"))
+}
+
+/// How many missing-artwork results one backfill pass considers — bounded the same way
+/// `RECONCILE_BATCH` bounds `reconcile_sweep`, so a library with a large backlog of gaps
+/// doesn't try to close all of them (and burn that much Cover Art Archive request budget) in
+/// a single tick; later ticks pick up whatever's left.
+const ARTWORK_BACKFILL_BATCH: u32 = 50;
+
+/// Retries [`cache_artwork`] for results that already have a correctly-resolved release but
+/// never got artwork cached — see `HubStore::identification_results_missing_artwork`'s doc
+/// comment for why that gap exists (a one-off network/Cover Art Archive failure during the
+/// *first* write, with nothing that ever revisits just the artwork afterward) and why
+/// nothing else closes it: an already-`group`-sourced result never re-enters
+/// `folders_needing_group_retry`, and a stale-generation reconcile only fires for files
+/// below the current generation. Groups by release id first so a release with many tracks
+/// (an accepted group of 20 files, say) only costs one Cover Art Archive fetch, not twenty.
+async fn backfill_missing_artwork(
+    store: &HubStore,
+    artwork_http: &reqwest::Client,
+    musicbrainz_user_agent: &str,
+) {
+    let missing = match store.identification_results_missing_artwork(ARTWORK_BACKFILL_BATCH) {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(%error, "failed to list results missing artwork");
+            return;
+        }
+    };
+    if missing.is_empty() {
+        return;
+    }
+
+    let mut hashes_by_release: HashMap<String, (Option<String>, Vec<String>)> = HashMap::new();
+    for (content_hash, release_id, release_group_id) in missing {
+        hashes_by_release
+            .entry(release_id)
+            .or_insert_with(|| (release_group_id, Vec::new()))
+            .1
+            .push(content_hash);
+    }
+
+    let mut cached_releases = 0usize;
+    for (release_id, (release_group_id, content_hashes)) in hashes_by_release {
+        let Some(artwork_url) = cache_artwork(
+            artwork_http,
+            musicbrainz_user_agent,
+            store,
+            &release_id,
+            release_group_id.as_deref(),
+        )
+        .await
+        else {
+            continue;
+        };
+        cached_releases += 1;
+        for content_hash in content_hashes {
+            if let Err(error) = store.set_artwork_url(&content_hash, &artwork_url) {
+                tracing::warn!(
+                    content_hash = %content_hash, %error,
+                    "failed to persist backfilled artwork url"
+                );
+            }
+        }
+    }
+    if cached_releases > 0 {
+        tracing::info!(cached_releases, "artwork backfill complete");
+    }
 }
 
 /// Builds the `known_release_titles` map `acoustid::best_match` uses to
@@ -1740,6 +2093,7 @@ mod tests {
             groups_queued: AtomicU64::new(0),
             last_group: Mutex::new(None),
             pending: StdMutex::new(HashSet::new()),
+            fingerprint_cache: StdMutex::new(HashMap::new()),
         });
         let (staging_tx, staging_rx) = mpsc::unbounded_channel::<IdentificationJob>();
         let (job_tx, mut job_rx) = mpsc::unbounded_channel::<WorkItem>();
@@ -1775,6 +2129,7 @@ mod tests {
             groups_queued: AtomicU64::new(0),
             last_group: Mutex::new(None),
             pending: StdMutex::new(HashSet::new()),
+            fingerprint_cache: StdMutex::new(HashMap::new()),
         });
         let (staging_tx, staging_rx) = mpsc::unbounded_channel::<IdentificationJob>();
         let (job_tx, mut job_rx) = mpsc::unbounded_channel::<WorkItem>();
@@ -1802,6 +2157,7 @@ mod tests {
             groups_queued: AtomicU64::new(0),
             last_group: Mutex::new(None),
             pending: StdMutex::new(HashSet::new()),
+            fingerprint_cache: StdMutex::new(HashMap::new()),
         });
         let (staging_tx, staging_rx) = mpsc::unbounded_channel::<IdentificationJob>();
         let (job_tx, mut job_rx) = mpsc::unbounded_channel::<WorkItem>();
@@ -1844,6 +2200,7 @@ mod tests {
             groups_queued: AtomicU64::new(0),
             last_group: Mutex::new(None),
             pending: StdMutex::new(HashSet::new()),
+            fingerprint_cache: StdMutex::new(HashMap::new()),
         });
         let (staging_tx, staging_rx) = mpsc::unbounded_channel::<IdentificationJob>();
         let (job_tx, mut job_rx) = mpsc::unbounded_channel::<WorkItem>();
@@ -1879,6 +2236,7 @@ mod tests {
                 "hash-2".to_string(),
                 "hash-3".to_string(),
             ])),
+            fingerprint_cache: StdMutex::new(HashMap::new()),
         };
 
         {

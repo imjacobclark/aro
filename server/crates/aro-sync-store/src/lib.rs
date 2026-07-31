@@ -80,6 +80,19 @@ pub struct ReleaseCacheEntry {
     pub refreshed_at: i64,
 }
 
+/// A cached raw `ws/2/recording/{id}` response, keyed by recording id. Distinct from
+/// `identification_cache` (keyed by fingerprint, one recording per row — the per-file
+/// best-match pick) and `musicbrainz_release_cache` (keyed by release id, a shortlisted
+/// candidate's full tracklist): this caches the *other* candidate recordings a group match
+/// consults to build its release shortlist (see `aro_track_id::queue::fetch_recording_cached`),
+/// so retrying a rejected group doesn't re-pay the same MusicBrainz requests every pass.
+#[derive(Clone, Debug)]
+pub struct RecordingCacheEntry {
+    pub response: Value,
+    pub schema_version: u32,
+    pub refreshed_at: i64,
+}
+
 /// One scanned, available file within a folder, as returned by [`HubStore::folder_members`].
 #[derive(Clone, Debug)]
 pub struct FolderMember {
@@ -97,6 +110,60 @@ pub struct PlaylistSeedTrack {
     /// Canonical mood vocabulary from `identification_results.mood_tags` — empty when the
     /// track hasn't been identified or no folksonomy tag matched a known mood.
     pub mood_tags: Vec<String>,
+    /// Milliseconds since epoch this track was first seen — the minimum
+    /// `field_versions` timestamp across all its CRDT fields, since a freshly
+    /// scanned track has every field written at (approximately) the same instant.
+    /// `None` for a track with no field versions recorded yet (shouldn't normally
+    /// happen for a live track, but the CRDT payload is technically optional).
+    /// Drives "Fresh Finds" (added recently, unplayed).
+    pub first_seen_at_millis: Option<i64>,
+    /// From `tracks.metadata`'s `artist`/`album`/`release_year` fields — drives
+    /// artist- and year-grouped playlists ("More From X", "Favourite Artists",
+    /// "Hits of `<year>`"). `None` when the track has no tag for that field.
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub release_year: Option<i64>,
+    /// The JSON serialization of this track's `aro_track_id::audio_features::AudioFeatures`
+    /// (tempo, energy, brightness, dynamic range, MFCC/chroma vector), if it's been
+    /// analyzed — kept as an opaque string here rather than the real type, since that
+    /// type lives in `aro-track-id`, which depends on this crate (not the reverse).
+    /// `aro-server`'s `playlists` module decodes it. `None` until analysis completes.
+    pub audio_features_json: Option<String>,
+}
+
+/// Aggregated `listening_events` stats for one track, keyed by content hash — feeds
+/// Tier 1 behavioural playlists (decayed Heavy Rotation, Forgotten Favourites,
+/// skip-aware Deep Cuts, time-of-day mixes).
+#[derive(Clone, Debug, Default)]
+pub struct ListeningEventSummary {
+    pub play_count: i64,
+    pub skip_count: i64,
+    pub completed_count: i64,
+    /// Seconds since epoch of the most recent play.
+    pub last_played_at: f64,
+    /// Exponential-decay-weighted play count (45-day half-life): each play
+    /// contributes `0.5^(age_days / 45)`, so recent listening counts far more than
+    /// old listening — this is what "Heavy Rotation" should rank by, not a raw
+    /// lifetime tally.
+    pub decayed_affinity: f64,
+    /// Play counts bucketed by UTC hour-of-day (index 0-23) `started_at` falls in.
+    /// The generator combines this with a client-supplied UTC offset to bucket into
+    /// the *requester's* local morning/evening, not the hub's.
+    pub hour_histogram: [i64; 24],
+    /// Plays whose `started_at` falls in the hub's current UTC calendar month —
+    /// drives "Your `<Month>` Replay". Same UTC-vs-local caveat as
+    /// `hour_histogram`: a play just before/after local midnight near a month
+    /// boundary can land in the "wrong" month for a listener outside UTC. Not worth
+    /// correcting for a monthly-granularity feature the way `hour_histogram` is for
+    /// `Morning`/`Late Night`.
+    pub current_month_play_count: i64,
+    /// UTC calendar year of this track's earliest/most recent logged play — drives
+    /// "Time Capsule" (tracks whose `last_played_year` is now several years stale
+    /// despite meaningful lifetime `play_count`). `None` until at least one play is
+    /// recorded (same lifetime as the rest of this summary, which only exists for
+    /// content hashes with at least one event).
+    pub first_played_year: Option<i32>,
+    pub last_played_year: Option<i32>,
 }
 
 /// Everything [`HubStore::playlist_seeds`] can tell an auto-playlist generator, all keyed
@@ -105,12 +172,9 @@ pub struct PlaylistSeedTrack {
 pub struct PlaylistSeeds {
     /// Every live, content-addressed track, in stable `hub_track_id` order.
     pub tracks: Vec<PlaylistSeedTrack>,
-    /// Content hashes by descending play count.
-    pub most_played: Vec<String>,
-    /// Content hashes by most recent play first.
-    pub recently_played: Vec<String>,
-    /// Every content hash with at least one logged listening event.
-    pub played: HashSet<String>,
+    /// Listening-event aggregates, present only for content hashes with at least one
+    /// logged event — absence means never played.
+    pub listening: HashMap<String, ListeningEventSummary>,
 }
 
 /// The outcome of identifying one file, keyed by `content_hash` rather than
@@ -1083,16 +1147,32 @@ impl HubStore {
     }
 
     /// Seed data for server-side auto-playlist generation (see `aro-server`'s `playlists`
-    /// module): every live content-addressed track with its favourite flag and mood tags,
-    /// plus play-count/recency orderings from `listening_events` — all keyed by content
-    /// hash, since that's the only identifier client libraries share with this database.
+    /// module): every live content-addressed track with its favourite flag, mood tags,
+    /// and first-seen time, plus decayed-affinity/skip/time-of-day aggregates from
+    /// `listening_events` — all keyed by content hash, since that's the only identifier
+    /// client libraries share with this database.
     pub fn playlist_seeds(&self) -> Result<PlaylistSeeds, StoreError> {
         let connection = self.connection.lock();
         let mut seeds = PlaylistSeeds::default();
 
+        // Loaded up front (rather than a per-track lookup) so the tracks loop below
+        // stays a single pass; `audio_features` is typically much smaller than
+        // `tracks` (analysis is best-effort background work), so this is cheap.
+        let mut audio_features_by_hash: HashMap<String, String> = HashMap::new();
+        {
+            let mut audio_feature_rows =
+                connection.prepare("SELECT content_hash, payload FROM audio_features")?;
+            let rows = audio_feature_rows
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (hash, payload) = row?;
+                audio_features_by_hash.insert(hash, payload);
+            }
+        }
+
         let mut tracks = connection.prepare(
             r#"
-            SELECT t.content_hash, t.metadata, ir.mood_tags
+            SELECT t.content_hash, t.metadata, t.field_versions, ir.mood_tags
             FROM tracks t
             LEFT JOIN identification_results ir ON ir.content_hash = t.content_hash
             WHERE t.content_hash IS NOT NULL
@@ -1105,11 +1185,12 @@ impl HubStore {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
             ))
         })?;
         for row in track_rows {
-            let (content_hash, metadata, mood_tags) = row?;
+            let (content_hash, metadata, field_versions, mood_tags) = row?;
             let metadata: serde_json::Map<String, Value> =
                 serde_json::from_str(&metadata).unwrap_or_default();
             let favourite = metadata
@@ -1119,43 +1200,91 @@ impl HubStore {
             let mood_tags: Vec<String> = mood_tags
                 .and_then(|json| serde_json::from_str(&json).ok())
                 .unwrap_or_default();
+            // A freshly scanned track writes every field at (approximately) the same
+            // instant, so the earliest per-field timestamp is a good proxy for "when
+            // this track was added" without needing a dedicated column.
+            let versions: serde_json::Map<String, Value> =
+                serde_json::from_str(&field_versions).unwrap_or_default();
+            let first_seen_at_millis = versions
+                .values()
+                .filter_map(|value| value.get("physical_millis").and_then(Value::as_i64))
+                .min();
+            let text = |key: &str| {
+                metadata
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+            };
+            let audio_features_json = audio_features_by_hash.get(&content_hash).cloned();
             seeds.tracks.push(PlaylistSeedTrack {
                 content_hash,
                 favourite,
                 mood_tags,
+                first_seen_at_millis,
+                artist: text("artist"),
+                album: text("album"),
+                release_year: metadata.get("release_year").and_then(Value::as_i64),
+                audio_features_json,
             });
         }
         drop(tracks);
 
+        const DECAY_HALF_LIFE_DAYS: f64 = 45.0;
+        let now_utc = chrono::Utc::now();
+        let now = now_utc.timestamp() as f64;
+        let current_month = {
+            use chrono::Datelike;
+            (now_utc.year(), now_utc.month())
+        };
+
         let mut listening = connection.prepare(
             r#"
-            SELECT t.content_hash, COUNT(*), MAX(l.started_at)
+            SELECT t.content_hash, l.started_at, l.skipped, l.completed
             FROM listening_events l
             JOIN tracks t ON t.hub_track_id = l.track_id
-            WHERE t.content_hash IS NOT NULL
-            GROUP BY t.content_hash
+            WHERE t.content_hash IS NOT NULL AND l.started_at IS NOT NULL
             "#,
         )?;
         let listening_rows = listening.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, Option<f64>>(2)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, bool>(2)?,
+                row.get::<_, bool>(3)?,
             ))
         })?;
-        let mut tallies: Vec<(String, i64, f64)> = Vec::new();
         for row in listening_rows {
-            let (content_hash, play_count, last_played_at) = row?;
-            tallies.push((content_hash, play_count, last_played_at.unwrap_or(0.0)));
+            let (content_hash, started_at, skipped, completed) = row?;
+            let summary = seeds.listening.entry(content_hash).or_default();
+            summary.play_count += 1;
+            if skipped {
+                summary.skip_count += 1;
+            }
+            if completed {
+                summary.completed_count += 1;
+            }
+            summary.last_played_at = summary.last_played_at.max(started_at);
+            let age_days = ((now - started_at) / 86_400.0).max(0.0);
+            summary.decayed_affinity += 0.5_f64.powf(age_days / DECAY_HALF_LIFE_DAYS);
+            if let Some(played_at) = chrono::DateTime::from_timestamp(started_at as i64, 0) {
+                use chrono::{Datelike, Timelike};
+                let bucket = played_at.hour() as usize;
+                if bucket < 24 {
+                    summary.hour_histogram[bucket] += 1;
+                }
+                if played_at.year() == current_month.0 && played_at.month() == current_month.1 {
+                    summary.current_month_play_count += 1;
+                }
+                let year = played_at.year();
+                summary.first_played_year =
+                    Some(summary.first_played_year.map_or(year, |existing| existing.min(year)));
+                summary.last_played_year =
+                    Some(summary.last_played_year.map_or(year, |existing| existing.max(year)));
+            }
         }
         drop(listening);
-
-        // Descending count, then hash, so equal counts order identically across calls.
-        tallies.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        seeds.most_played = tallies.iter().map(|(hash, _, _)| hash.clone()).collect();
-        tallies.sort_by(|a, b| b.2.total_cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
-        seeds.recently_played = tallies.iter().map(|(hash, _, _)| hash.clone()).collect();
-        seeds.played = tallies.into_iter().map(|(hash, _, _)| hash).collect();
 
         Ok(seeds)
     }
@@ -1919,6 +2048,117 @@ impl HubStore {
         Ok(())
     }
 
+    /// Whether `hash` still needs engineered audio-feature analysis (see
+    /// `aro_track_id::audio_features`) at `algorithm_version` — same shape as
+    /// [`Self::needs_loudness_analysis`]. Unlike loudness, audio features are never
+    /// synced from a client (only the hub itself analyzes, since it always has direct
+    /// file access to what it's scanning) — so, also unlike loudness, this is a plain
+    /// local table, not a CRDT-synced one.
+    pub fn needs_audio_feature_analysis(
+        &self,
+        hash: &str,
+        algorithm_version: i64,
+    ) -> Result<bool, StoreError> {
+        validate_hash(hash)?;
+        let connection = self.connection.lock();
+        let analyzed: bool = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM audio_features
+                WHERE content_hash = ?1 AND algorithm_version = ?2
+            )",
+            params![hash, algorithm_version],
+            |row| row.get(0),
+        )?;
+        if analyzed {
+            return Ok(false);
+        }
+        let permanently_failed: bool = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM audio_feature_failures
+                WHERE content_hash = ?1 AND algorithm_version = ?2
+            )",
+            params![hash, algorithm_version],
+            |row| row.get(0),
+        )?;
+        Ok(!permanently_failed)
+    }
+
+    /// Stores one track's engineered audio features (see
+    /// `aro_track_id::audio_features::AudioFeatures`) as its JSON serialization —
+    /// `payload_json` is opaque to this store, `playlist_seeds()` is what interprets it.
+    pub fn put_audio_features(
+        &self,
+        hash: &str,
+        algorithm_version: i64,
+        payload_json: &str,
+    ) -> Result<(), StoreError> {
+        validate_hash(hash)?;
+        self.connection.lock().execute(
+            r#"
+            INSERT INTO audio_features (content_hash, algorithm_version, payload)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(content_hash, algorithm_version) DO UPDATE SET
+                payload = excluded.payload
+            "#,
+            params![hash, algorithm_version, payload_json],
+        )?;
+        self.connection.lock().execute(
+            "DELETE FROM audio_feature_failures
+             WHERE content_hash = ?1 AND algorithm_version = ?2",
+            params![hash, algorithm_version],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_audio_feature_failure(
+        &self,
+        hash: &str,
+        algorithm_version: i64,
+        error: &str,
+    ) -> Result<(), StoreError> {
+        validate_hash(hash)?;
+        self.connection.lock().execute(
+            r#"
+            INSERT INTO audio_feature_failures
+                (content_hash, algorithm_version, error, attempted_at)
+            VALUES (?1, ?2, ?3, unixepoch())
+            ON CONFLICT(content_hash, algorithm_version) DO UPDATE SET
+                error = excluded.error,
+                attempted_at = excluded.attempted_at
+            "#,
+            params![hash, algorithm_version, error],
+        )?;
+        Ok(())
+    }
+
+    /// One track's engineered audio features, if analyzed — keyed by content hash,
+    /// the JSON payload decoded by the caller (`aro-server`'s `playlist_seeds`).
+    pub fn audio_features(&self, hash: &str) -> Result<Option<String>, StoreError> {
+        validate_hash(hash)?;
+        Ok(self
+            .connection
+            .lock()
+            .query_row(
+                "SELECT payload FROM audio_features WHERE content_hash = ?1",
+                params![hash],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Every analyzed track's audio-feature payload, keyed by content hash — used by
+    /// `playlist_seeds()` to join features onto tracks in one query rather than one
+    /// per track.
+    pub fn all_audio_features(&self) -> Result<HashMap<String, String>, StoreError> {
+        let connection = self.connection.lock();
+        let mut statement =
+            connection.prepare("SELECT content_hash, payload FROM audio_features")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<Result<_, _>>().map_err(Into::into)
+    }
+
     pub fn blob_path_for_download(&self, hash: &str) -> Result<Option<PathBuf>, StoreError> {
         validate_hash(hash)?;
         let path = self.blob_path(hash);
@@ -2103,6 +2343,157 @@ impl HubStore {
         Ok(())
     }
 
+    pub fn recording_cache_get(
+        &self,
+        recording_id: &str,
+    ) -> Result<Option<RecordingCacheEntry>, StoreError> {
+        let row = self
+            .connection
+            .lock()
+            .query_row(
+                r#"
+                SELECT response, schema_version, refreshed_at
+                FROM musicbrainz_recording_cache
+                WHERE recording_id = ?1
+                "#,
+                [recording_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)? as u32,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(row.and_then(|(response, schema_version, refreshed_at)| {
+            serde_json::from_str(&response)
+                .ok()
+                .map(|response| RecordingCacheEntry {
+                    response,
+                    schema_version,
+                    refreshed_at,
+                })
+        }))
+    }
+
+    pub fn recording_cache_put(
+        &self,
+        recording_id: &str,
+        response: &Value,
+        schema_version: u32,
+    ) -> Result<(), StoreError> {
+        let now = chrono::Utc::now().timestamp();
+        self.connection.lock().execute(
+            r#"
+            INSERT INTO musicbrainz_recording_cache
+                (recording_id, response, schema_version, created_at, refreshed_at)
+            VALUES (?1, ?2, ?3, ?4, ?4)
+            ON CONFLICT(recording_id) DO UPDATE SET
+                response = excluded.response,
+                schema_version = excluded.schema_version,
+                refreshed_at = excluded.refreshed_at
+            "#,
+            params![recording_id, response.to_string(), schema_version, now],
+        )?;
+        Ok(())
+    }
+
+    /// Increments (creating if absent) the automatic group-retry attempt counter for
+    /// `folder`, returning the new count. `aro_track_id::queue::reconcile_sweep` uses this
+    /// to bound how many times it will automatically re-attempt a folder whose group match
+    /// was rejected outright (see `folders_needing_group_retry`) — without a cap, a folder
+    /// that can never converge (a genuine mixed bag, correctly rejected every time by
+    /// `album::accept`) would be retried on every sweep forever, burning AcoustID/
+    /// MusicBrainz request budget for no gain.
+    pub fn record_group_reconcile_attempt(&self, folder: &Path) -> Result<i64, StoreError> {
+        let now = chrono::Utc::now().timestamp();
+        let folder = folder.to_string_lossy();
+        self.connection.lock().execute(
+            r#"
+            INSERT INTO group_reconcile_attempts (folder, attempts, last_attempted_at)
+            VALUES (?1, 1, ?2)
+            ON CONFLICT(folder) DO UPDATE SET
+                attempts = group_reconcile_attempts.attempts + 1,
+                last_attempted_at = excluded.last_attempted_at
+            "#,
+            params![folder.as_ref(), now],
+        )?;
+        let attempts = self.connection.lock().query_row(
+            "SELECT attempts FROM group_reconcile_attempts WHERE folder = ?1",
+            [folder.as_ref()],
+            |row| row.get(0),
+        )?;
+        Ok(attempts)
+    }
+
+    /// Distinct folders with at least `min_group_members` available files, none of which
+    /// have ever landed a `group`-sourced (accepted) identification -- i.e. a folder whose
+    /// group match was attempted and rejected outright (every member fell back to the
+    /// unscored per-file path), not one that simply hasn't been scanned yet (`resolution_source`
+    /// is `NULL`/absent) or one that mostly succeeded with a few genuine outliers (which
+    /// would have at least one `group`-sourced member). Excludes folders that have already
+    /// exhausted `max_attempts` automatic retries (see `record_group_reconcile_attempt`).
+    /// Ordered by member count descending, same rationale as `folders_needing_reconcile`.
+    pub fn folders_needing_group_retry(
+        &self,
+        min_group_members: i64,
+        max_attempts: i64,
+        limit: u32,
+    ) -> Result<Vec<PathBuf>, StoreError> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            r#"
+            SELECT sources.path, source_files.relative_path,
+                   count(*) AS member_count,
+                   sum(CASE WHEN ir.resolution_source = 'per_file' THEN 1 ELSE 0 END)
+                       AS per_file_count
+            FROM source_files
+            JOIN sources ON sources.source_id = source_files.source_id
+            JOIN identification_results ir ON ir.content_hash = source_files.content_hash
+            WHERE source_files.available = 1
+              AND sources.path IS NOT NULL
+            GROUP BY sources.path, source_files.relative_path
+            HAVING count(*) = sum(CASE WHEN ir.resolution_source = 'per_file' THEN 1 ELSE 0 END)
+            "#,
+        )?;
+        let rows: Vec<(String, String, i64)> = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<Result<_, _>>()?;
+        drop(statement);
+
+        let mut counts: HashMap<PathBuf, i64> = HashMap::new();
+        for (source_path, relative_path, member_count) in rows {
+            let full_path = Path::new(&source_path).join(relative_path);
+            if let Some(folder) = full_path.parent() {
+                *counts.entry(folder.to_path_buf()).or_insert(0) += member_count;
+            }
+        }
+
+        let mut attempts_statement = connection.prepare(
+            "SELECT attempts FROM group_reconcile_attempts WHERE folder = ?1",
+        )?;
+        let mut folders: Vec<(PathBuf, i64)> = counts
+            .into_iter()
+            .filter(|(_, member_count)| *member_count >= min_group_members)
+            .filter(|(folder, _)| {
+                let attempts: Option<i64> = attempts_statement
+                    .query_row([folder.to_string_lossy().as_ref()], |row| row.get(0))
+                    .optional()
+                    .unwrap_or(None);
+                attempts.unwrap_or(0) < max_attempts
+            })
+            .collect();
+        drop(attempts_statement);
+
+        folders.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        Ok(folders
+            .into_iter()
+            .take(limit.clamp(1, 1_000) as usize)
+            .map(|(folder, _)| folder)
+            .collect())
+    }
+
     /// Every scanned, available file whose parent directory is exactly `folder` — the
     /// folder's whole membership, independent of which specific files were offered to
     /// `IdentificationQueue::enqueue` on any one scan pass. This is what lets a manually
@@ -2192,6 +2583,62 @@ impl HubStore {
         Ok(())
     }
 
+    /// Content hash / release id pairs for results that were correctly identified (a
+    /// release was resolved) but never got artwork cached -- `aro_track_id::queue`'s
+    /// `cache_artwork` is a best-effort side effect of the *first* write for a group or
+    /// per-file result (network error, Cover Art Archive outage, etc. all just leave
+    /// `artwork_url` `NULL` rather than failing the whole identification, since artwork is
+    /// decorative), and nothing else ever revisits it once the release itself is settled --
+    /// an already-`group`-sourced result never re-enters `folders_needing_group_retry`, and
+    /// a stale-generation reconcile only fires for files below the current generation. This
+    /// is what a periodic artwork backfill (see `aro_track_id::queue::backfill_missing_artwork`)
+    /// reads from to give that one-off failure a real second chance.
+    pub fn identification_results_missing_artwork(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<(String, String, Option<String>)>, StoreError> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            r#"
+            SELECT content_hash, release_id, release_group_id
+            FROM identification_results
+            WHERE release_id IS NOT NULL AND artwork_url IS NULL
+            LIMIT ?1
+            "#,
+        )?;
+        let rows = statement
+            .query_map([limit.clamp(1, 10_000)], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Fills in `artwork_url` for a result that was missing it, without touching any other
+    /// field -- guarded by `artwork_url IS NULL` so a concurrent normal identification write
+    /// (which sets every field, including artwork, together) always wins over this
+    /// best-effort backfill rather than the two racing to stomp each other.
+    ///
+    /// Also advances `identified_at` to now: `identification_results_since` (what clients
+    /// poll to pull new/changed results) is a pure `identified_at > cursor` query, not a
+    /// real "last modified" check -- a client that already pulled this row once, back when
+    /// artwork_url was still `NULL`, has already advanced its cursor past it, and would
+    /// never see this backfill happen no matter how long it keeps polling unless this row
+    /// looks "new" again. `identified_at` is never shown to users as a real timestamp (it's
+    /// purely this sync cursor), so bumping it here is safe.
+    pub fn set_artwork_url(
+        &self,
+        content_hash: &str,
+        artwork_url: &str,
+    ) -> Result<(), StoreError> {
+        self.connection.lock().execute(
+            "UPDATE identification_results SET artwork_url = ?1, identified_at = ?2 \
+             WHERE content_hash = ?3 AND artwork_url IS NULL",
+            params![artwork_url, chrono::Utc::now().timestamp(), content_hash],
+        )?;
+        Ok(())
+    }
+
     pub fn has_identification_result(&self, content_hash: &str) -> Result<bool, StoreError> {
         Ok(self
             .connection
@@ -2257,6 +2704,17 @@ impl HubStore {
     /// Results identified after `after` (exclusive), oldest first — the pull side of
     /// the bridge the macOS app polls to merge results into its own local library
     /// catalog, since content hash (not any track id) is the only shared key.
+    /// Results recorded after `after` (exclusive), oldest first.
+    ///
+    /// `limit` is a *soft* page size: the batch is extended to include every row
+    /// sharing the last row's `identified_at`, so it can overshoot slightly. That
+    /// matters because `identified_at` is not unique — a folder identified as one
+    /// group stamps every track in it with the same instant — and callers page by
+    /// advancing a cursor to the newest `identified_at` they've seen. A hard `LIMIT`
+    /// can truncate in the middle of such a group, and the caller then advances past
+    /// that timestamp and never sees the remainder: those tracks silently keep their
+    /// stale metadata and placeholder artwork forever. Returning whole timestamp
+    /// groups makes advancing the cursor safe by construction.
     pub fn identification_results_since(
         &self,
         after: i64,
@@ -2271,8 +2729,16 @@ impl HubStore {
                    release_id, release_group_id, musicbrainz_genres, mood_tags
             FROM identification_results
             WHERE identified_at > ?1
+              AND identified_at <= (
+                  SELECT MAX(identified_at) FROM (
+                      SELECT identified_at
+                      FROM identification_results
+                      WHERE identified_at > ?1
+                      ORDER BY identified_at
+                      LIMIT ?2
+                  )
+              )
             ORDER BY identified_at
-            LIMIT ?2
             "#,
         )?;
         let rows = statement.query_map(
@@ -2656,6 +3122,25 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
             attempted_at INTEGER NOT NULL,
             PRIMARY KEY(content_hash, algorithm_version)
         );
+        -- Engineered audio features (tempo, energy, brightness, dynamic range, MFCC/
+        -- chroma vector — see `aro_track_id::audio_features`), local to this hub since
+        -- only the hub itself ever analyzes (it always has direct file access to what
+        -- it scans). Not CRDT-synced, unlike `loudness` above.
+        CREATE TABLE IF NOT EXISTS audio_features (
+            content_hash TEXT NOT NULL,
+            algorithm_version INTEGER NOT NULL,
+            payload TEXT NOT NULL,
+            PRIMARY KEY(content_hash, algorithm_version)
+        );
+        CREATE TABLE IF NOT EXISTS audio_feature_failures (
+            content_hash TEXT NOT NULL,
+            algorithm_version INTEGER NOT NULL,
+            error TEXT NOT NULL,
+            attempted_at INTEGER NOT NULL,
+            PRIMARY KEY(content_hash, algorithm_version)
+        );
+        INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+            VALUES (13, unixepoch());
         CREATE TABLE IF NOT EXISTS blobs (
             hash TEXT PRIMARY KEY,
             size INTEGER NOT NULL,
@@ -2770,6 +3255,13 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
     );
     let _ = connection.execute(
         "ALTER TABLE listening_events ADD COLUMN completed INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    // A real negative signal for Tier 1 behavioural playlists (Forgotten Favourites,
+    // Deep Cuts) — see the client's `PlaybackController.startSong` skip-detection doc
+    // comment. Synced via the same `listening_session` CRDT op as `completed`.
+    let _ = connection.execute(
+        "ALTER TABLE listening_events ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0",
         [],
     );
     connection.execute_batch(
@@ -2931,6 +3423,28 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
         "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (3, unixepoch())",
         [],
     )?;
+    connection.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS musicbrainz_recording_cache (
+            recording_id TEXT PRIMARY KEY,
+            response TEXT NOT NULL,
+            schema_version INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            refreshed_at INTEGER NOT NULL
+        );
+        INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (11, unixepoch());
+        "#,
+    )?;
+    connection.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS group_reconcile_attempts (
+            folder TEXT PRIMARY KEY,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_attempted_at INTEGER NOT NULL
+        );
+        INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (12, unixepoch());
+        "#,
+    )?;
     Ok(())
 }
 
@@ -2969,8 +3483,8 @@ fn materialize_operation(
             r#"
             INSERT INTO listening_events
                 (event_id, track_id, device_id, payload, started_at,
-                 ended_at, listened_seconds, completed)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ended_at, listened_seconds, completed, skipped)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT(event_id) DO UPDATE SET
                 track_id = excluded.track_id,
                 device_id = excluded.device_id,
@@ -2978,7 +3492,8 @@ fn materialize_operation(
                 started_at = excluded.started_at,
                 ended_at = excluded.ended_at,
                 listened_seconds = excluded.listened_seconds,
-                completed = excluded.completed
+                completed = excluded.completed,
+                skipped = excluded.skipped
             "#,
             params![
                 operation.entity_id,
@@ -2999,6 +3514,11 @@ fn materialize_operation(
                 operation
                     .payload
                     .get("completed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                operation
+                    .payload
+                    .get("skipped")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
             ],
@@ -3255,6 +3775,106 @@ mod tests {
         assert_eq!(result.album.as_deref(), Some("Life's Not Out to Get You"));
     }
 
+    fn result_with_release_and_artwork(
+        content_hash: &str,
+        release_id: Option<&str>,
+        artwork_url: Option<&str>,
+    ) -> IdentificationResult {
+        result_with_release_group_and_artwork(content_hash, release_id, None, artwork_url)
+    }
+
+    fn result_with_release_group_and_artwork(
+        content_hash: &str,
+        release_id: Option<&str>,
+        release_group_id: Option<&str>,
+        artwork_url: Option<&str>,
+    ) -> IdentificationResult {
+        IdentificationResult {
+            content_hash: content_hash.into(),
+            title: Some("Title".into()),
+            artist: None,
+            album: None,
+            artwork_url: artwork_url.map(Into::into),
+            musicbrainz_recording_id: None,
+            acoustid_id: None,
+            identified_at: 1,
+            resolution_source: Some("group".into()),
+            resolution_score: None,
+            resolution_generation: 0,
+            release_id: release_id.map(Into::into),
+            release_group_id: release_group_id.map(Into::into),
+            musicbrainz_genres: None,
+            mood_tags: None,
+        }
+    }
+
+    #[test]
+    fn identification_results_missing_artwork_excludes_unidentified_and_already_cached() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+
+        // Identified with a release but no artwork yet -- the exact gap this backfills.
+        // Also carries a release_group_id, since the caller needs it to fall back to the
+        // release-group's cover art when the release's own has nothing archived.
+        store
+            .put_identification_result(&result_with_release_group_and_artwork(
+                "missing",
+                Some("release-1"),
+                Some("group-1"),
+                None,
+            ))
+            .unwrap();
+        // Already has artwork -- nothing to do.
+        store
+            .put_identification_result(&result_with_release_and_artwork(
+                "has-artwork",
+                Some("release-2"),
+                Some("/v1/blobs/abc"),
+            ))
+            .unwrap();
+        // No release resolved at all -- not this backfill's job (that's `should_revise`'s
+        // territory, a completely different kind of "not done yet").
+        store
+            .put_identification_result(&result_with_release_and_artwork("no-release", None, None))
+            .unwrap();
+
+        let missing = store.identification_results_missing_artwork(10).unwrap();
+        assert_eq!(
+            missing,
+            vec![(
+                "missing".to_string(),
+                "release-1".to_string(),
+                Some("group-1".to_string())
+            )]
+        );
+    }
+
+    #[test]
+    fn set_artwork_url_does_not_overwrite_an_existing_value() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        store
+            .put_identification_result(&result_with_release_and_artwork(
+                "hash-1",
+                Some("release-1"),
+                None,
+            ))
+            .unwrap();
+
+        store.set_artwork_url("hash-1", "/v1/blobs/first").unwrap();
+        assert_eq!(
+            store.identification_result("hash-1").unwrap().unwrap().artwork_url.as_deref(),
+            Some("/v1/blobs/first")
+        );
+
+        // A concurrent normal write already having set it wins -- backfill never stomps it.
+        store.set_artwork_url("hash-1", "/v1/blobs/second").unwrap();
+        assert_eq!(
+            store.identification_result("hash-1").unwrap().unwrap().artwork_url.as_deref(),
+            Some("/v1/blobs/first")
+        );
+    }
+
     #[test]
     fn resolution_columns_round_trip() {
         let directory = tempfile::tempdir().unwrap();
@@ -3447,6 +4067,130 @@ mod tests {
         store.touch_identification_generation("hash-1", 1).unwrap();
 
         assert!(store.folders_needing_reconcile(1, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn recording_cache_round_trips_and_versions() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+
+        assert!(store.recording_cache_get("rec-1").unwrap().is_none());
+        store
+            .recording_cache_put("rec-1", &serde_json::json!({"id": "rec-1", "title": "Hey Jude"}), 2)
+            .unwrap();
+
+        let entry = store.recording_cache_get("rec-1").unwrap().unwrap();
+        assert_eq!(entry.response, serde_json::json!({"id": "rec-1", "title": "Hey Jude"}));
+        assert_eq!(entry.schema_version, 2);
+
+        store
+            .recording_cache_put("rec-1", &serde_json::json!({"id": "rec-1", "title": "Hey Jude!"}), 3)
+            .unwrap();
+        let updated = store.recording_cache_get("rec-1").unwrap().unwrap();
+        assert_eq!(updated.schema_version, 3);
+        assert_eq!(
+            updated.response,
+            serde_json::json!({"id": "rec-1", "title": "Hey Jude!"})
+        );
+    }
+
+    #[test]
+    fn record_group_reconcile_attempt_increments_and_persists() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let folder = Path::new("/library/The Beatles/1");
+
+        assert_eq!(store.record_group_reconcile_attempt(folder).unwrap(), 1);
+        assert_eq!(store.record_group_reconcile_attempt(folder).unwrap(), 2);
+        assert_eq!(store.record_group_reconcile_attempt(folder).unwrap(), 3);
+    }
+
+    fn seed_folder_result(
+        store: &HubStore,
+        source_id: Uuid,
+        relative_path: &str,
+        hash: &str,
+        resolution_source: Option<&str>,
+    ) {
+        store
+            .upsert_source_file(source_id, relative_path, Uuid::new_v4(), hash, 100, 0)
+            .unwrap();
+        store
+            .put_identification_result(&IdentificationResult {
+                content_hash: hash.into(),
+                title: Some("Title".into()),
+                artist: None,
+                album: None,
+                artwork_url: None,
+                musicbrainz_recording_id: None,
+                acoustid_id: None,
+                identified_at: 1,
+                resolution_source: resolution_source.map(Into::into),
+                resolution_score: None,
+                resolution_generation: 1,
+                release_id: None,
+                release_group_id: None,
+                musicbrainz_genres: None,
+                mood_tags: None,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn folders_needing_group_retry_selects_only_fully_rejected_multi_member_folders() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let source_id = Uuid::new_v4();
+        let source_root = directory.path().join("library");
+        store
+            .register_host_source(source_id, "Library", "managed", &source_root)
+            .unwrap();
+
+        // "Rejected": 3 members, every one fell back to per_file -- a group match was
+        // attempted and lost outright. Must be selected.
+        seed_folder_result(&store, source_id, "Rejected/a.m4a", "r1", Some("per_file"));
+        seed_folder_result(&store, source_id, "Rejected/b.m4a", "r2", Some("per_file"));
+        seed_folder_result(&store, source_id, "Rejected/c.m4a", "r3", Some("per_file"));
+
+        // "MostlyAccepted": 3 members, 2 group-sourced and 1 genuine per-file outlier (a
+        // bonus track) -- not a rejected group, must not be selected.
+        seed_folder_result(&store, source_id, "MostlyAccepted/a.m4a", "m1", Some("group"));
+        seed_folder_result(&store, source_id, "MostlyAccepted/b.m4a", "m2", Some("group"));
+        seed_folder_result(&store, source_id, "MostlyAccepted/c.m4a", "m3", Some("per_file"));
+
+        // "TooSmall": below the group-matching minimum, never eligible in the first place.
+        seed_folder_result(&store, source_id, "TooSmall/a.m4a", "t1", Some("per_file"));
+
+        let folders = store.folders_needing_group_retry(2, 8, 10).unwrap();
+
+        assert_eq!(folders, vec![source_root.join("Rejected")]);
+    }
+
+    #[test]
+    fn folders_needing_group_retry_excludes_folders_past_the_attempt_cap() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let source_id = Uuid::new_v4();
+        let source_root = directory.path().join("library");
+        store
+            .register_host_source(source_id, "Library", "managed", &source_root)
+            .unwrap();
+        seed_folder_result(&store, source_id, "Rejected/a.m4a", "r1", Some("per_file"));
+        seed_folder_result(&store, source_id, "Rejected/b.m4a", "r2", Some("per_file"));
+
+        assert_eq!(
+            store.folders_needing_group_retry(2, 2, 10).unwrap(),
+            vec![source_root.join("Rejected")]
+        );
+
+        store.record_group_reconcile_attempt(&source_root.join("Rejected")).unwrap();
+        assert_eq!(
+            store.folders_needing_group_retry(2, 2, 10).unwrap(),
+            vec![source_root.join("Rejected")]
+        );
+
+        store.record_group_reconcile_attempt(&source_root.join("Rejected")).unwrap();
+        assert!(store.folders_needing_group_retry(2, 2, 10).unwrap().is_empty());
     }
 
     #[test]

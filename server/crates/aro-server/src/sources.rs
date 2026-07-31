@@ -4,6 +4,7 @@ use aro_sync_protocol::{HybridTimestamp, Operation};
 use aro_sync_store::{HubStore, SourceFolder};
 use aro_track_id::{
     IdentificationQueue,
+    audio_features::{ALGORITHM_VERSION as AUDIO_FEATURE_ALGORITHM_VERSION, AudioFeatureQueue},
     loudness::{ALGORITHM_VERSION, LoudnessQueue},
 };
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -31,6 +32,7 @@ struct Inner {
     scan_lock: Mutex<()>,
     identification: IdentificationQueue,
     loudness: LoudnessQueue,
+    audio_features: AudioFeatureQueue,
 }
 
 impl SourceManager {
@@ -41,6 +43,7 @@ impl SourceManager {
         rescan_seconds: u64,
         identification: IdentificationQueue,
         loudness: LoudnessQueue,
+        audio_features: AudioFeatureQueue,
     ) -> Result<Self> {
         let (events, mut receiver) = mpsc::unbounded_channel::<PathBuf>();
         let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
@@ -59,6 +62,7 @@ impl SourceManager {
                 scan_lock: Mutex::new(()),
                 identification,
                 loudness,
+                audio_features,
             }),
         };
         for source in manager.list()? {
@@ -151,6 +155,10 @@ impl SourceManager {
 
     pub fn loudness(&self) -> LoudnessQueue {
         self.inner.loudness.clone()
+    }
+
+    pub fn audio_features(&self) -> AudioFeatureQueue {
+        self.inner.audio_features.clone()
     }
 
     pub fn list(&self) -> Result<Vec<SourceFolder>> {
@@ -282,6 +290,7 @@ impl SourceManager {
                 }
                 self.maybe_enqueue_identification(&prior.content_hash, &file)?;
                 self.maybe_enqueue_loudness(&prior.content_hash, &file)?;
+                self.maybe_enqueue_audio_features(&prior.content_hash, &file)?;
                 continue;
             }
             let imported = match self.inner.mode {
@@ -340,6 +349,7 @@ impl SourceManager {
                 .upsert_source_file(source_id, &relative, track_id, &hash, size, modified)?;
             self.maybe_enqueue_identification(&hash, &file)?;
             self.maybe_enqueue_loudness(&hash, &file)?;
+            self.maybe_enqueue_audio_features(&hash, &file)?;
         }
         self.inner
             .store
@@ -371,6 +381,22 @@ impl SourceManager {
         {
             self.inner
                 .loudness
+                .enqueue(content_hash.to_string(), file.to_path_buf());
+        }
+        Ok(())
+    }
+
+    /// Same shape as [`Self::maybe_enqueue_loudness`], for engineered audio-feature
+    /// analysis (see `aro_track_id::audio_features`) — Tier 2/3 of
+    /// `listening-intelligence-roadmap.md`.
+    fn maybe_enqueue_audio_features(&self, content_hash: &str, file: &Path) -> Result<()> {
+        if self
+            .inner
+            .store
+            .needs_audio_feature_analysis(content_hash, AUDIO_FEATURE_ALGORITHM_VERSION)?
+        {
+            self.inner
+                .audio_features
                 .enqueue(content_hash.to_string(), file.to_path_buf());
         }
         Ok(())
@@ -459,6 +485,8 @@ mod tests {
         let hub_id = Uuid::new_v4();
         let identification = IdentificationQueue::start(store.clone(), hub_id, None);
         let loudness = LoudnessQueue::start(store.clone(), hub_id);
+        let audio_features =
+            AudioFeatureQueue::start(Arc::new(|_, _, _| Ok(())), Arc::new(|_, _, _| {}));
         let manager = SourceManager::start(
             store.clone(),
             hub_id,
@@ -466,6 +494,7 @@ mod tests {
             3_600,
             identification,
             loudness,
+            audio_features,
         )
         .unwrap();
         let folder = manager.add(&source).unwrap();

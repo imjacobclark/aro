@@ -37,14 +37,18 @@ mdns-sd = "0.15"
 matter-crypto = "0.2"
 notify = "8.2"
 parking_lot = "0.12"
+quick-xml = "0.37"
 rand = "0.9"
 rcgen = "0.14"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "http2"] }
 rusqlite = { version = "0.37", features = ["bundled", "backup", "uuid"] }
+rustfft = "6.4"
 rustls = { version = "0.23", features = ["aws_lc_rs"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
+socket2 = "0.6"
+if-addrs = "0.14"
 subtle = "2.6"
 symphonia = { version = "0.5", features = ["aac", "alac", "flac", "isomp4", "mp3", "ogg", "vorbis", "wav"] }
 tempfile = "3.20"

@@ -10,12 +10,37 @@ struct MetadataView: View {
     @Bindable var profileRegistry: LibraryProfileRegistry
     let syncStore: SQLiteSyncOperationStore
 
+    /// Owned by `ContentView`, not this view: `MetadataView` is torn down and
+    /// rebuilt every time the sidebar selection leaves Metadata and comes back,
+    /// which would otherwise reset a local `@State` and re-show a false
+    /// "Identification Not Enabled" empty state (gated on `remoteHubInfo`) until
+    /// the hub round trip completes again. Binding to values that outlive this
+    /// view gives Metadata a stale-while-revalidate feel: last known queue
+    /// status and hub info render immediately, refreshed quietly in the background.
+    @Binding var status: IdentificationStatus?
+    @Binding var remoteHubInfo: AroHubInfo?
+
     @State private var localServers = LocalAroServerMonitor()
-    @State private var status: IdentificationStatus?
     @State private var statusMessage: String?
     @State private var searchText = ""
     @State private var pollTask: Task<Void, Never>?
     @State private var showingIdentificationSettings = false
+
+    /// AcoustID configuration lives on whichever machine is actually running
+    /// the hub. For a `.local` profile that's `preferences.acoustidApiKey`
+    /// (this Mac's own Background Service); for a `.remote` profile it's a
+    /// capability flag read from that hub's own `/v1/hub` response --
+    /// `preferences.acoustidApiKey` is this Mac's *own* key and has nothing
+    /// to do with someone else's server.
+    private var isRemoteProfile: Bool {
+        profileRegistry.activeProfile?.kind == .remote
+    }
+
+    private var identificationIsAvailable: Bool {
+        isRemoteProfile
+            ? (remoteHubInfo?.identificationAvailable ?? false)
+            : !preferences.acoustidApiKey.isEmpty
+    }
 
     private var albums: [LibraryAlbum] {
         AlbumLibrary.albums(from: songs)
@@ -31,17 +56,26 @@ struct MetadataView: View {
         VStack(spacing: 0) {
             header
 
-            if preferences.acoustidApiKey.isEmpty {
+            if !identificationIsAvailable {
                 ContentUnavailableView {
-                    Label("No AcoustID API Key", systemImage: "key.slash")
+                    Label(
+                        isRemoteProfile ? "Identification Not Enabled" : "No AcoustID API Key",
+                        systemImage: "key.slash"
+                    )
                 } description: {
                     Text(
-                        "Add a free AcoustID API key in Metadata settings to "
-                            + "identify song, artist, album, and artwork metadata."
+                        isRemoteProfile
+                            ? "Ask the owner of \(remoteHubInfo?.displayName ?? "this library") "
+                                + "to add an AcoustID API key on their server to enable "
+                                + "song, artist, album, and artwork identification."
+                            : "Add a free AcoustID API key in Metadata settings to "
+                                + "identify song, artist, album, and artwork metadata."
                     )
                 } actions: {
-                    Button("Set Up Identification") {
-                        showingIdentificationSettings = true
+                    if !isRemoteProfile {
+                        Button("Set Up Identification") {
+                            showingIdentificationSettings = true
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -78,6 +112,7 @@ struct MetadataView: View {
         .task {
             localServers.refresh()
             await refreshStatus()
+            await refreshRemoteHubInfo()
             pollTask = Task {
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(2))
@@ -89,8 +124,33 @@ struct MetadataView: View {
             pollTask?.cancel()
         }
         .sheet(isPresented: $showingIdentificationSettings) {
-            TrackIdentificationSettingsView(preferences: preferences)
+            TrackIdentificationSettingsView(
+                preferences: preferences,
+                isRemoteProfile: isRemoteProfile,
+                remoteHubInfo: remoteHubInfo
+            )
         }
+    }
+
+    private func refreshRemoteHubInfo() async {
+        guard isRemoteProfile,
+              let baseURL = profileRegistry.activeProfile?.baseURL,
+              let tlsFingerprint = syncStore.membership(baseURL: baseURL)?.tlsFingerprint
+        else {
+            remoteHubInfo = nil
+            return
+        }
+        // A transiently unreachable hub must not blank an already-known-good value --
+        // same "keep showing the last known answer" rule `HomeView.refresh()` follows
+        // for playlists. Without this, one dropped request would flash "Identification
+        // Not Enabled" even though nothing about the hub's actual state changed.
+        guard let fetched = try? await AroSyncClient(
+            baseURL: baseURL,
+            pinnedTLSFingerprint: tlsFingerprint
+        ).hubInfo() else {
+            return
+        }
+        remoteHubInfo = fetched
     }
 
     private var header: some View {
@@ -108,7 +168,7 @@ struct MetadataView: View {
             Button("Sync All Music Metadata") {
                 Task { await syncAllMetadata() }
             }
-            .disabled(preferences.acoustidApiKey.isEmpty || songs.isEmpty)
+            .disabled(!identificationIsAvailable || songs.isEmpty)
 
             Button {
                 showingIdentificationSettings = true

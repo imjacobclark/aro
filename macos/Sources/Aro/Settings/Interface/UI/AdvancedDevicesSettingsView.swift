@@ -10,6 +10,7 @@ struct SyncSettingsView: View {
     let libraryFiles: any LibraryFileManaging
     let activeProfile: LibraryProfile?
     @Bindable var registry: LibraryProfileRegistry
+    let library: LibraryStore
     let activateProfile: (LibraryProfile) -> Void
 
     @State private var localServers = LocalAroServerMonitor()
@@ -18,6 +19,13 @@ struct SyncSettingsView: View {
     @State private var importedFolders: [ControlledSourceFolder] = []
     @State private var migrationStatus: String?
     @State private var isAdvancedExpanded = false
+    @State private var verifyStatus: String?
+    @State private var verifyFailures: [String] = []
+    @State private var isVerifying = false
+    @State private var dashboardEnabled = false
+    @State private var dashboardBind = ""
+    @State private var dashboardStatus: String?
+    @State private var isDashboardLoaded = false
 
     var body: some View {
         embeddedSettings
@@ -52,6 +60,10 @@ struct SyncSettingsView: View {
                             remoteLibraryContent(profile)
                         } else {
                             localLibraryContent
+                            Divider()
+                            Text("LAN Intelligence Dashboard")
+                                .font(.headline)
+                            dashboardContent
                             Divider()
                             Text("Manual Connection")
                                 .font(.headline)
@@ -134,8 +146,82 @@ struct SyncSettingsView: View {
             HStack {
                 Button("Restart Sharing Service", action: restartService)
                     .disabled(!service.isEnabled)
+                Button("Verify Library Data", action: verifyLibrary)
+                    .disabled(!service.isEnabled || isVerifying)
                 Button("Copy Diagnostic Information", action: copyDiagnostics)
                 Button("Open Logs", action: openLogs)
+            }
+            if let verifyStatus {
+                Text(verifyStatus)
+                    .font(.footnote)
+                    .foregroundStyle(verifyFailures.isEmpty ? Color.secondary : Color.orange)
+            }
+            ForEach(verifyFailures, id: \.self) { hash in
+                HStack {
+                    Text(hash)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                    Spacer()
+                    Button("Purge", role: .destructive) {
+                        purgeFailedBlob(hash)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var dashboardContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Toggle("Enable Local Dashboard", isOn: $dashboardEnabled)
+                .disabled(!service.isEnabled)
+                .onChange(of: dashboardEnabled) { _, newValue in
+                    saveDashboardSetting(key: "dashboard.enabled", value: newValue ? "true" : "false")
+                }
+            if dashboardEnabled {
+                TextField("Bind Address", text: $dashboardBind)
+                    .disabled(!service.isEnabled)
+                    .onSubmit {
+                        saveDashboardSetting(key: "dashboard.bind", value: dashboardBind)
+                    }
+            }
+            Text(
+                "Shows live listeners, transfers, and library health at this address "
+                    + "on your local network, with no sign-in. Takes effect after "
+                    + "restarting the sharing service."
+            )
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            if let dashboardStatus {
+                Text(dashboardStatus)
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+            }
+        }
+        .task {
+            await loadDashboardSettings()
+        }
+    }
+
+    private func loadDashboardSettings() async {
+        guard !isDashboardLoaded, let controlClient else { return }
+        do {
+            dashboardEnabled = try await controlClient.configValue(key: "dashboard.enabled") == "true"
+            dashboardBind = try await controlClient.configValue(key: "dashboard.bind")
+            isDashboardLoaded = true
+        } catch {
+            dashboardStatus = error.localizedDescription
+        }
+    }
+
+    private func saveDashboardSetting(key: String, value: String) {
+        guard let controlClient, isDashboardLoaded else { return }
+        Task {
+            do {
+                try await controlClient.setConfig(key: key, value: value)
+                dashboardStatus = "Saved. Restart the sharing service to apply it."
+            } catch {
+                dashboardStatus = error.localizedDescription
             }
         }
     }
@@ -313,6 +399,7 @@ struct SyncSettingsView: View {
                     mode: preferences.importMode
                 )
                 importedFolders = try await controlClient.folders()
+                await syncLocalHub(using: controlClient)
             } catch {
                 diagnosticStatus = error.localizedDescription
             }
@@ -325,6 +412,7 @@ struct SyncSettingsView: View {
             do {
                 try await controlClient.scanFolder(id)
                 importedFolders = try await controlClient.folders()
+                await syncLocalHub(using: controlClient)
             } catch {
                 diagnosticStatus = error.localizedDescription
             }
@@ -341,6 +429,23 @@ struct SyncSettingsView: View {
                 diagnosticStatus = error.localizedDescription
             }
         }
+    }
+
+    /// Pulls this Mac's own local hub's operation log into `library`'s
+    /// database via `LocalHubReplicaCoordinator`, then refreshes the folder/
+    /// song lists so an imported or rescanned folder's tracks actually show up
+    /// in Songs/Artists/Albums, not just in this settings sheet's own folder
+    /// list -- see `AroApp.synchronizeLocalHub`, which does the same thing for
+    /// a profile's initial folders.
+    private func syncLocalHub(using controlClient: HubControlClient) async {
+        guard let status = try? await controlClient.status() else { return }
+        let coordinator = LocalHubReplicaCoordinator(
+            hubID: status.hubID,
+            client: controlClient,
+            operations: syncStore
+        )
+        _ = try? await coordinator.synchronize()
+        library.refreshFoldersFromDatabase()
     }
 
     @ViewBuilder
@@ -408,6 +513,13 @@ struct SyncSettingsView: View {
                     profile: profile,
                     libraryFiles: libraryFiles,
                     serverDataPath: preferences.dataLocation,
+                    serverConfigPath: FileManager.default.homeDirectoryForCurrentUser
+                        .appendingPathComponent(
+                            "Library/Application Support/Aro/Server/aro.toml"
+                        )
+                        .path,
+                    serverBinaryURL: Bundle.main.bundleURL
+                        .appendingPathComponent("Contents/MacOS/aro-server"),
                     into: parent
                 )
                 registry.update(result.profile)
@@ -429,6 +541,41 @@ struct SyncSettingsView: View {
                 }
                 migrationStatus = nil
                 diagnosticStatus = error.localizedDescription
+            }
+        }
+    }
+
+    private func verifyLibrary() {
+        guard let controlClient else { return }
+        isVerifying = true
+        verifyStatus = "Verifying library data…"
+        verifyFailures = []
+        Task {
+            do {
+                let result = try await controlClient.verifyLibrary()
+                verifyFailures = result.failures
+                verifyStatus = result.failures.isEmpty
+                    ? "Verified \(result.verified) files. No problems found."
+                    : "Verified \(result.verified) files. "
+                        + "\(result.failures.count) are corrupt or missing."
+            } catch {
+                verifyStatus = error.localizedDescription
+            }
+            isVerifying = false
+        }
+    }
+
+    private func purgeFailedBlob(_ hash: String) {
+        guard let controlClient else { return }
+        Task {
+            do {
+                _ = try await controlClient.purgeBlob(hash: hash)
+                verifyFailures.removeAll { $0 == hash }
+                if verifyFailures.isEmpty {
+                    verifyStatus = "All flagged files were purged."
+                }
+            } catch {
+                verifyStatus = error.localizedDescription
             }
         }
     }

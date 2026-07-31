@@ -354,7 +354,7 @@ struct AppKitSongTable: NSViewRepresentable {
                     alignment: .right,
                     monospacedDigits: true,
                     textColor: currentSongID == song.id
-                        ? .controlAccentColor
+                        ? AroTheme.violetNSColor
                         : .secondaryLabelColor
                 )
             default:
@@ -633,7 +633,7 @@ private final class SongTitleTableCellView: NSTableCellView {
 
         playingImage.translatesAutoresizingMaskIntoConstraints = false
         playingImage.imageScaling = .scaleProportionallyDown
-        playingImage.contentTintColor = .controlAccentColor
+        playingImage.contentTintColor = AroTheme.violetNSColor
 
         downloadImage.translatesAutoresizingMaskIntoConstraints = false
         downloadImage.imageScaling = .scaleProportionallyDown
@@ -730,7 +730,7 @@ private final class SongTitleTableCellView: NSTableCellView {
             accessibilityDescription: downloadDescription
         )
         downloadImage.contentTintColor = usesStreamOnlyIcon
-            ? .controlAccentColor
+            ? AroTheme.violetNSColor
             : isDownloaded
             ? .systemGreen
             : .secondaryLabelColor
@@ -764,7 +764,7 @@ private final class TrackNumberTableCellView: NSTableCellView {
             accessibilityDescription: "Currently playing"
         )
         playingImage.imageScaling = .scaleProportionallyDown
-        playingImage.contentTintColor = .controlAccentColor
+        playingImage.contentTintColor = AroTheme.violetNSColor
 
         addSubview(numberLabel)
         addSubview(playingImage)
@@ -809,7 +809,23 @@ private final class CurrentSongTableRowView: NSTableRowView {
     override func drawBackground(in dirtyRect: NSRect) {
         super.drawBackground(in: dirtyRect)
         guard isCurrentSong, !isSelected else { return }
-        NSColor.controlAccentColor.withAlphaComponent(0.09).setFill()
+        AroTheme.violetNSColor.withAlphaComponent(0.09).setFill()
+        NSBezierPath(
+            roundedRect: bounds.insetBy(dx: 2, dy: 1),
+            xRadius: 6,
+            yRadius: 6
+        ).fill()
+    }
+
+    /// `.regular` selection style otherwise fills with
+    /// `.selectedContentBackgroundColor`, which tracks the user's system-wide
+    /// accent color (blue by default) rather than Aro's purple identity.
+    override func drawSelection(in dirtyRect: NSRect) {
+        guard isSelected else { return }
+        let fillColor = isEmphasized
+            ? AroTheme.violetNSColor.withAlphaComponent(0.28)
+            : AroTheme.violetNSColor.withAlphaComponent(0.16)
+        fillColor.setFill()
         NSBezierPath(
             roundedRect: bounds.insetBy(dx: 2, dy: 1),
             xRadius: 6,

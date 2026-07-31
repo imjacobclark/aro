@@ -38,6 +38,11 @@ use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct AppState {
+    /// Path to the loaded `aro.toml`, kept for the control socket's
+    /// `GetConfig`/`SetConfig` — those re-load, mutate, and save the file
+    /// directly (same pattern as the CLI's `config get`/`set`) rather than
+    /// keeping a second, driftable copy of `Config` in memory.
+    pub config_path: PathBuf,
     pub hub_id: Uuid,
     pub display_name: String,
     pub admin_token: String,
@@ -49,6 +54,10 @@ pub struct AppState {
     pub store: HubStore,
     pub sources: SourceManager,
     pub telemetry: RuntimeTelemetry,
+    /// Whether an AcoustID key is configured, so `/v1/hub` can tell a client
+    /// "no key is set" apart from "nothing's queued right now" without
+    /// exposing the key itself.
+    pub identification_available: bool,
 }
 
 #[derive(Clone, Default)]
@@ -191,9 +200,12 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/library/sources", get(source_health))
         .route("/v1/identify", post(identify_tracks))
         .route("/v1/identification/status", get(identification_status))
+        .route("/v1/identification/results", get(identification_results))
         .route("/v1/loudness/status", get(loudness_status))
+        .route("/v1/audio-features/status", get(audio_features_status))
         .route("/v1/playback/activity", post(playback_activity))
         .route("/v1/playlists", get(playlists))
+        .route("/v1/radio/{hash}", get(radio))
         .route("/v1/jobs/{id}", get(job_status).delete(cancel_job));
 
     admin_only
@@ -205,6 +217,11 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Slower than this and a request gets logged at `warn` regardless of its outcome —
+/// callers timing out on the client side need this visible without turning on debug
+/// logging for every request.
+const SLOW_REQUEST_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(2);
+
 async fn request_telemetry(
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -215,13 +232,38 @@ async fn request_telemetry(
     let path = request.uri().path().to_owned();
     let started = std::time::Instant::now();
     let response = next.run(request).await;
+    let elapsed = started.elapsed();
+    let status = response.status().as_u16();
     let _ = state.store.record_http_request(
         &method,
         &path,
         &peer.to_string(),
-        response.status().as_u16(),
-        started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
+        status,
+        elapsed.as_micros().min(u128::from(u64::MAX)) as u64,
     );
+    // `record_http_request` above persists this into `HubStore` for the dashboard,
+    // but that's a query-on-demand history, not something an operator sees while a
+    // problem is actually happening — these lines are what `journalctl -u aro-server
+    // -f` / `RUST_LOG=aro_server=debug` are for.
+    if status >= 500 || elapsed >= SLOW_REQUEST_THRESHOLD {
+        tracing::warn!(
+            method = %method,
+            path = %path,
+            peer = %peer,
+            status,
+            elapsed_ms = elapsed.as_millis(),
+            "slow or failed request"
+        );
+    } else {
+        tracing::debug!(
+            method = %method,
+            path = %path,
+            peer = %peer,
+            status,
+            elapsed_ms = elapsed.as_millis(),
+            "request handled"
+        );
+    }
     response
 }
 
@@ -340,6 +382,7 @@ async fn hub_info(State(state): State<Arc<AppState>>) -> Json<HubInfo> {
         protocol_min: MIN_PROTOCOL_VERSION,
         protocol_max: PROTOCOL_VERSION,
         pairing_available: state.pairing.is_open(),
+        identification_available: state.identification_available,
     })
 }
 
@@ -695,8 +738,18 @@ async fn export_manifest(
 /// Auto-generated playlists from this hub's canonical analytics — see
 /// `crate::playlists`. The hub generates; clients (local or remote) only map the
 /// returned content hashes onto their own catalogs and render.
+#[derive(Deserialize)]
+struct PlaylistsQuery {
+    /// The caller's local UTC offset in minutes (positive east of UTC) — scopes
+    /// Morning Rotation/Late Night to *this* caller's timezone. Defaults to 0 (UTC)
+    /// for a caller that doesn't send it.
+    #[serde(default)]
+    utc_offset_minutes: i32,
+}
+
 async fn playlists(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<PlaylistsQuery>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<crate::playlists::GeneratedPlaylist>>, ApiError> {
     require_device_or_admin(&state, &headers)?;
@@ -704,7 +757,37 @@ async fn playlists(
     let seeds = tokio::task::spawn_blocking(move || store.playlist_seeds())
         .await
         .map_err(|error| ApiError::internal(error.to_string()))??;
-    Ok(Json(crate::playlists::generate(&seeds, chrono::Utc::now())))
+    Ok(Json(crate::playlists::generate(
+        &seeds,
+        chrono::Utc::now(),
+        query.utc_offset_minutes,
+    )))
+}
+
+#[derive(Deserialize)]
+struct RadioQuery {
+    #[serde(default = "default_radio_limit")]
+    limit: usize,
+}
+
+fn default_radio_limit() -> usize {
+    crate::playlists::RADIO_DEFAULT_LIMIT
+}
+
+/// Tier 3 "seed-track radio" (see `crate::playlists::radio`) for a remote client —
+/// local-socket equivalent is `HubControlClient.radio(contentHash:)`.
+async fn radio(
+    State(state): State<Arc<AppState>>,
+    Path(hash): Path<String>,
+    Query(query): Query<RadioQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Option<crate::playlists::GeneratedPlaylist>>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    let store = state.store.clone();
+    let seeds = tokio::task::spawn_blocking(move || store.playlist_seeds())
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))??;
+    Ok(Json(crate::playlists::radio(&seeds, &hash, query.limit)))
 }
 
 async fn source_health(
@@ -774,6 +857,44 @@ async fn identification_status(
     Ok(Json(state.sources.identification().status().await))
 }
 
+#[derive(Deserialize)]
+struct IdentificationResultsQuery {
+    /// Results recorded strictly after this `identified_at`, oldest first — the
+    /// caller passes the `identifiedAt` of the last result it already merged, or 0
+    /// to fetch everything.
+    #[serde(default)]
+    after: i64,
+    #[serde(default = "default_identification_results_limit")]
+    limit: u32,
+}
+
+/// Mirrors the control socket's own default so both transports page identically.
+fn default_identification_results_limit() -> u32 {
+    200
+}
+
+/// Network equivalent of the control socket's `IdentificationResults` command. Both
+/// exist because identification results deliberately live *outside* the CRDT operation
+/// log (they're keyed by content hash, not `hub_track_id` — see
+/// `IdentificationResult`'s doc comment), so they never reach a client through
+/// `/v1/exchange` the way track metadata does. Without this route a purely remote
+/// client had no way at all to receive them, which stranded Cover Art Archive artwork
+/// on the hub: a track with no *embedded* art would render as the "no artwork"
+/// placeholder forever, even though the hub had long since fetched and cached a cover
+/// for it.
+async fn identification_results(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<IdentificationResultsQuery>,
+) -> Result<Json<Vec<aro_sync_store::IdentificationResult>>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    Ok(Json(
+        state
+            .store
+            .identification_results_since(query.after, query.limit)?,
+    ))
+}
+
 async fn loudness_status(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -782,12 +903,20 @@ async fn loudness_status(
     Ok(Json(state.sources.loudness().status().await))
 }
 
+async fn audio_features_status(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<aro_track_id::audio_features::AudioFeatureQueueStatus>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    Ok(Json(state.sources.audio_features().status().await))
+}
+
 #[cfg(test)]
 async fn download_range(path: PathBuf, range: Option<&str>) -> Result<Response, ApiError> {
     download_range_inner(path, range, None).await
 }
 
-async fn download_range_tracked(
+pub(crate) async fn download_range_tracked(
     path: PathBuf,
     range: Option<&str>,
     telemetry: RuntimeTelemetry,

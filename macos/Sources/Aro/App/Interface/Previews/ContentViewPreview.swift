@@ -56,12 +56,6 @@ private struct PreviewStatsQuery: StatsQuerying {
     }
 }
 
-private struct PreviewAudioScanner: AudioScanning {
-    func scan(folder: URL) async -> ScanResult {
-        ScanResult(songs: [], skippedFileCount: 0)
-    }
-}
-
 private struct PreviewLoudnessAnalyzer: LoudnessAnalyzing {
     func cachedAnalysis(for song: Song) async -> LoudnessAnalysis? {
         nil
@@ -110,15 +104,6 @@ private struct PreviewLibraryCatalog: LibraryCatalogRepository {
     }
 
     func storeArtwork(trackID: String, data: Data) {}
-}
-
-private struct PreviewFolderMonitorFactory: FolderMonitorCreating {
-    func makeMonitor(
-        for url: URL,
-        handler: @escaping @Sendable () -> Void
-    ) -> (any FolderMonitoring)? {
-        nil
-    }
 }
 
 private struct PreviewFolderAccess: FolderAccessing {

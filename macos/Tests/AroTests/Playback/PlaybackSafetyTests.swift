@@ -18,7 +18,15 @@ struct PlaybackSafetyTests {
                 verifier: SafetyVerifier()
             ),
             mediaLocationResolver: { song in
-                .remote(
+                // Mirrors the real resolver's contract (see `LibraryRuntime`): a song
+                // that is already a local file resolves to `nil`, letting
+                // `playbackItemRun` fall through to `.local`. Only genuinely remote
+                // songs resolve to `.remote`. Returning `.remote` unconditionally
+                // would misreport the *downloaded* song — whose URL has been swapped
+                // for its local cache path by then — as still needing streaming, so
+                // the decoder run would come back empty and playback would fail.
+                guard !song.url.isFileURL else { return nil }
+                return .remote(
                     RemoteMedia(
                         trackID: song.libraryID,
                         contentHash: String(repeating: "c", count: 64),
