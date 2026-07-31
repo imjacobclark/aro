@@ -251,6 +251,12 @@ struct ContentView: View {
             )
             .padding(.horizontal, 24)
             .padding(.bottom, 16)
+
+            // Topmost, so the sidebar list and content scroll views can't
+            // swallow title bar drags and double-clicks. It only hit-tests the
+            // title bar strip itself — everything below stays interactive.
+            TitleBarInteractionOverlay()
+                .ignoresSafeArea()
         }
         .task {
             playback.reconcileAvailableSongs(store.allSongs)

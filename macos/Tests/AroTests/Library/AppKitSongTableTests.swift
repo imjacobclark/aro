@@ -111,6 +111,64 @@ struct AppKitSongTableTests {
         #expect(tableView.selectedRow == 1)
     }
 
+    @Test("Opening a collection centres the table on the playing song")
+    func focusesPlayingSongOncePerCollection() async {
+        let songs = (0 ..< 60).map { makeSong(title: "Song \($0)") }
+        let coordinator = makeCoordinator(songs: [])
+        let scrollView = makeScrollView(coordinator)
+        let tableView = scrollView.documentView as! NSTableView
+
+        coordinator.update(
+            songs: songs,
+            currentSongID: songs[50].id,
+            downloadedSongIDs: [],
+            onPlay: { _ in },
+            onSyncTrackData: { _ in },
+            onRequestRemoval: { _ in },
+            focusToken: "Songs"
+        )
+        await settle()
+
+        let playingRow = tableView.rect(ofRow: 50)
+        #expect(scrollView.contentView.bounds.intersects(playingRow))
+
+        // Scrolling away and receiving another update for the same collection
+        // must leave the reader where they were.
+        scrollView.contentView.scroll(to: .zero)
+        coordinator.update(
+            songs: songs,
+            currentSongID: songs[50].id,
+            downloadedSongIDs: [songs[50].id],
+            onPlay: { _ in },
+            onSyncTrackData: { _ in },
+            onRequestRemoval: { _ in },
+            focusToken: "Songs"
+        )
+        await settle()
+
+        #expect(scrollView.contentView.bounds.origin.y == 0)
+
+        // A different collection is a fresh navigation, so it focuses again.
+        coordinator.update(
+            songs: songs,
+            currentSongID: songs[50].id,
+            downloadedSongIDs: [],
+            onPlay: { _ in },
+            onSyncTrackData: { _ in },
+            onRequestRemoval: { _ in },
+            focusToken: "Jazz"
+        )
+        await settle()
+
+        #expect(scrollView.contentView.bounds.intersects(playingRow))
+    }
+
+    /// The table defers its scroll to the next main queue turn, once layout has
+    /// sized it; this gives that turn a chance to run.
+    private func settle() async {
+        try? await Task.sleep(for: .milliseconds(50))
+    }
+
     private func makeCoordinator(
         songs: [Song],
         currentSongID: Song.ID? = nil
@@ -129,8 +187,18 @@ struct AppKitSongTableTests {
     private func makeTableView(
         _ coordinator: AppKitSongTable.Coordinator
     ) -> NSTableView {
+        makeScrollView(coordinator).documentView as! NSTableView
+    }
+
+    /// Sized and laid out, so row geometry and the visible rectangle are real
+    /// rather than zero.
+    private func makeScrollView(
+        _ coordinator: AppKitSongTable.Coordinator
+    ) -> NSScrollView {
         let scrollView = coordinator.makeScrollView()
-        return scrollView.documentView as! NSTableView
+        scrollView.frame = NSRect(x: 0, y: 0, width: 600, height: 300)
+        scrollView.layoutSubtreeIfNeeded()
+        return scrollView
     }
 
     private func makeSong(

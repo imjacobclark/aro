@@ -9,10 +9,20 @@ struct ArtistsView: View {
 
     @State private var selectedArtistID: LibraryArtist.ID?
     @State private var searchText = ""
+    @State private var pendingScrollTarget: LibraryArtist.ID?
     @FocusState private var isBrowserFocused: Bool
 
     private var artists: [LibraryArtist] {
         ArtistLibrary.artists(from: songs)
+    }
+
+    /// The playing song's artist, identified by running it through the same
+    /// grouping that built `artists` — an artist's id is derived purely from
+    /// its own name, so one song is enough to recover the id its artist would
+    /// have in the full list, without re-deriving the normalisation here.
+    private var nowPlayingArtistID: LibraryArtist.ID? {
+        guard let song = playback.currentSong else { return nil }
+        return ArtistLibrary.artists(from: [song]).first?.id
     }
 
     private var selectedArtist: LibraryArtist? {
@@ -42,7 +52,12 @@ struct ArtistsView: View {
             artistDetail
         }
         .task {
-            selectFirstArtistIfNeeded()
+            focusNowPlayingArtist()
+            // The row is only asked for once the lazy list has had a layout
+            // pass to create it in; scrolling in the same turn as the
+            // selection lands is a no-op.
+            await Task.yield()
+            pendingScrollTarget = selectedArtistID
         }
         .onChange(of: artists.map(\.id)) {
             selectFirstArtistIfNeeded()
@@ -64,57 +79,64 @@ struct ArtistsView: View {
                 text: $searchText
             )
 
-            ScrollView {
-                LazyVStack(spacing: 4) {
-                    ForEach(filteredArtists) { artist in
-                        Button {
-                            selectedArtistID = artist.id
-                        } label: {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(artist.name)
-                                    .font(AroFont.fixed(14, weight: .semibold))
-                                    .foregroundStyle(.primary)
-                                    .lineLimit(1)
+            ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 4) {
+                            ForEach(filteredArtists) { artist in
+                                Button {
+                                    selectedArtistID = artist.id
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(artist.name)
+                                            .font(AroFont.fixed(14, weight: .semibold))
+                                            .foregroundStyle(.primary)
+                                            .lineLimit(1)
 
-                                Text(
-                                    "\(artist.albums.count) albums · "
-                                        + "\(artist.songs.count) songs"
+                                        Text(
+                                            "\(artist.albums.count) albums · "
+                                                + "\(artist.songs.count) songs"
+                                        )
+                                        .font(AroFont.fixed(12))
+                                        .foregroundStyle(.secondary)
+                                        .monospacedDigit()
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 10)
+                                    .background(
+                                        selectedArtistID == artist.id
+                                            ? AroTheme.selectedTint
+                                            : Color.clear,
+                                        in: RoundedRectangle(
+                                            cornerRadius: 9,
+                                            style: .continuous
+                                        )
+                                    )
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityAddTraits(
+                                    selectedArtistID == artist.id
+                                        ? .isSelected
+                                        : []
                                 )
-                                .font(AroFont.fixed(12))
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
                             }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
-                            .background(
-                                selectedArtistID == artist.id
-                                    ? AroTheme.selectedTint
-                                    : Color.clear,
-                                in: RoundedRectangle(
-                                    cornerRadius: 9,
-                                    style: .continuous
-                                )
-                            )
-                            .contentShape(Rectangle())
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityAddTraits(
-                            selectedArtistID == artist.id
-                                ? .isSelected
-                                : []
+                        .padding(.horizontal, 12)
+                }
+                .overlay {
+                    if filteredArtists.isEmpty {
+                        ContentUnavailableView(
+                            "No Matching Artists",
+                            systemImage: "magnifyingglass",
+                            description: Text("Try a different artist name.")
                         )
                     }
                 }
-                .padding(.horizontal, 12)
-            }
-            .overlay {
-                if filteredArtists.isEmpty {
-                    ContentUnavailableView(
-                        "No Matching Artists",
-                        systemImage: "magnifyingglass",
-                        description: Text("Try a different artist name.")
-                    )
+                .onChange(of: pendingScrollTarget) { _, target in
+                    guard let target else { return }
+                    proxy.scrollTo(target, anchor: .center)
+                    pendingScrollTarget = nil
                 }
             }
         }
@@ -196,6 +218,19 @@ struct ArtistsView: View {
         .padding(.horizontal, 28)
         .padding(.top, 24)
         .padding(.bottom, 20)
+    }
+
+    /// Opens the browser on the artist you're currently listening to rather
+    /// than the top of an alphabetical list: arriving here mid-song, that's
+    /// almost always the one you came to look at. Falls back to the first
+    /// artist when nothing is playing, or when the playing song's artist isn't
+    /// part of this library.
+    private func focusNowPlayingArtist() {
+        if let nowPlayingArtistID,
+           artists.contains(where: { $0.id == nowPlayingArtistID }) {
+            selectedArtistID = nowPlayingArtistID
+        }
+        selectFirstArtistIfNeeded()
     }
 
     private func selectFirstArtistIfNeeded() {

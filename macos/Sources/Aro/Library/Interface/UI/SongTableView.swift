@@ -85,7 +85,13 @@ struct SongTableView: View {
                     },
                     onRequestRemoval: { song in
                         songPendingRemoval = song
-                    }
+                    },
+                    // The heading names the collection on screen, so it changes
+                    // exactly when you navigate between one and another — which
+                    // is when the table should re-centre on the playing track,
+                    // and not while a scan is quietly appending rows to the one
+                    // you're already reading.
+                    focusToken: title
                 )
                 if let loadRadio {
                     MoreLikeThisSection(

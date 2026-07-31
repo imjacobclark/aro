@@ -42,6 +42,10 @@ struct AppKitSongTable: NSViewRepresentable {
     let onPlay: @MainActor (Song) -> Void
     let onSyncTrackData: @MainActor (Song) async -> Void
     let onRequestRemoval: (@MainActor (Song) -> Void)?
+    /// Names the collection on screen — a folder, a playlist. Each time it
+    /// changes the table scrolls itself to whatever is playing; see
+    /// `Coordinator.focusCurrentSongIfNeeded`. Left `nil` to opt out.
+    var focusToken: String?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -68,7 +72,8 @@ struct AppKitSongTable: NSViewRepresentable {
             usesStreamOnlyIcon: usesStreamOnlyIcon,
             onPlay: onPlay,
             onSyncTrackData: onSyncTrackData,
-            onRequestRemoval: onRequestRemoval
+            onRequestRemoval: onRequestRemoval,
+            focusToken: focusToken
         )
     }
 
@@ -93,7 +98,16 @@ struct AppKitSongTable: NSViewRepresentable {
         private var onPlay: @MainActor (Song) -> Void
         private var onSyncTrackData: @MainActor (Song) async -> Void
         private var onRequestRemoval: (@MainActor (Song) -> Void)?
+        private var focusToken: String?
+        /// The last token this table has already scrolled to the playing song
+        /// for, so each collection focuses once rather than on every update.
+        private var focusedToken: String?
         private weak var tableView: NativeSongTableView?
+        /// The column sort the listener has chosen, or `nil` for the order the
+        /// library handed us (track order within an album, the hub's ranking within
+        /// a playlist) — which is meaningful in its own right, so it stays the
+        /// default rather than being replaced by an arbitrary alphabetical one.
+        private var sortDescriptor: NSSortDescriptor?
 
         init(
             songs: [Song],
@@ -166,6 +180,13 @@ struct AppKitSongTable: NSViewRepresentable {
                 .autoresizingMask,
                 .userResizingMask,
             ]
+            // Prototypes only mark the columns as sortable and carry the key; the
+            // actual comparison happens in `sortedSongs(_:)`, since `Song` is a Swift
+            // struct and `NSSortDescriptor`'s own key-path sorting needs KVO.
+            titleColumn.sortDescriptorPrototype = NSSortDescriptor(
+                key: Column.title.rawValue,
+                ascending: true
+            )
             tableView.addTableColumn(titleColumn)
 
             if presentation.showsArtist {
@@ -174,6 +195,10 @@ struct AppKitSongTable: NSViewRepresentable {
                 artistColumn.minWidth = 120
                 artistColumn.width = 250
                 artistColumn.resizingMask = .userResizingMask
+                artistColumn.sortDescriptorPrototype = NSSortDescriptor(
+                    key: Column.artist.rawValue,
+                    ascending: true
+                )
                 tableView.addTableColumn(artistColumn)
             }
 
@@ -184,6 +209,10 @@ struct AppKitSongTable: NSViewRepresentable {
             durationColumn.maxWidth = 110
             durationColumn.width = 88
             durationColumn.resizingMask = .userResizingMask
+            durationColumn.sortDescriptorPrototype = NSSortDescriptor(
+                key: Column.duration.rawValue,
+                ascending: true
+            )
             tableView.addTableColumn(durationColumn)
             if !presentation.showsHeader {
                 tableView.headerView = nil
@@ -242,19 +271,25 @@ struct AppKitSongTable: NSViewRepresentable {
             onPlay: @escaping @MainActor (Song) -> Void,
             onSyncTrackData:
                 @escaping @MainActor (Song) async -> Void,
-            onRequestRemoval: (@MainActor (Song) -> Void)?
+            onRequestRemoval: (@MainActor (Song) -> Void)?,
+            focusToken newFocusToken: String? = nil
         ) {
             self.onPlay = onPlay
             self.onSyncTrackData = onSyncTrackData
             self.onRequestRemoval = onRequestRemoval
+            focusToken = newFocusToken
 
             guard let tableView else {
-                songs = newSongs
+                songs = sortedSongs(newSongs)
                 currentSongID = newCurrentSongID
                 downloadedSongIDs = newDownloadedSongIDs
                 usesStreamOnlyIcon = newUsesStreamOnlyIcon
                 return
             }
+
+            // Every path below applies the new data and then returns, so this
+            // runs against a table that's already reloaded.
+            defer { focusCurrentSongIfNeeded(in: tableView) }
 
             let oldSongs = songs
             let oldSongIDs = oldSongs.map(\.id)
@@ -264,7 +299,7 @@ struct AppKitSongTable: NSViewRepresentable {
             let oldUsesStreamOnlyIcon = usesStreamOnlyIcon
             if oldSongIDs != newSongIDs {
                 let selectedIDs = selectedSongIDs(in: tableView)
-                songs = newSongs
+                songs = sortedSongs(newSongs)
                 currentSongID = newCurrentSongID
                 downloadedSongIDs = newDownloadedSongIDs
                 usesStreamOnlyIcon = newUsesStreamOnlyIcon
@@ -273,7 +308,7 @@ struct AppKitSongTable: NSViewRepresentable {
                 return
             }
 
-            songs = newSongs
+            songs = sortedSongs(newSongs)
             currentSongID = newCurrentSongID
             downloadedSongIDs = newDownloadedSongIDs
             usesStreamOnlyIcon = newUsesStreamOnlyIcon
@@ -303,6 +338,116 @@ struct AppKitSongTable: NSViewRepresentable {
                 songIDs: changedTitleIDs,
                 in: tableView
             )
+        }
+
+        /// Scrolls the playing track into view the first time each collection is
+        /// shown, so opening Songs, a folder, or a playlist mid-listen lands on
+        /// what you're hearing instead of the top of the list. Once per
+        /// collection, deliberately: repeating it as playback advanced — or as a
+        /// scan appended rows — would drag the table out from under anyone
+        /// reading it.
+        private func focusCurrentSongIfNeeded(in tableView: NSTableView) {
+            guard presentation.scrollsVertically,
+                  let focusToken,
+                  focusToken != focusedToken,
+                  // An empty table is a collection that hasn't loaded yet, not
+                  // one without the playing song in it; leave the token unspent
+                  // so the next update can still focus.
+                  !songs.isEmpty
+            else { return }
+            focusedToken = focusToken
+
+            guard currentSongID != nil else { return }
+            // Row geometry and the clip view's height are both meaningless
+            // until this layout pass has finished sizing the table, so the row
+            // is resolved against whatever the table holds by then rather than
+            // against a possibly stale index captured now.
+            DispatchQueue.main.async { [weak self, weak tableView] in
+                guard let self,
+                      let tableView,
+                      let currentSongID = self.currentSongID,
+                      let row = self.songs.firstIndex(where: {
+                          $0.id == currentSongID
+                      })
+                else { return }
+                Self.centerRow(row, in: tableView)
+            }
+        }
+
+        /// Centres rather than merely reveals: `scrollRowToVisible` would park
+        /// the track against whichever edge it scrolled in from, hiding the
+        /// surrounding album.
+        private static func centerRow(_ row: Int, in tableView: NSTableView) {
+            guard let scrollView = tableView.enclosingScrollView else { return }
+            let clipView = scrollView.contentView
+            let rowRect = tableView.rect(ofRow: row)
+            guard rowRect.height > 0 else { return }
+            let lowestOrigin = max(
+                0,
+                tableView.bounds.height - clipView.bounds.height
+            )
+            let origin = NSPoint(
+                x: clipView.bounds.origin.x,
+                y: min(
+                    max(0, rowRect.midY - clipView.bounds.height / 2),
+                    lowestOrigin
+                )
+            )
+            clipView.scroll(to: origin)
+            scrollView.reflectScrolledClipView(clipView)
+        }
+
+        /// Applies the active column sort, if any. Comparisons are done here rather
+        /// than by `NSSortDescriptor` itself because `Song` is a Swift value type
+        /// without the KVO conformance its key-path sorting requires.
+        private func sortedSongs(_ input: [Song]) -> [Song] {
+            guard let sortDescriptor, let key = sortDescriptor.key else { return input }
+            let ascending = sortDescriptor.ascending
+
+            /// `localizedStandardCompare` so ordering matches Finder: case- and
+            /// diacritic-insensitive, and "Track 10" sorts after "Track 9" rather
+            /// than between "Track 1" and "Track 2".
+            func byText(_ lhs: String, _ rhs: String) -> Bool? {
+                switch lhs.localizedStandardCompare(rhs) {
+                case .orderedAscending: return ascending
+                case .orderedDescending: return !ascending
+                case .orderedSame: return nil
+                }
+            }
+
+            switch key {
+            case Column.title.rawValue:
+                return input.sorted { byText($0.title, $1.title) ?? false }
+            case Column.artist.rawValue:
+                return input.sorted { lhs, rhs in
+                    // Ties fall back to title, always ascending — within one artist
+                    // an alphabetical run reads far better than arbitrary order.
+                    byText(lhs.artist, rhs.artist)
+                        ?? (lhs.title.localizedStandardCompare(rhs.title)
+                            == .orderedAscending)
+                }
+            case Column.duration.rawValue:
+                return input.sorted { lhs, rhs in
+                    let left = lhs.duration ?? 0
+                    let right = rhs.duration ?? 0
+                    if left == right {
+                        return lhs.title.localizedStandardCompare(rhs.title)
+                            == .orderedAscending
+                    }
+                    return ascending ? left < right : left > right
+                }
+            default:
+                return input
+            }
+        }
+
+        func tableView(
+            _ tableView: NSTableView,
+            sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]
+        ) {
+            sortDescriptor = tableView.sortDescriptors.first
+            songs = sortedSongs(songs)
+            tableView.reloadData()
         }
 
         func numberOfRows(in tableView: NSTableView) -> Int {

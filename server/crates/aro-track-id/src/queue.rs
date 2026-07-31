@@ -169,6 +169,32 @@ struct Inner {
     fingerprint_cache: StdMutex<HashMap<String, CachedFingerprint>>,
 }
 
+impl Inner {
+    /// Claims `content_hash` in `pending` and takes a `queued` slot for it, reporting
+    /// whether the claim was won. The pairing is the invariant the worker relies on:
+    /// every file that reaches it as part of a [`WorkItem`] contributed exactly one
+    /// `queued` slot, so releasing `member_count()` slots on dequeue balances.
+    fn claim(&self, content_hash: &str) -> bool {
+        if !self.pending.lock().unwrap().insert(content_hash.to_string()) {
+            return false;
+        }
+        self.queued.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    /// Releases `count` queued slots. Saturating rather than wrapping: `queued` is a
+    /// display counter, and an accounting slip that tries to release more than was ever
+    /// claimed should read as "0 queued" on the dashboard, not as the ~1.8e19 that a
+    /// wrapped `fetch_sub` renders.
+    fn release_queued(&self, count: u64) {
+        let _ = self
+            .queued
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |queued| {
+                Some(queued.saturating_sub(count))
+            });
+    }
+}
+
 struct CachedFingerprint {
     fingerprint_base64: String,
     duration_secs: u32,
@@ -227,20 +253,16 @@ impl IdentificationQueue {
     /// worker directly — a burst of files from one folder scan is what turns into a
     /// single group.
     pub fn enqueue(&self, content_hash: String, path: PathBuf) {
-        {
-            let mut pending = self.inner.pending.lock().unwrap();
-            if !pending.insert(content_hash.clone()) {
-                return;
-            }
+        if !self.inner.claim(&content_hash) {
+            return;
         }
         let job = IdentificationJob {
             content_hash: content_hash.clone(),
             path,
         };
-        if self.inner.sender.send(job).is_ok() {
-            self.inner.queued.fetch_add(1, Ordering::Relaxed);
-        } else {
+        if self.inner.sender.send(job).is_err() {
             self.inner.pending.lock().unwrap().remove(&content_hash);
+            self.inner.release_queued(1);
         }
     }
 
@@ -406,10 +428,32 @@ fn send_group(
         .collect();
     if let Ok(members) = store.folder_members(&folder) {
         for member in members {
-            by_hash.entry(member.content_hash.clone()).or_insert(IdentificationJob {
-                content_hash: member.content_hash,
-                path: member.path,
-            });
+            if by_hash.contains_key(&member.content_hash) {
+                continue;
+            }
+            // A member folded in here was never offered to `enqueue`, so it holds neither
+            // a `pending` claim nor a `queued` slot — take both now, exactly as `enqueue`
+            // would have. Without this the worker's `release_queued(member_count())`
+            // released slots that were never taken, so one partially-rescanned folder
+            // (one file staged, seven folded in) drove the dashboard's queue depth to
+            // ~1.8e19; and `PendingGuard` dropped claims the item never held, reopening
+            // the duplicate-job hole `pending` exists to close.
+            //
+            // A member already claimed elsewhere — staged under another folder, or in
+            // flight — is left out of the group rather than counted twice. It is already
+            // being identified on its own claim, and folding it in anyway would mean two
+            // work items fingerprinting the same file and racing each other's
+            // `PendingGuard`.
+            if !inner.claim(&member.content_hash) {
+                continue;
+            }
+            by_hash.insert(
+                member.content_hash.clone(),
+                IdentificationJob {
+                    content_hash: member.content_hash,
+                    path: member.path,
+                },
+            );
         }
     }
     let jobs: Vec<IdentificationJob> = by_hash.into_values().collect();
@@ -427,15 +471,18 @@ fn send_group(
         return;
     }
 
-    let item = if jobs.len() >= MIN_GROUP_MEMBERS_FOR_MATCHING {
+    if jobs.len() >= MIN_GROUP_MEMBERS_FOR_MATCHING {
         inner.groups_queued.fetch_add(1, Ordering::Relaxed);
-        Some(WorkItem::Group(GroupJob { folder, jobs }))
+        let _ = job_sender.send(WorkItem::Group(GroupJob { folder, jobs }));
     } else {
-        jobs.into_iter().next().map(WorkItem::Single)
-    };
-
-    if let Some(item) = item {
-        let _ = job_sender.send(item);
+        // Too few files to corroborate a release, so each goes down the per-file path.
+        // Sending every remaining job (rather than just the first) only differs if
+        // `MIN_GROUP_MEMBERS_FOR_MATCHING` is ever raised above 2 — but a job dropped
+        // here would strand both its `pending` claim and its `queued` slot for the
+        // lifetime of the process, blocking that file from ever being re-enqueued.
+        for job in jobs {
+            let _ = job_sender.send(WorkItem::Single(job));
+        }
     }
 }
 
@@ -515,7 +562,7 @@ async fn run(
             },
         };
 
-        inner.queued.fetch_sub(item.member_count(), Ordering::Relaxed);
+        inner.release_queued(item.member_count());
         inner.in_flight.store(true, Ordering::Relaxed);
         let _pending_guard = PendingGuard::new(&inner, item.content_hashes());
 
@@ -2080,6 +2127,53 @@ mod tests {
         (directory, store)
     }
 
+    fn test_inner() -> Arc<Inner> {
+        test_inner_with_sender(mpsc::unbounded_channel().0)
+    }
+
+    fn test_inner_with_sender(sender: mpsc::UnboundedSender<IdentificationJob>) -> Arc<Inner> {
+        Arc::new(Inner {
+            sender,
+            queued: AtomicU64::new(0),
+            in_flight: AtomicBool::new(false),
+            processed: AtomicU64::new(0),
+            failed: AtomicU64::new(0),
+            last_error: Mutex::new(None),
+            groups_queued: AtomicU64::new(0),
+            last_group: Mutex::new(None),
+            pending: StdMutex::new(HashSet::new()),
+            fingerprint_cache: StdMutex::new(HashMap::new()),
+        })
+    }
+
+    /// Seeds a source whose root is `directory`, with `file_names` all in `folder`
+    /// (relative to the root), and returns the absolute folder path `send_group` sees.
+    fn seed_folder(
+        directory: &tempfile::TempDir,
+        store: &HubStore,
+        folder: &str,
+        file_names: &[&str],
+    ) -> PathBuf {
+        let source_id = Uuid::new_v4();
+        let source_root = directory.path().join("library");
+        store
+            .register_host_source(source_id, "Library", "managed", &source_root)
+            .unwrap();
+        for file_name in file_names {
+            store
+                .upsert_source_file(
+                    source_id,
+                    &format!("{folder}/{file_name}"),
+                    Uuid::new_v4(),
+                    &format!("hash-{file_name}"),
+                    100,
+                    0,
+                )
+                .unwrap();
+        }
+        source_root.join(folder)
+    }
+
     #[tokio::test(start_paused = true)]
     async fn files_in_one_folder_coalesce_into_one_group() {
         let (_directory, store) = open_store();
@@ -2218,6 +2312,125 @@ mod tests {
 
         let item = job_rx.recv().await.expect("expected the slow folder to eventually flush");
         assert!(matches!(item, WorkItem::Group(_) | WorkItem::Single(_)));
+    }
+
+    /// The dashboard bug: one file of an eight-file folder was staged by a rescan, the
+    /// other seven were folded in from `folder_members` without ever being counted, and
+    /// the worker then released eight slots against the single one that was taken --
+    /// wrapping `queued` to ~u64::MAX.
+    #[test]
+    fn folding_in_folder_members_takes_a_queued_slot_for_each() {
+        let (directory, store) = open_store();
+        let files = ["01.m4a", "02.m4a", "03.m4a", "04.m4a", "05.m4a", "06.m4a", "07.m4a", "08.m4a"];
+        let folder = seed_folder(&directory, &store, "Grimes/Art Angels", &files);
+        let inner = test_inner();
+        let (job_tx, mut job_rx) = mpsc::unbounded_channel::<WorkItem>();
+
+        // Exactly what a rescan of one already-synced file looks like.
+        assert!(inner.claim("hash-01.m4a"));
+        assert_eq!(inner.queued.load(Ordering::Relaxed), 1);
+
+        send_group(
+            &inner,
+            &store,
+            folder,
+            vec![job("hash-01.m4a", "Grimes/Art Angels", "01.m4a")],
+            &job_tx,
+        );
+
+        let item = job_rx.try_recv().expect("expected a work item");
+        assert_eq!(item.member_count(), 8);
+        assert_eq!(
+            inner.queued.load(Ordering::Relaxed),
+            8,
+            "every folded-in member must take its own queued slot"
+        );
+
+        // The worker's dequeue must now balance back to zero rather than wrap.
+        inner.release_queued(item.member_count());
+        assert_eq!(inner.queued.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn folded_in_folder_members_are_claimed_as_pending() {
+        let (directory, store) = open_store();
+        let folder = seed_folder(&directory, &store, "Grimes/Art Angels", &["01.m4a", "02.m4a", "03.m4a"]);
+        let inner = test_inner();
+        let (job_tx, _job_rx) = mpsc::unbounded_channel::<WorkItem>();
+
+        assert!(inner.claim("hash-01.m4a"));
+        send_group(
+            &inner,
+            &store,
+            folder,
+            vec![job("hash-01.m4a", "Grimes/Art Angels", "01.m4a")],
+            &job_tx,
+        );
+
+        let pending = inner.pending.lock().unwrap();
+        assert_eq!(
+            pending.len(),
+            3,
+            "a folded-in member is in flight, so it must hold a pending claim against re-enqueue"
+        );
+    }
+
+    #[test]
+    fn a_member_already_claimed_elsewhere_is_not_folded_in_twice() {
+        let (directory, store) = open_store();
+        let folder = seed_folder(&directory, &store, "Grimes/Art Angels", &["01.m4a", "02.m4a", "03.m4a"]);
+        let inner = test_inner();
+        let (job_tx, mut job_rx) = mpsc::unbounded_channel::<WorkItem>();
+
+        assert!(inner.claim("hash-01.m4a"));
+        // Already in flight on its own claim, from an earlier work item.
+        assert!(inner.claim("hash-03.m4a"));
+
+        send_group(
+            &inner,
+            &store,
+            folder,
+            vec![job("hash-01.m4a", "Grimes/Art Angels", "01.m4a")],
+            &job_tx,
+        );
+
+        let item = job_rx.try_recv().expect("expected a work item");
+        assert_eq!(item.member_count(), 2, "the already-claimed member must be left out");
+        assert!(!item.content_hashes().contains(&"hash-03.m4a".to_string()));
+        assert_eq!(
+            inner.queued.load(Ordering::Relaxed),
+            3,
+            "hash-03 keeps its original slot; only hash-02 takes a new one"
+        );
+    }
+
+    #[test]
+    fn releasing_more_slots_than_were_claimed_saturates_at_zero() {
+        let inner = test_inner();
+        inner.queued.store(3, Ordering::Relaxed);
+
+        inner.release_queued(8);
+
+        assert_eq!(
+            inner.queued.load(Ordering::Relaxed),
+            0,
+            "an accounting slip must read as an empty queue, not as a wrapped u64"
+        );
+    }
+
+    #[test]
+    fn a_failed_send_gives_back_the_queued_slot_it_took() {
+        let (staging_tx, staging_rx) = mpsc::unbounded_channel::<IdentificationJob>();
+        // A dropped receiver is what a never-started (no API key) queue looks like.
+        drop(staging_rx);
+        let queue = IdentificationQueue {
+            inner: test_inner_with_sender(staging_tx),
+        };
+
+        queue.enqueue("hash-1".into(), PathBuf::from("Grimes/Art Angels/01.m4a"));
+
+        assert_eq!(queue.inner.queued.load(Ordering::Relaxed), 0);
+        assert!(queue.inner.pending.lock().unwrap().is_empty());
     }
 
     #[test]

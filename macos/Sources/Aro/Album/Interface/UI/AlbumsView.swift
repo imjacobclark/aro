@@ -10,10 +10,20 @@ struct AlbumsView: View {
 
     @State private var selectedAlbumID: LibraryAlbum.ID?
     @State private var searchText = ""
+    @State private var pendingScrollTarget: LibraryAlbum.ID?
     @FocusState private var isBrowserFocused: Bool
 
     private var albums: [LibraryAlbum] {
         AlbumLibrary.albums(from: songs)
+    }
+
+    /// The playing song's album, identified by running it through the same
+    /// grouping that built `albums` — an album's id is derived purely from its
+    /// own artist and album names, so one song is enough to recover the id its
+    /// album would have in the full list.
+    private var nowPlayingAlbumID: LibraryAlbum.ID? {
+        guard let song = playback.currentSong else { return nil }
+        return AlbumLibrary.albums(from: [song]).first?.id
     }
 
     private var selectedAlbum: LibraryAlbum? {
@@ -46,7 +56,11 @@ struct AlbumsView: View {
             albumDetail
         }
         .task {
-            selectFirstAlbumIfNeeded()
+            focusNowPlayingAlbum()
+            // See `ArtistsView`: the lazy list needs a layout pass before it
+            // has a row to scroll to.
+            await Task.yield()
+            pendingScrollTarget = selectedAlbumID
         }
         .onChange(of: albums.map(\.id)) {
             selectFirstAlbumIfNeeded()
@@ -68,79 +82,86 @@ struct AlbumsView: View {
                 text: $searchText
             )
 
-            ScrollView {
-                LazyVStack(spacing: 4) {
-                    ForEach(filteredAlbums) { album in
-                        Button {
-                            selectedAlbumID = album.id
-                        } label: {
-                            HStack(spacing: 10) {
-                                AlbumArtworkView(data: album.artworkData, maxDimension: 42)
-                                    .frame(width: 42, height: 42)
+            ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 4) {
+                            ForEach(filteredAlbums) { album in
+                                Button {
+                                    selectedAlbumID = album.id
+                                } label: {
+                                    HStack(spacing: 10) {
+                                        AlbumArtworkView(data: album.artworkData, maxDimension: 42)
+                                            .frame(width: 42, height: 42)
 
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(album.name)
-                                        .font(
-                                            AroFont.fixed(
-                                                14,
-                                                weight: .semibold
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text(album.name)
+                                                .font(
+                                                    AroFont.fixed(
+                                                        14,
+                                                        weight: .semibold
+                                                    )
+                                                )
+                                                .foregroundStyle(.primary)
+                                                .lineLimit(1)
+
+                                            Text(
+                                                "\(album.artistName) · "
+                                                    + "\(album.songs.count) songs"
                                             )
+                                            .font(AroFont.fixed(12))
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                        }
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 10)
+                                    .background(
+                                        selectedAlbumID == album.id
+                                            ? AroTheme.selectedTint
+                                            : Color.clear,
+                                        in: RoundedRectangle(
+                                            cornerRadius: 9,
+                                            style: .continuous
                                         )
-                                        .foregroundStyle(.primary)
-                                        .lineLimit(1)
-
-                                    Text(
-                                        "\(album.artistName) · "
-                                            + "\(album.songs.count) songs"
                                     )
-                                    .font(AroFont.fixed(12))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityAddTraits(
+                                    selectedAlbumID == album.id
+                                        ? .isSelected
+                                        : []
+                                )
+                                .contextMenu {
+                                    Button("Play Album") {
+                                        playAlbum(album)
+                                    }
+                                    .disabled(album.songs.isEmpty)
+                                    Divider()
+                                    Button("Sync Album Data") {
+                                        Task { await syncAlbumData(album.songs) }
+                                    }
                                 }
                             }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
-                            .background(
-                                selectedAlbumID == album.id
-                                    ? AroTheme.selectedTint
-                                    : Color.clear,
-                                in: RoundedRectangle(
-                                    cornerRadius: 9,
-                                    style: .continuous
-                                )
+                        }
+                        .padding(.horizontal, 12)
+                }
+                .overlay {
+                    if filteredAlbums.isEmpty {
+                        ContentUnavailableView(
+                            "No Matching Albums",
+                            systemImage: "magnifyingglass",
+                            description: Text(
+                                "Try a different album or artist name."
                             )
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityAddTraits(
-                            selectedAlbumID == album.id
-                                ? .isSelected
-                                : []
                         )
-                        .contextMenu {
-                            Button("Play Album") {
-                                playAlbum(album)
-                            }
-                            .disabled(album.songs.isEmpty)
-                            Divider()
-                            Button("Sync Album Data") {
-                                Task { await syncAlbumData(album.songs) }
-                            }
-                        }
                     }
                 }
-                .padding(.horizontal, 12)
-            }
-            .overlay {
-                if filteredAlbums.isEmpty {
-                    ContentUnavailableView(
-                        "No Matching Albums",
-                        systemImage: "magnifyingglass",
-                        description: Text(
-                            "Try a different album or artist name."
-                        )
-                    )
+                .onChange(of: pendingScrollTarget) { _, target in
+                    guard let target else { return }
+                    proxy.scrollTo(target, anchor: .center)
+                    pendingScrollTarget = nil
                 }
             }
         }
@@ -224,6 +245,16 @@ struct AlbumsView: View {
     private func playAlbum(_ album: LibraryAlbum) {
         guard let firstSong = album.songs.first else { return }
         playback.play(song: firstSong, queue: album.songs)
+    }
+
+    /// Opens the browser on the album you're currently listening to rather than
+    /// the top of an alphabetical list — see `ArtistsView.focusNowPlayingArtist`.
+    private func focusNowPlayingAlbum() {
+        if let nowPlayingAlbumID,
+           albums.contains(where: { $0.id == nowPlayingAlbumID }) {
+            selectedAlbumID = nowPlayingAlbumID
+        }
+        selectFirstAlbumIfNeeded()
     }
 
     private func selectFirstAlbumIfNeeded() {
