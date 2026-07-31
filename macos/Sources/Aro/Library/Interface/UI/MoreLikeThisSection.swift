@@ -23,37 +23,52 @@ struct MoreLikeThisSection: View {
     @State private var similar: [Song] = []
 
     var body: some View {
-        Group {
-            if !similar.isEmpty {
-                VStack(alignment: .leading, spacing: 12) {
-                    Divider()
-                    SectionHeader(
-                        title: "More Like This",
-                        subtitle: seed.map { "Sounds like \($0.title)" }
-                            ?? "Measured from the audio"
-                    )
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(alignment: .top, spacing: 16) {
-                            ForEach(similar) { song in
-                                Button {
-                                    playback.play(song: song, queue: similar)
-                                } label: {
-                                    tile(song)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        .padding(.vertical, 2)
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 12)
+        content
+            // Keyed on the seed so switching tracks (or views) reloads rather than
+            // leaving a stale shelf describing something no longer on screen.
+            .task(id: seed?.contentHash) {
+                await reload()
             }
-        }
-        // Keyed on the seed so switching tracks (or views) reloads rather than
-        // leaving a stale shelf describing something no longer on screen.
-        .task(id: seed?.contentHash) {
-            await reload()
+    }
+
+    /// Always resolves to a *real* view, collapsing to zero height when there's
+    /// nothing to show rather than to nothing at all. An `if` that produces an empty
+    /// view in its only branch gives SwiftUI nothing to place, so the `.task` above
+    /// never runs — and since the task is what populates `similar`, the shelf would
+    /// stay empty forever waiting on a load that could never start.
+    @ViewBuilder
+    private var content: some View {
+        if similar.isEmpty {
+            Color.clear.frame(height: 0)
+        } else {
+            VStack(alignment: .leading, spacing: 12) {
+                Divider()
+                SectionHeader(
+                    title: "More Like This",
+                    subtitle: seed.map { "Sounds like \($0.title)" }
+                        ?? "Measured from the audio"
+                )
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .top, spacing: 16) {
+                        ForEach(similar) { song in
+                            Button {
+                                playback.play(song: song, queue: similar)
+                            } label: {
+                                tile(song)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 12)
+            // Definite height + priority so the shelf actually gets space in a
+            // VStack shared with `AppKitSongTable`, an NSViewRepresentable that
+            // otherwise takes every available point.
+            .frame(height: 214)
+            .layoutPriority(1)
         }
     }
 
