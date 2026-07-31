@@ -351,6 +351,23 @@ struct HubControlClient: Sendable {
         )
     }
 
+    /// Local-socket equivalent of `AroSyncClient.smartShuffle(contentHashes:start:)`.
+    func smartShuffle(
+        contentHashes: [String],
+        start: String?
+    ) async throws -> [String] {
+        var command: [String: Any] = [
+            "command": "smart_shuffle",
+            "content_hashes": contentHashes,
+        ]
+        if let start {
+            command["start"] = start
+        }
+        let result = try await sendValue(command)
+        let data = try JSONSerialization.data(withJSONObject: result)
+        return try JSONDecoder().decode([String].self, from: data)
+    }
+
     /// Tier 3 "seed-track radio" (see `aro-server`'s `playlists::radio`) — the tracks
     /// most similar to `contentHash` by measured audio-feature vector, nearest first,
     /// with `contentHash` itself in front. `nil` if the seed hasn't been analyzed yet.

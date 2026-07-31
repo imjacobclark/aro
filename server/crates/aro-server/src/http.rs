@@ -206,6 +206,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/playback/activity", post(playback_activity))
         .route("/v1/playlists", get(playlists))
         .route("/v1/radio/{hash}", get(radio))
+        .route("/v1/shuffle", post(smart_shuffle))
         .route("/v1/jobs/{id}", get(job_status).delete(cancel_job));
 
     admin_only
@@ -772,6 +773,36 @@ struct RadioQuery {
 
 fn default_radio_limit() -> usize {
     crate::playlists::RADIO_DEFAULT_LIMIT
+}
+
+#[derive(Deserialize)]
+struct SmartShuffleRequest {
+    content_hashes: Vec<String>,
+    /// Track to begin the walk from — normally whatever the listener just picked,
+    /// so their choice still plays first. Optional; omitted means "start anywhere".
+    #[serde(default)]
+    start: Option<String>,
+}
+
+/// Reorders a queue so consecutive tracks sound alike (see
+/// `crate::playlists::smart_shuffle`). A POST rather than a GET because a queue can
+/// run to hundreds of hashes, well past what belongs in a URL.
+///
+/// Hashes the hub doesn't recognize are simply absent from the response, so the
+/// client must treat this as a *reordering hint* and keep any it doesn't get back —
+/// see the client's own note on preserving unknown tracks.
+async fn smart_shuffle(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<SmartShuffleRequest>,
+) -> Result<Json<Vec<String>>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    let seeds = state.store.playlist_seeds()?;
+    Ok(Json(crate::playlists::smart_shuffle(
+        &seeds,
+        &request.content_hashes,
+        request.start.as_deref(),
+    )))
 }
 
 /// Tier 3 "seed-track radio" (see `crate::playlists::radio`) for a remote client —

@@ -453,6 +453,21 @@ actor AroSyncClient {
         )
     }
 
+    /// Reorders `contentHashes` so consecutive tracks sound alike (see `aro-server`'s
+    /// `playlists::smart_shuffle`). POST rather than GET because a queue can run to
+    /// hundreds of hashes.
+    func smartShuffle(
+        contentHashes: [String],
+        start: String?,
+        credential: HubDeviceCredential
+    ) async throws -> [String] {
+        try await postAuthenticated(
+            "v1/shuffle",
+            body: SmartShuffleRequest(contentHashes: contentHashes, start: start),
+            credential: credential
+        )
+    }
+
     /// Remote equivalent of `HubControlClient.playlists()` — the hub's auto-generated
     /// playlists, keyed by content hash, for a pure remote client's Home screen.
     /// `utcOffsetMinutes` scopes Morning Rotation/Late Night to this device's timezone.
@@ -824,6 +839,11 @@ extension JSONDecoder {
         }
         return decoder
     }
+}
+
+private struct SmartShuffleRequest: Encodable {
+    let contentHashes: [String]
+    let start: String?
 }
 
 private struct HubErrorResponse: Decodable {

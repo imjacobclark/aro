@@ -95,6 +95,27 @@ struct HomePlaylistsBridge {
         return []
     }
 
+    /// Reorders a queue by measured audio similarity. Returns `nil` when no hub is
+    /// reachable, so callers keep whatever order they already had rather than
+    /// treating an outage as "shuffle produced nothing".
+    func smartShuffle(contentHashes: [String], start: String?) async -> [String]? {
+        if remoteProfile?.kind == .remote {
+            guard let remoteContext else { return nil }
+            return try? await remoteContext.client.smartShuffle(
+                contentHashes: contentHashes,
+                start: start,
+                credential: remoteContext.credential
+            )
+        }
+        if let localClient {
+            return try? await localClient.smartShuffle(
+                contentHashes: contentHashes,
+                start: start
+            )
+        }
+        return nil
+    }
+
     /// Tier 3 "seed-track radio" (see `aro-server`'s `playlists::radio`) — the tracks
     /// most similar to `contentHash`, nearest first, seed itself in front. `nil` if
     /// no server is reachable or the seed hasn't been analyzed yet.

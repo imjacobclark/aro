@@ -100,6 +100,13 @@ enum ControlCommand {
     /// similar to `content_hash` by measured audio-feature vector, nearest first,
     /// with the seed itself in front. `None`/empty result if the seed hasn't been
     /// analyzed yet.
+    /// Reorders a queue by measured audio similarity — see
+    /// `crate::playlists::smart_shuffle`.
+    SmartShuffle {
+        content_hashes: Vec<String>,
+        #[serde(default)]
+        start: Option<String>,
+    },
     Radio {
         content_hash: String,
         #[serde(default = "default_radio_limit")]
@@ -366,6 +373,14 @@ async fn handle(stream: &mut UnixStream, state: Arc<AppState>) -> Result<Value> 
                 utc_offset_minutes,
             ))?
         }
+        ControlCommand::SmartShuffle {
+            content_hashes,
+            start,
+        } => serde_json::to_value(crate::playlists::smart_shuffle(
+            &state.store.playlist_seeds()?,
+            &content_hashes,
+            start.as_deref(),
+        ))?,
         ControlCommand::Radio {
             content_hash,
             limit,

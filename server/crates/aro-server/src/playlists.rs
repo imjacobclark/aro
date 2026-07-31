@@ -793,6 +793,87 @@ fn squared_distance(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum()
 }
 
+/// Orders `content_hashes` so consecutive tracks sound alike — a greedy
+/// nearest-neighbour walk through the measured feature space, starting from
+/// `start_hash` (or the first analyzed track when that isn't given or isn't
+/// analyzed).
+///
+/// This is what separates "smart" shuffle from `shuffled()`: a uniform shuffle is
+/// *correct* but jarring, dropping a ballad between two thrash tracks purely by
+/// chance. Walking to the nearest unvisited neighbour each step keeps timbre, tempo
+/// and energy drifting gradually instead, so the queue flows.
+///
+/// Deliberately greedy rather than an optimal path: this is a nearest-neighbour
+/// heuristic for the open travelling-salesman problem, which is NP-hard, and the
+/// difference is imperceptible for something whose only job is to avoid jarring
+/// transitions. Cost stays O(n²) over a queue, which is trivial at library sizes.
+///
+/// Tracks with no analysis yet can't be placed meaningfully, so they keep their
+/// original relative order and are appended at the end rather than dropped — a
+/// shuffle that silently loses tracks would be a far worse bug than one that
+/// sequences a few imperfectly.
+pub fn smart_shuffle(
+    seeds: &PlaylistSeeds,
+    content_hashes: &[String],
+    start_hash: Option<&str>,
+) -> Vec<String> {
+    let requested: std::collections::HashSet<&str> =
+        content_hashes.iter().map(String::as_str).collect();
+
+    let mut vectors: std::collections::HashMap<&str, Vec<f64>> =
+        std::collections::HashMap::new();
+    for track in &seeds.tracks {
+        if requested.contains(track.content_hash.as_str()) {
+            if let Some(features) = decoded_features(track) {
+                vectors.insert(track.content_hash.as_str(), features.vector());
+            }
+        }
+    }
+
+    // Preserves the caller's ordering for anything we can't place.
+    let unanalyzed: Vec<String> = content_hashes
+        .iter()
+        .filter(|hash| !vectors.contains_key(hash.as_str()))
+        .cloned()
+        .collect();
+
+    let mut remaining: Vec<&str> = content_hashes
+        .iter()
+        .map(String::as_str)
+        .filter(|hash| vectors.contains_key(hash))
+        .collect();
+    if remaining.is_empty() {
+        return unanalyzed;
+    }
+
+    // Honour the requested starting track so the caller's chosen song stays first
+    // (the listener picked it); otherwise begin wherever the list does.
+    let start_index = start_hash
+        .and_then(|hash| remaining.iter().position(|candidate| *candidate == hash))
+        .unwrap_or(0);
+    let mut ordered = Vec::with_capacity(remaining.len() + unanalyzed.len());
+    let mut current = remaining.swap_remove(start_index);
+    ordered.push(current.to_string());
+
+    while !remaining.is_empty() {
+        let current_vector = &vectors[current];
+        let (nearest_index, _) = remaining
+            .iter()
+            .enumerate()
+            .map(|(index, hash)| (index, squared_distance(current_vector, &vectors[hash])))
+            // `total_cmp` rather than `partial_cmp`: distances are finite here, but
+            // this keeps the ordering total regardless, and ties break on the
+            // earlier index so the walk stays deterministic for a given input.
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .expect("remaining is non-empty");
+        current = remaining.swap_remove(nearest_index);
+        ordered.push(current.to_string());
+    }
+
+    ordered.extend(unanalyzed);
+    ordered
+}
+
 /// Tier 3: "seed-track radio" — the tracks most similar to `seed_hash` by audio
 /// feature vector, nearest first, with `seed_hash` itself in front so the result is
 /// immediately playable as a coherent queue. Excludes tracks with a high skip rate
@@ -1719,6 +1800,52 @@ mod tests {
         let sparse_seeds = PlaylistSeeds { tracks: sparse_tracks, ..Default::default() };
         let sparse_playlists = generate_utc(&sparse_seeds, wednesday());
         assert!(!sparse_playlists.iter().any(|p| p.id.starts_with("daily-mix-")));
+    }
+
+    #[test]
+    fn smart_shuffle_walks_nearest_neighbours_and_parks_unanalyzed_tracks_at_the_end() {
+        // Three clusters far apart in feature space, deliberately interleaved on
+        // input so an unordered pass-through couldn't accidentally pass this.
+        let calm_a = features(60.0, 0.01, 0.1, 0.0);
+        let calm_b = features(62.0, 0.012, 0.11, 0.1);
+        let mid = features(120.0, 0.05, 0.4, 20.0);
+        let loud_a = features(180.0, 0.2, 0.9, 40.0);
+        let loud_b = features(182.0, 0.21, 0.91, 40.5);
+
+        let mut tracks = vec![
+            track_with_features("calm-a", &calm_a),
+            track_with_features("loud-a", &loud_a),
+            track_with_features("mid", &mid),
+            track_with_features("loud-b", &loud_b),
+            track_with_features("calm-b", &calm_b),
+        ];
+        // No audio_features_json at all — can't be placed by similarity.
+        tracks.push(track_full("unanalyzed", None, None, None));
+
+        let seeds = PlaylistSeeds { tracks, ..Default::default() };
+        let hashes: Vec<String> = ["calm-a", "loud-a", "mid", "loud-b", "calm-b", "unanalyzed"]
+            .iter()
+            .map(|hash| hash.to_string())
+            .collect();
+
+        let ordered = smart_shuffle(&seeds, &hashes, Some("calm-a"));
+
+        // Nothing is lost, the requested start leads, and the unplaceable track is
+        // parked at the end rather than dropped.
+        assert_eq!(ordered.len(), hashes.len());
+        assert_eq!(ordered[0], "calm-a");
+        assert_eq!(ordered.last().unwrap(), "unanalyzed");
+
+        // The walk should stay within a cluster before crossing to the next, so the
+        // two calm tracks are adjacent and the two loud ones are adjacent.
+        let position = |hash: &str| ordered.iter().position(|value| value == hash).unwrap();
+        assert_eq!(position("calm-b"), 1, "nearest neighbour of calm-a is calm-b");
+        assert!(
+            position("loud-a").abs_diff(position("loud-b")) == 1,
+            "loud tracks should end up adjacent, got {ordered:?}"
+        );
+        // ...and the midpoint should bridge the two clusters rather than sit inside one.
+        assert_eq!(position("mid"), 2, "mid should bridge calm -> loud, got {ordered:?}");
     }
 
     #[test]

@@ -44,6 +44,14 @@ final class PlaybackController {
     @ObservationIgnored private let prepareSong: PrepareSongForPlayback?
     @ObservationIgnored private let mediaLocationResolver:
         (@MainActor (Song) -> PlaybackMediaLocation?)?
+    /// Reorders upcoming tracks by measured audio similarity; `nil` when no hub is
+    /// available, in which case shuffle stays uniformly random.
+    ///
+    /// Settable rather than injected at construction because the hub transport is
+    /// assembled from view-level state (active profile, discovered local servers)
+    /// that `LibraryRuntime` doesn't hold — see `ContentView`, which assigns it.
+    @ObservationIgnored var smartShuffleOrder:
+        (@MainActor ([String], String?) async -> [String]?)?
     @ObservationIgnored private let progressivePlaybackEligibility:
         @MainActor (Song) -> Bool
     @ObservationIgnored private let progressiveDownloadFallbackAllowed:
@@ -75,6 +83,8 @@ final class PlaybackController {
         prepareSong: PrepareSongForPlayback? = nil,
         mediaLocationResolver:
             (@MainActor (Song) -> PlaybackMediaLocation?)? = nil,
+        smartShuffleOrder:
+            (@MainActor ([String], String?) async -> [String]?)? = nil,
         progressivePlaybackEligibility:
             @escaping @MainActor (Song) -> Bool = { _ in false },
         progressiveDownloadFallbackAllowed:
@@ -98,6 +108,7 @@ final class PlaybackController {
         self.effectiveModeResolver = effectiveModeResolver ?? { [preferences] in preferences.mode }
         self.prepareSong = prepareSong
         self.mediaLocationResolver = mediaLocationResolver
+        self.smartShuffleOrder = smartShuffleOrder
         self.progressivePlaybackEligibility = progressivePlaybackEligibility
         self.progressiveDownloadFallbackAllowed =
             progressiveDownloadFallbackAllowed
@@ -150,6 +161,7 @@ final class PlaybackController {
                 .shuffled()
             queue = [song] + remaining
             startSong(at: 0, skippingFailures: false)
+            resequenceUpcomingBySimilarity()
         } else {
             queue = prepared.songs
             startSong(at: prepared.selectedIndex, skippingFailures: false)
@@ -173,6 +185,73 @@ final class PlaybackController {
         }
         queue = played + remaining
         restartCurrentSongAfterQueueChange()
+        if isShuffleEnabled {
+            resequenceUpcomingBySimilarity()
+        }
+    }
+
+    /// Re-orders the *upcoming* part of a shuffled queue so consecutive tracks sound
+    /// alike, leaving already-played tracks and the current one untouched.
+    ///
+    /// Runs after playback has already started on a uniformly shuffled queue rather
+    /// than before it: the ordering needs a hub round trip, and making the listener
+    /// wait on the network before hearing anything would be a bad trade for what is
+    /// only a sequencing refinement. The audible result is the same, since the change
+    /// only ever affects tracks that haven't played yet.
+    private func resequenceUpcomingBySimilarity() {
+        guard let smartShuffleOrder, isShuffleEnabled else { return }
+        let anchorIndex = currentIndex ?? 0
+        guard queue.indices.contains(anchorIndex) else { return }
+        let upcoming = Array(queue.dropFirst(anchorIndex + 1))
+        // Nothing meaningful to sequence, and no point paying for a round trip.
+        guard upcoming.count > 1 else { return }
+
+        let anchor = queue[anchorIndex]
+        let requestedPlaybackID = playbackID
+        let hashes = upcoming.compactMap(\.contentHash)
+        guard hashes.count > 1 else { return }
+
+        Task { [weak self] in
+            guard let ordered = await smartShuffleOrder(hashes, anchor.contentHash),
+                  let self else {
+                return
+            }
+            // The listener may have skipped, re-shuffled, or started something else
+            // entirely while this was in flight; applying a stale ordering would
+            // yank the queue out from under them.
+            guard requestedPlaybackID == self.playbackID,
+                  self.isShuffleEnabled,
+                  (self.currentIndex ?? 0) == anchorIndex else {
+                return
+            }
+            self.applyUpcomingOrder(ordered, after: anchorIndex)
+        }
+    }
+
+    /// Rewrites the queue after `anchorIndex` into `orderedHashes` order. Tracks the
+    /// hub didn't return (an unanalyzed file, or one it doesn't know) keep their
+    /// existing relative order and follow on the end — a shuffle that quietly
+    /// dropped tracks would be far worse than one that sequences a few imperfectly.
+    private func applyUpcomingOrder(_ orderedHashes: [String], after anchorIndex: Int) {
+        guard queue.indices.contains(anchorIndex) else { return }
+        let upcoming = Array(queue.dropFirst(anchorIndex + 1))
+        var byHash: [String: [Song]] = [:]
+        for song in upcoming {
+            guard let hash = song.contentHash else { continue }
+            byHash[hash, default: []].append(song)
+        }
+        var reordered: [Song] = []
+        var placed = Set<Song.ID>()
+        for hash in orderedHashes {
+            guard var bucket = byHash[hash], !bucket.isEmpty else { continue }
+            let song = bucket.removeFirst()
+            byHash[hash] = bucket
+            reordered.append(song)
+            placed.insert(song.id)
+        }
+        reordered.append(contentsOf: upcoming.filter { !placed.contains($0.id) })
+        guard reordered.count == upcoming.count else { return }
+        queue = Array(queue[...anchorIndex]) + reordered
     }
 
     func cycleRepeatMode() {

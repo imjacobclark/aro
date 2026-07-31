@@ -254,6 +254,15 @@ struct ContentView: View {
         }
         .task {
             playback.reconcileAvailableSongs(store.allSongs)
+            // Assigned here rather than at construction: the transport depends on
+            // the active profile and discovered local servers, which live at this
+            // level rather than in `LibraryRuntime`.
+            playback.smartShuffleOrder = { hashes, start in
+                await homePlaylistsBridge.smartShuffle(
+                    contentHashes: hashes,
+                    start: start
+                )
+            }
         }
         .onChange(of: cachedPlaylists) { _, newValue in
             ScreenDataCache.savePlaylists(newValue, for: profileRegistry.activeProfileID)
