@@ -8,6 +8,9 @@ struct NavigationSidebar: View {
     let canAddSync: Bool
     let addSyncHelp: String
     let canRemoveSyncs: Bool
+    /// Connection health of the active *remote* library, or `nil` when this Mac is
+    /// hosting its own — see `RemoteSyncHealth`.
+    var remoteSyncHealth: RemoteSyncHealth?
     let addSync: () -> Void
     let removeSync: (UUID) -> Void
 
@@ -42,7 +45,8 @@ struct NavigationSidebar: View {
                 ForEach(folders) { folder in
                     FolderRow(
                         folder: folder,
-                        scanState: scanStates[folder.id] ?? .idle
+                        scanState: scanStates[folder.id] ?? .idle,
+                        remoteSyncHealth: remoteSyncHealth
                     )
                     .font(AroFont.fixed(14))
                     .tag(Destination.folder(folder.id))

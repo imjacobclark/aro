@@ -115,6 +115,7 @@ struct ContentView: View {
                         : "Add a folder to sync",
                     canRemoveSyncs:
                         profileRegistry.activeProfile?.kind != .remote,
+                    remoteSyncHealth: remoteSyncHealth,
                     addSync: chooseFolder,
                     removeSync: { removeFolder(id: $0) }
                 )
@@ -434,6 +435,36 @@ struct ContentView: View {
     /// time, the same trust path `synchronizeRemoteLibrary` above already uses.
     /// Needed because the hub's `/v1/blobs/{hash}` HTTP endpoint (unlike the local
     /// control socket `pullIdentificationResults` uses) requires both.
+    /// Health of the active remote library, derived from the last sync attempt.
+    /// `nil` for a locally hosted library, where the sidebar's plain in-sync tick is
+    /// already accurate.
+    ///
+    /// A failed attempt alone isn't treated as an error: if nothing local is waiting
+    /// to upload, an unreachable hub means everything we hold is already safely on
+    /// the server, which is worth showing as muted rather than alarming. It only
+    /// becomes an error once there are local changes stranded here.
+    private var remoteSyncHealth: RemoteSyncHealth? {
+        guard profileRegistry.activeProfile?.kind == .remote,
+              let hubID = profileRegistry.activeProfile?.hubID
+        else { return nil }
+        guard let status = syncStore.syncStatus(hubID: hubID) else {
+            // Paired but never yet synced — treat as not-yet-reachable rather than
+            // claiming we're in sync.
+            return .offline
+        }
+        // A sync in flight has already stamped `lastAttemptAt` but not yet
+        // `lastSuccessAt`, so treating attempt-newer-than-success as failure would
+        // blink the indicator on every poll. Only an actual error counts while a
+        // sync is still running.
+        let attemptOutranSuccess = !isSynchronizingRemoteLibrary
+            && (status.lastSuccessAt == nil
+                || (status.lastAttemptAt.map { attempt in
+                    status.lastSuccessAt.map { attempt > $0 } ?? true
+                } ?? false))
+        guard status.lastError != nil || attemptOutranSuccess else { return .online }
+        return syncStore.pending(limit: 1).isEmpty ? .offline : .failing
+    }
+
     private func resolveRemoteArtworkBlob(hash: String) async -> Data? {
         guard let remote = await remoteSyncContext else { return nil }
         return try? await remote.client.downloadBlob(
