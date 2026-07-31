@@ -11,9 +11,19 @@ import SwiftUI
 /// been analyzed yet. That silence is deliberate: this is a discovery affordance, and
 /// an empty shelf or an error row would be worse than simply not appearing.
 struct MoreLikeThisSection: View {
-    /// Track to find neighbours for. Callers pass the currently playing track when
-    /// there is one, falling back to the first track on screen.
+    /// Track to find neighbours for. Song/playlist views pass whatever is playing;
+    /// artist/album views pass a representative track from the collection on screen,
+    /// since there the interesting question is "what sounds like *this record*", not
+    /// "what sounds like whatever happens to be playing".
     let seed: Song?
+    /// What the subtitle describes the seed as — a track title, or an artist/album
+    /// name when the shelf represents a whole collection. Falls back to the seed's
+    /// own title.
+    var seedLabel: String?
+    /// Song/playlist views sit above a long scrolling table where a permanent shelf
+    /// costs real estate, so they let it be folded away. Artist/album views are
+    /// short enough not to need it.
+    var isCollapsible: Bool = false
     /// The full local catalog, needed because the hub answers with content hashes
     /// spanning the whole library rather than just the visible list.
     let allSongs: [Song]
@@ -21,6 +31,10 @@ struct MoreLikeThisSection: View {
     let playback: PlaybackController
 
     @State private var similar: [Song] = []
+    /// Persisted rather than view-local: this view is rebuilt on every navigation,
+    /// so a plain `@State` would silently re-expand a shelf the listener had
+    /// deliberately collapsed each time they changed screens.
+    @AppStorage("moreLikeThis.expanded") private var isExpanded = true
 
     var body: some View {
         content
@@ -43,11 +57,8 @@ struct MoreLikeThisSection: View {
         } else {
             VStack(alignment: .leading, spacing: 12) {
                 Divider()
-                SectionHeader(
-                    title: "More Like This",
-                    subtitle: seed.map { "Sounds like \($0.title)" }
-                        ?? "Measured from the audio"
-                )
+                header
+                if !isCollapsible || isExpanded {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(alignment: .top, spacing: 16) {
                         ForEach(similar) { song in
@@ -61,14 +72,40 @@ struct MoreLikeThisSection: View {
                     }
                     .padding(.vertical, 2)
                 }
+                }
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 12)
             // Definite height + priority so the shelf actually gets space in a
             // VStack shared with `AppKitSongTable`, an NSViewRepresentable that
             // otherwise takes every available point.
-            .frame(height: 214)
+            .frame(height: isCollapsible && !isExpanded ? 58 : 214)
             .layoutPriority(1)
+        }
+    }
+
+    /// The section title, with a disclosure control when the shelf can be folded.
+    @ViewBuilder
+    private var header: some View {
+        let subtitle = (seedLabel ?? seed?.title).map { "Sounds like \($0)" }
+            ?? "Measured from the audio"
+        if isCollapsible {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) { isExpanded.toggle() }
+            } label: {
+                HStack(spacing: 8) {
+                    SectionHeader(title: "More Like This", subtitle: subtitle)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isExpanded ? 0 : -90))
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        } else {
+            SectionHeader(title: "More Like This", subtitle: subtitle)
         }
     }
 

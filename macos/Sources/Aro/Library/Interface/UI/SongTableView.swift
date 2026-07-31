@@ -90,6 +90,7 @@ struct SongTableView: View {
                 if let loadRadio {
                     MoreLikeThisSection(
                         seed: radioSeed,
+                        isCollapsible: true,
                         allSongs: allSongs,
                         loadRadio: loadRadio,
                         playback: playback

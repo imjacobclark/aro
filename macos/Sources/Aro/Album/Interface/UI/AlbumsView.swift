@@ -29,15 +29,10 @@ struct AlbumsView: View {
         }
     }
 
-    /// Follows whatever is playing when that track is on screen, otherwise seeds
-    /// from the top of the list so the shelf is useful before playback starts.
-    private func radioSeed(for visible: [Song]) -> Song? {
-        if let current = playback.currentSong,
-           current.contentHash != nil,
-           visible.contains(where: { $0.id == current.id }) {
-            return current
-        }
-        return visible.first { $0.contentHash != nil }
+    /// Represents the album being viewed rather than whatever is playing — see
+    /// `ArtistsView.collectionSeed`.
+    private func collectionSeed(_ visible: [Song]) -> Song? {
+        visible.first { $0.contentHash != nil }
     }
 
     var body: some View {
@@ -179,7 +174,8 @@ struct AlbumsView: View {
 
                     if let loadRadio {
                         MoreLikeThisSection(
-                            seed: radioSeed(for: album.songs),
+                            seed: collectionSeed(album.songs),
+                            seedLabel: album.name,
                             allSongs: songs,
                             loadRadio: loadRadio,
                             playback: playback

@@ -23,15 +23,12 @@ struct ArtistsView: View {
         artists.filter { FuzzySearch.matches(searchText, in: $0.name) }
     }
 
-    /// Follows whatever is playing when that track is on screen, otherwise seeds
-    /// from the top of the list so the shelf is useful before playback starts.
-    private func radioSeed(for visible: [Song]) -> Song? {
-        if let current = playback.currentSong,
-           current.contentHash != nil,
-           visible.contains(where: { $0.id == current.id }) {
-            return current
-        }
-        return visible.first { $0.contentHash != nil }
+    /// Represents the collection being viewed rather than whatever is playing:
+    /// on an artist or album page the useful question is "what else sounds like
+    /// this record", and a seed that drifted with playback would make the shelf
+    /// contradict its own heading.
+    private func collectionSeed(_ visible: [Song]) -> Song? {
+        visible.first { $0.contentHash != nil }
     }
 
     var body: some View {
@@ -154,7 +151,8 @@ struct ArtistsView: View {
 
                     if let loadRadio {
                         MoreLikeThisSection(
-                            seed: radioSeed(for: artist.albums.flatMap(\.songs)),
+                            seed: collectionSeed(artist.albums.flatMap(\.songs)),
+                            seedLabel: artist.name,
                             allSongs: songs,
                             loadRadio: loadRadio,
                             playback: playback
