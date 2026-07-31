@@ -19,8 +19,7 @@ struct AlbumSongList: View {
             onSyncTrackData: { song in
                 await syncTrackData(song)
             },
-            onRequestRemoval: nil,
-            onStartRadio: nil
+            onRequestRemoval: nil
         )
         .frame(
             minHeight: max(CGFloat(songs.count) * 35, 35),

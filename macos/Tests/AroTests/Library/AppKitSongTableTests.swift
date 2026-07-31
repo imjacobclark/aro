@@ -28,8 +28,7 @@ struct AppKitSongTableTests {
             downloadedSongIDs: [second.id],
             onPlay: { _ in },
             onSyncTrackData: { _ in },
-            onRequestRemoval: { _ in },
-            onStartRadio: { _ in }
+            onRequestRemoval: { _ in }
         )
 
         #expect(tableView.selectedRow == 1)
@@ -44,8 +43,7 @@ struct AppKitSongTableTests {
             downloadedSongIDs: [second.id],
             onPlay: { _ in },
             onSyncTrackData: { _ in },
-            onRequestRemoval: { _ in },
-            onStartRadio: { _ in }
+            onRequestRemoval: { _ in }
         )
 
         #expect(tableView.selectedRow == 1)
@@ -68,8 +66,7 @@ struct AppKitSongTableTests {
             downloadedSongIDs: [],
             onPlay: { _ in },
             onSyncTrackData: { _ in },
-            onRequestRemoval: { _ in },
-            onStartRadio: { _ in }
+            onRequestRemoval: { _ in }
         )
 
         #expect(tableView.selectedRow == 0)
@@ -80,8 +77,7 @@ struct AppKitSongTableTests {
             downloadedSongIDs: [],
             onPlay: { _ in },
             onSyncTrackData: { _ in },
-            onRequestRemoval: { _ in },
-            onStartRadio: { _ in }
+            onRequestRemoval: { _ in }
         )
 
         #expect(tableView.selectedRow == -1)
@@ -101,8 +97,7 @@ struct AppKitSongTableTests {
                 playedSongID = song.id
             },
             onSyncTrackData: { _ in },
-            onRequestRemoval: { _ in },
-            onStartRadio: { _ in }
+            onRequestRemoval: { _ in }
         )
         let tableView = makeTableView(coordinator)
         tableView.selectRowIndexes(
@@ -127,8 +122,7 @@ struct AppKitSongTableTests {
             presentation: .library,
             onPlay: { _ in },
             onSyncTrackData: { _ in },
-            onRequestRemoval: { _ in },
-            onStartRadio: { _ in }
+            onRequestRemoval: { _ in }
         )
     }
 

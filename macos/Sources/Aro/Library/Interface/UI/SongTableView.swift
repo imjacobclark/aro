@@ -12,22 +12,9 @@ struct SongTableView: View {
     let storesLibraryCopy: Bool
     let removeSong: (Song) async throws -> Void
     let syncTrackData: (Song) async -> Void
-    /// Seeds a similarity station from a track. Optional because not every
-    /// surface has a reachable hub to compute one.
-    var startRadio: ((Song) async -> Void)?
 
     @State private var songPendingRemoval: Song?
     @State private var removalError: String?
-
-    /// Hoisted out of `body`: bridging the async `startRadio` into the table's
-    /// synchronous callback inline made the view-builder expression too complex for
-    /// the type checker to diagnose.
-    private var startRadioHandler: (@MainActor (Song) -> Void)? {
-        guard let startRadio else { return nil }
-        return { song in
-            Task { await startRadio(song) }
-        }
-    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -81,8 +68,7 @@ struct SongTableView: View {
                     },
                     onRequestRemoval: { song in
                         songPendingRemoval = song
-                    },
-                    onStartRadio: startRadioHandler
+                    }
                 )
             }
         }
