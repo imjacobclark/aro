@@ -72,6 +72,9 @@ struct MoreLikeThisSection: View {
                     }
                     .padding(.vertical, 2)
                 }
+                .transition(
+                    .opacity.combined(with: .move(edge: .top))
+                )
                 }
             }
             .padding(.horizontal, 20)
@@ -79,7 +82,9 @@ struct MoreLikeThisSection: View {
             // Definite height + priority so the shelf actually gets space in a
             // VStack shared with `AppKitSongTable`, an NSViewRepresentable that
             // otherwise takes every available point.
-            .frame(height: isCollapsible && !isExpanded ? 58 : 214)
+            .frame(height: isCollapsible && !isExpanded ? 58 : 214, alignment: .top)
+            // Keeps the row from spilling past the frame while it animates closed.
+            .clipped()
             .layoutPriority(1)
         }
     }
@@ -95,11 +100,11 @@ struct MoreLikeThisSection: View {
             } label: {
                 HStack(spacing: 8) {
                     SectionHeader(title: "More Like This", subtitle: subtitle)
+                    Spacer()
                     Image(systemName: "chevron.down")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.secondary)
                         .rotationEffect(.degrees(isExpanded ? 0 : -90))
-                    Spacer()
                 }
                 .contentShape(Rectangle())
             }
