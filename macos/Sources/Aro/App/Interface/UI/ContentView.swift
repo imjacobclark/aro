@@ -150,14 +150,20 @@ struct ContentView: View {
                     ArtistsView(
                         songs: store.allSongs,
                         playback: playback,
-                        syncTrackData: syncTrackData
+                        syncTrackData: syncTrackData,
+                        loadRadio: { contentHash in
+                            await homePlaylistsBridge.radio(contentHash: contentHash)
+                        }
                     )
                 } else if store.selection == .albums {
                     AlbumsView(
                         songs: store.allSongs,
                         playback: playback,
                         syncTrackData: syncTrackData,
-                        syncAlbumData: syncAlbumData
+                        syncAlbumData: syncAlbumData,
+                        loadRadio: { contentHash in
+                            await homePlaylistsBridge.radio(contentHash: contentHash)
+                        }
                     )
                 } else if store.selection == .stats {
                     StatsView(
@@ -218,7 +224,11 @@ struct ContentView: View {
                         storesLibraryCopy:
                             profileRegistry.activeProfile?.managedMusicPath != nil,
                         removeSong: removeSong,
-                        syncTrackData: syncTrackData
+                        syncTrackData: syncTrackData,
+                        loadRadio: { contentHash in
+                            await homePlaylistsBridge.radio(contentHash: contentHash)
+                        },
+                        allSongs: store.allSongs
                     )
                 }
                 }

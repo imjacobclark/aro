@@ -5,6 +5,7 @@ struct ArtistsView: View {
     let songs: [Song]
     let playback: PlaybackController
     let syncTrackData: (Song) async -> Void
+    var loadRadio: ((String) async -> ServerGeneratedPlaylist?)?
 
     @State private var selectedArtistID: LibraryArtist.ID?
     @State private var searchText = ""
@@ -20,6 +21,17 @@ struct ArtistsView: View {
 
     private var filteredArtists: [LibraryArtist] {
         artists.filter { FuzzySearch.matches(searchText, in: $0.name) }
+    }
+
+    /// Follows whatever is playing when that track is on screen, otherwise seeds
+    /// from the top of the list so the shelf is useful before playback starts.
+    private func radioSeed(for visible: [Song]) -> Song? {
+        if let current = playback.currentSong,
+           current.contentHash != nil,
+           visible.contains(where: { $0.id == current.id }) {
+            return current
+        }
+        return visible.first { $0.contentHash != nil }
     }
 
     var body: some View {
@@ -139,6 +151,16 @@ struct ArtistsView: View {
                     }
                     .padding(.horizontal, 28)
                     .padding(.bottom, 24)
+
+                    if let loadRadio {
+                        MoreLikeThisSection(
+                            seed: radioSeed(for: artist.albums.flatMap(\.songs)),
+                            allSongs: songs,
+                            loadRadio: loadRadio,
+                            playback: playback
+                        )
+                        .padding(.horizontal, 8)
+                    }
                 }
             }
             .background(AroTheme.contentSurface)

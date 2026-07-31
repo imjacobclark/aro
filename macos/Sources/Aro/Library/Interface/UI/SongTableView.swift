@@ -12,9 +12,26 @@ struct SongTableView: View {
     let storesLibraryCopy: Bool
     let removeSong: (Song) async throws -> Void
     let syncTrackData: (Song) async -> Void
+    /// Supplied only where a hub is reachable; when absent the "More Like This"
+    /// shelf below simply doesn't render.
+    var loadRadio: ((String) async -> ServerGeneratedPlaylist?)?
+    /// Full catalog for resolving the hub's content hashes — the visible `songs`
+    /// are usually a subset (one playlist, one folder).
+    var allSongs: [Song] = []
 
     @State private var songPendingRemoval: Song?
     @State private var removalError: String?
+
+    /// Prefer whatever is playing — the shelf then tracks what you're actually
+    /// listening to — falling back to the top of the list so it's still populated
+    /// before playback starts.
+    private var radioSeed: Song? {
+        if let current = playback.currentSong,
+           current.contentHash != nil {
+            return current
+        }
+        return songs.first { $0.contentHash != nil }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -70,6 +87,14 @@ struct SongTableView: View {
                         songPendingRemoval = song
                     }
                 )
+                if let loadRadio {
+                    MoreLikeThisSection(
+                        seed: radioSeed,
+                        allSongs: allSongs,
+                        loadRadio: loadRadio,
+                        playback: playback
+                    )
+                }
             }
         }
         .confirmationDialog(

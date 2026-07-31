@@ -14,6 +14,8 @@ struct PlaylistDetailView: View {
     let storesLibraryCopy: Bool
     let removeSong: (Song) async throws -> Void
     let syncTrackData: (Song) async -> Void
+    var loadRadio: ((String) async -> ServerGeneratedPlaylist?)?
+    var allSongs: [Song] = []
     let onBack: () -> Void
 
     var body: some View {
@@ -37,7 +39,9 @@ struct PlaylistDetailView: View {
                 usesStreamOnlyIcon: usesStreamOnlyIcon,
                 storesLibraryCopy: storesLibraryCopy,
                 removeSong: removeSong,
-                syncTrackData: syncTrackData
+                syncTrackData: syncTrackData,
+                loadRadio: loadRadio,
+                allSongs: allSongs
             )
         }
     }

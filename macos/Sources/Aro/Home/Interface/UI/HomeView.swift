@@ -57,6 +57,8 @@ struct HomeView: View {
                     storesLibraryCopy: storesLibraryCopy,
                     removeSong: removeSong,
                     syncTrackData: syncTrackData,
+                    loadRadio: loadRadio,
+                    allSongs: allSongs(),
                     onBack: { self.selectedPlaylist = nil }
                 )
             } else {

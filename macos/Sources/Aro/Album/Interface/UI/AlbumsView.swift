@@ -6,6 +6,7 @@ struct AlbumsView: View {
     let playback: PlaybackController
     let syncTrackData: (Song) async -> Void
     let syncAlbumData: ([Song]) async -> Void
+    var loadRadio: ((String) async -> ServerGeneratedPlaylist?)?
 
     @State private var selectedAlbumID: LibraryAlbum.ID?
     @State private var searchText = ""
@@ -26,6 +27,17 @@ struct AlbumsView: View {
                 in: $0.name + " " + $0.artistName
             )
         }
+    }
+
+    /// Follows whatever is playing when that track is on screen, otherwise seeds
+    /// from the top of the list so the shelf is useful before playback starts.
+    private func radioSeed(for visible: [Song]) -> Song? {
+        if let current = playback.currentSong,
+           current.contentHash != nil,
+           visible.contains(where: { $0.id == current.id }) {
+            return current
+        }
+        return visible.first { $0.contentHash != nil }
     }
 
     var body: some View {
@@ -164,6 +176,16 @@ struct AlbumsView: View {
                     )
                     .padding(.horizontal, 28)
                     .padding(.bottom, 24)
+
+                    if let loadRadio {
+                        MoreLikeThisSection(
+                            seed: radioSeed(for: album.songs),
+                            allSongs: songs,
+                            loadRadio: loadRadio,
+                            playback: playback
+                        )
+                        .padding(.horizontal, 8)
+                    }
                 }
             }
             .background(AroTheme.contentSurface)
