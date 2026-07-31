@@ -130,19 +130,7 @@ final class LibraryRuntime {
             stats: SQLiteStatsQuery(database: database)
         )
         libraryStore = LibraryStore(
-            scanFolder: ScanWatchedFolder(
-                scanner: AudioScanner(
-                    contentHashCache: SQLiteContentHashCache(
-                        database: database
-                    )
-                ),
-                catalog: libraryCatalog
-            ),
-            analyzeSongLoudness: AnalyzeSongLoudness(
-                analyzer: loudnessService
-            ),
             manageFolders: ManageWatchedFolders(catalog: libraryCatalog),
-            monitorFactory: FSEventsFolderMonitorFactory(),
             folderAccess: SecurityScopedFolderAccess(),
             legacyFolders: InMemoryLegacyWatchedFolderStore()
         )

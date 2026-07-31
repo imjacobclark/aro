@@ -65,6 +65,19 @@ final class ProgressiveMediaCoordinator: @unchecked Sendable {
         let configuration = URLSessionConfiguration.default
         configuration.httpMaximumConnectionsPerHost =
             Self.maximumConnectionsPerHost
+        // Without this, Foundation's default 60s request timeout applies. A demand
+        // read competes for the same `maximumConnectionsPerHost` slots as every
+        // other resource's background read-ahead and speculative next-track
+        // prefetch — when that pool is saturated (e.g. right after switching
+        // songs), a newly issued high-priority fetch can sit queued behind that
+        // congestion with no way to fail fast, so it just hangs until the default
+        // 60s timeout finally releases it — surfacing as "wait about a minute and
+        // it plays" (observed directly). A short timeout here lets `fetch(block:)`'s
+        // existing 250ms/750ms retry-with-backoff recover in a couple of seconds
+        // instead. 64KB range requests should complete in well under this even on a
+        // slow connection.
+        configuration.timeoutIntervalForRequest = 12
+        configuration.timeoutIntervalForResource = 20
         if let pinnedTLSFingerprint, !pinnedTLSFingerprint.isEmpty {
             session = URLSession(
                 configuration: configuration,
@@ -246,6 +259,17 @@ final class ProgressiveMediaResource: @unchecked Sendable {
     private var availableBlocks = Set<Int64>()
     private var inFlightBlocks = Set<Int64>()
     private var inFlightPrefetchBlocks = Set<Int64>()
+    /// Handles for the `Task` wrapping each in-flight `fetch(block:)` call, kept
+    /// so `cancelDemand()` can actually stop them. `URLSession`'s async
+    /// `data(for:)` observes Swift's cooperative cancellation and aborts the
+    /// underlying HTTP request when its wrapping `Task` is cancelled — without
+    /// this, an abandoned resource's background reads kept running to
+    /// completion regardless, holding `maximumConnectionsPerHost` slots that a
+    /// newly active track's demand fetches then had to queue behind (observed
+    /// directly: dozens of range requests for a track the user had already
+    /// skipped past, still arriving a minute later while a freshly clicked
+    /// track sat waiting).
+    private var inFlightTasks: [Int64: Task<Void, Never>] = [:]
     private var queuedDemandBlocks: [Int64] = []
     private var queuedDemandBlockSet = Set<Int64>()
     private var queuedPrefetchBlocks: [Int64] = []
@@ -432,8 +456,24 @@ final class ProgressiveMediaResource: @unchecked Sendable {
         queuedDemandBlockSet = []
         queuedPrefetchBlocks = []
         queuedPrefetchBlockSet = []
+        // Only the *queued* work above is dropped by clearing those arrays — the
+        // fetches already dispatched to the network keep running to completion
+        // regardless, consuming a `maximumConnectionsPerHost` slot the whole
+        // time. Actually cancelling their Tasks (outside the lock, since
+        // `Task.cancel()` may synchronously resume a waiter) is what makes an
+        // abandoned track stop competing with whichever one is now active.
+        // `inFlightBlocks`/`inFlightPrefetchBlocks` are left alone here — the
+        // cancelled fetch's own completion path (see `fetch(block:)`'s
+        // `CancellationError`/`.cancelled` handling) is the single place that
+        // clears those, so a fresh `startFetchLocked` can't race a duplicate
+        // request for a block whose cancellation hasn't unwound yet.
+        let tasksToCancel = inFlightTasks
+        inFlightTasks.removeAll()
         condition.broadcast()
         condition.unlock()
+        for task in tasksToCancel.values {
+            task.cancel()
+        }
     }
 
     func endActiveStreaming() {
@@ -556,7 +596,7 @@ final class ProgressiveMediaResource: @unchecked Sendable {
         if isPrefetch {
             inFlightPrefetchBlocks.insert(block)
         }
-        Task { [weak self] in
+        inFlightTasks[block] = Task { [weak self] in
             await self?.fetch(block: block)
         }
     }
@@ -710,6 +750,16 @@ final class ProgressiveMediaResource: @unchecked Sendable {
             }
                 return
             } catch {
+                // A deliberate `cancelDemand()` cancellation, not a real failure —
+                // don't retry it (that would defeat the point of cancelling) and
+                // don't poison the whole resource via `recordFailure` (which sets
+                // a permanent `failure` that blocks every future fetch on it,
+                // even though this resource may simply be resumed later).
+                if error is CancellationError
+                    || (error as? URLError)?.code == .cancelled {
+                    clearInFlightOnCancel(block: block)
+                    return
+                }
                 if attempt < 2, isRetryable(error) {
                     try? await Task.sleep(
                         for: .milliseconds(attempt == 0 ? 250 : 750)
@@ -720,6 +770,15 @@ final class ProgressiveMediaResource: @unchecked Sendable {
                 return
             }
         }
+    }
+
+    private func clearInFlightOnCancel(block: Int64) {
+        condition.lock()
+        inFlightBlocks.remove(block)
+        inFlightPrefetchBlocks.remove(block)
+        inFlightTasks.removeValue(forKey: block)
+        condition.broadcast()
+        condition.unlock()
     }
 
     private func isRetryable(_ error: any Error) -> Bool {
@@ -747,6 +806,9 @@ final class ProgressiveMediaResource: @unchecked Sendable {
             availableBlocks.formUnion(blocks)
             inFlightBlocks.subtract(blocks)
             inFlightPrefetchBlocks.subtract(blocks)
+            for completed in blocks {
+                inFlightTasks.removeValue(forKey: completed)
+            }
             removeQueuedBlocksLocked(in: blocks)
             let sample = Double(data.count) / elapsed
             measuredThroughput = measuredThroughput == 0
@@ -779,6 +841,7 @@ final class ProgressiveMediaResource: @unchecked Sendable {
         if let block {
             inFlightBlocks.remove(block)
             inFlightPrefetchBlocks.remove(block)
+            inFlightTasks.removeValue(forKey: block)
         }
         failLocked(error)
         let handler = notify ? integrityFailureHandler : nil

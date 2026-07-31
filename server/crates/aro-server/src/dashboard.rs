@@ -35,6 +35,7 @@ pub fn router(state: DashboardState) -> Router {
         .route("/api/v1/library", get(library))
         .route("/api/v1/metadata", get(metadata))
         .route("/api/v1/live", get(live))
+        .route("/api/v1/queue", get(queue))
         .route("/api/v1/devices", get(devices))
         .route("/api/v1/sources", get(sources))
         .route("/api/v1/host", get(host))
@@ -89,6 +90,15 @@ async fn live(State(state): State<DashboardState>) -> Response {
         .into_response(),
         Err(error) => dashboard_error(error),
     }
+}
+
+async fn queue(State(state): State<DashboardState>) -> Response {
+    let status = state.app.sources.identification().status().await;
+    Json(json!({
+        "generated_at": chrono::Utc::now(),
+        "queue": status,
+    }))
+    .into_response()
 }
 
 async fn history(State(state): State<DashboardState>) -> Response {
@@ -278,6 +288,17 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:9px;bord
 <div class="card"><div class="label">Albums</div><div class="value" id="albums">—</div></div>
 </section>
 <section class="panel"><h2>Now playing</h2><div id="live" class="empty">Waiting for playback activity…</div></section>
+<section class="panel"><h2>Identification queue</h2>
+<div class="grid" style="grid-template-columns:repeat(5,minmax(0,1fr));margin-bottom:14px">
+<div class="card"><div class="label">Queued</div><div class="value" id="q-queued">—</div></div>
+<div class="card"><div class="label">Groups queued</div><div class="value" id="q-groups">—</div></div>
+<div class="card"><div class="label">Processed</div><div class="value" id="q-processed">—</div></div>
+<div class="card"><div class="label">Failed</div><div class="value" id="q-failed">—</div></div>
+<div class="card"><div class="label">Status</div><div class="value" id="q-status">—</div></div>
+</div>
+<div id="q-last" class="muted"></div>
+<div id="q-error" class="muted"></div>
+</section>
 <section class="split">
 <div class="panel"><h2>Format breakdown</h2><table><thead><tr><th>Format</th><th>Tracks</th><th>Storage</th></tr></thead><tbody id="formats"></tbody></table></div>
 <div class="panel"><h2>Metadata coverage</h2><div id="metadata"></div></div>
@@ -290,8 +311,11 @@ async function json(path){let r=await fetch(path,{cache:"no-store"});if(!r.ok)th
 function set(id,v){$(id).textContent=v}
 async function refresh(){
  try{
-  const [s,l,h]=await Promise.all([json("/api/v1/stats"),json("/api/v1/live"),json("/api/v1/host")]);
+  const [s,l,h,q]=await Promise.all([json("/api/v1/stats"),json("/api/v1/live"),json("/api/v1/host"),json("/api/v1/queue")]);
   set("name",h.display_name);set("active",num(s.live.active_listeners));set("connected",num(s.live.connected_devices));set("transfers",num(s.transport.active_transfers));set("tracks",num(s.library.track_count));set("bytes",bytes(s.library.file_size_bytes));set("hours",num(Math.round(s.listening.total_seconds/3600))+" h");set("plays",num(s.listening.logged_plays));set("artists",num(s.library.artist_count));set("albums",num(s.library.album_count));
+  const qu=q.queue;set("q-queued",num(qu.queued));set("q-groups",num(qu.groups_queued));set("q-processed",num(qu.processed));set("q-failed",num(qu.failed));set("q-status",qu.in_flight?"Identifying…":"Idle");
+  $("q-last").textContent=qu.last_group?`Last group: ${qu.last_group.folder} · ${qu.last_group.member_count} file(s) · ${qu.last_group.accepted?"accepted":"not accepted"}${qu.last_group.release_title?" · "+qu.last_group.release_title:""}`:"";
+  $("q-error").textContent=qu.last_error?`Last error: ${qu.last_error}`:"";
   $("formats").innerHTML=s.library.formats.map(x=>`<tr><td>${escapeHtml(x.name)}</td><td>${num(x.track_count)}</td><td>${bytes(x.file_size_bytes)}</td></tr>`).join("");
   $("metadata").innerHTML=["title","artist","album"].map(k=>`<div style="margin:14px 0"><div class="label">${k[0].toUpperCase()+k.slice(1)} · ${pct(s.metadata[k+"_coverage"])}</div><div class="bar"><div class="fill" style="width:${pct(s.metadata[k+"_coverage"])}"></div></div></div>`).join("");
   $("live").className=l.sessions.length?"":"empty";$("live").innerHTML=l.sessions.length?l.sessions.map(x=>{let p=x.playback,t=x.track,d=p.duration_seconds||0,pos=p.position_seconds||0;return `<div class="session"><div><div class="track">${escapeHtml(t.title||"Unknown track")}</div><div class="muted">${escapeHtml(t.artist||"Unknown artist")} · ${escapeHtml(x.device_name)} · ${escapeHtml(p.state)}</div><div class="bar"><div class="fill" style="width:${d?Math.min(100,pos/d*100):0}%"></div></div></div><div class="muted">${Math.floor(pos/60)}:${String(Math.floor(pos%60)).padStart(2,"0")}</div></div>`}).join(""):"No active listeners.";
@@ -317,5 +341,14 @@ mod tests {
         assert!(INDEX.contains(r#"const units=["KB","MB","GB","TB","PB"]"#));
         assert!(!INDEX.contains(r#"notation:"compact""#));
         assert!(!INDEX.contains(r#"unitDisplay:"narrow""#));
+    }
+
+    #[test]
+    fn dashboard_surfaces_identification_queue_detail() {
+        assert!(INDEX.contains("/api/v1/queue"));
+        assert!(INDEX.contains("q-queued"));
+        assert!(INDEX.contains("q-groups"));
+        assert!(INDEX.contains("q-processed"));
+        assert!(INDEX.contains("q-failed"));
     }
 }

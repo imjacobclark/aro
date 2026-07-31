@@ -13,9 +13,24 @@ struct AlbumArtworkView: View {
     var body: some View {
         Group {
             if let image = ArtworkImageCache.image(for: data, maxDimension: maxDimension) {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFill()
+                // `Color.clear` (not the image) is what's measured here: it accepts
+                // whatever size the caller's `.frame()` proposes, the overlaid image
+                // fills that box — overflowing on its short axis, since a non-square
+                // cover scaled to *fill* a square must — and `.clipped()` then cuts
+                // that overflow off at `Color.clear`'s bounds.
+                //
+                // Applying `.scaledToFill().clipped()` directly to the image instead
+                // does nothing: `scaledToFill` reports the *overflowing* size as the
+                // image view's own bounds, so the clip is a no-op against them, and
+                // the artwork spills over whatever is laid out below it (observed
+                // with non-square covers overlapping their own title/artist text).
+                Color.clear
+                    .overlay {
+                        Image(nsImage: image)
+                            .resizable()
+                            .scaledToFill()
+                    }
+                    .clipped()
             } else {
                 ZStack {
                     LinearGradient(
@@ -90,9 +105,18 @@ private enum ArtworkImageCache {
         ) else {
             return NSImage(data: data)
         }
+        // `NSSize` is in *points*, but the thumbnail was rendered at
+        // `maxDimension * scale` *pixels* — passing the pixel counts straight
+        // through would declare an intrinsic size `scale`× too large on a Retina
+        // display. Dividing back out keeps the image's declared size equal to the
+        // point size it's meant to occupy, while retaining the full-resolution
+        // backing store.
         return NSImage(
             cgImage: thumbnail,
-            size: NSSize(width: thumbnail.width, height: thumbnail.height)
+            size: NSSize(
+                width: CGFloat(thumbnail.width) / scale,
+                height: CGFloat(thumbnail.height) / scale
+            )
         )
     }
 }

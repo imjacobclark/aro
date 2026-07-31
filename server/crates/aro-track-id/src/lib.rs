@@ -9,6 +9,7 @@
 
 pub mod acoustid;
 pub mod album;
+pub mod audio_features;
 #[cfg(test)]
 mod characterization;
 #[cfg(test)]

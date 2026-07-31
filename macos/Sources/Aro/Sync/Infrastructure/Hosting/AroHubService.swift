@@ -1,11 +1,17 @@
 import Foundation
 import Observation
+import OSLog
 import ServiceManagement
 import AroCommon
 
 @MainActor
 @Observable
 final class AroHubService {
+    private static let logger = Logger(
+        subsystem: "com.othyn.aro",
+        category: "HubService"
+    )
+
     private let service = SMAppService.agent(
         plistName: "com.aro.server.plist"
     )
@@ -34,18 +40,64 @@ final class AroHubService {
         }
     }
 
+    /// How many times to attempt re-registration, and how long to wait between tries.
+    /// Registration legitimately fails for a short window right after an install:
+    /// `ditto` replaces the app bundle underneath a `ServiceManagement` daemon that
+    /// still has the *previous* build's code signature cached, and until it
+    /// re-evaluates the new one it rejects the registration. A single attempt
+    /// therefore loses the race on the first launch after every install — which is
+    /// precisely when re-registering matters most — and the helper then stays
+    /// unregistered for that whole session, SIGKILLed on each respawn as "Code
+    /// Signature Invalid", until the app happens to be relaunched.
+    private static let registrationAttempts = 5
+    private static let registrationRetryDelay = Duration.milliseconds(400)
+
     func restartForUpgrade() async {
+        Self.logger.info("restarting Background Service LaunchAgent")
         do {
             try await service.unregister()
-            for _ in 0 ..< 20 where service.status != .notRegistered {
-                try await Task.sleep(for: .milliseconds(100))
-            }
-            try service.register()
-            errorMessage = nil
         } catch {
-            errorMessage = "The Background Service was updated but could not be "
-                + "restarted: \(error.localizedDescription)"
+            // An unregister failure is not itself fatal — the service may already be
+            // deregistered, which is the state we want anyway. Registration below is
+            // what actually has to succeed.
+            Self.logger.info(
+                "Background Service unregister reported: \(error.localizedDescription, privacy: .public)"
+            )
         }
+        // `for…where` filters iterations rather than breaking, so the previous
+        // version always burned its full budget instead of proceeding as soon as the
+        // service had actually deregistered.
+        for _ in 0 ..< 20 {
+            guard service.status != .notRegistered else { break }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+
+        var lastError: (any Error)?
+        for attempt in 1 ... Self.registrationAttempts {
+            do {
+                try service.register()
+                errorMessage = nil
+                Self.logger.info(
+                    "Background Service LaunchAgent re-registered on attempt \(attempt, privacy: .public)"
+                )
+                return
+            } catch {
+                lastError = error
+                Self.logger.warning(
+                    "Background Service registration attempt \(attempt, privacy: .public) failed: \(error.localizedDescription, privacy: .public)"
+                )
+                if attempt < Self.registrationAttempts {
+                    try? await Task.sleep(for: Self.registrationRetryDelay)
+                }
+            }
+        }
+
+        let description = lastError?.localizedDescription ?? "unknown error"
+        Self.logger.error(
+            "Background Service LaunchAgent restart failed after \(Self.registrationAttempts, privacy: .public) attempts: \(description, privacy: .public)"
+        )
+        errorMessage = "The Background Service was updated but could not be "
+            + "restarted: \(description)"
     }
 
     func ensureCompatibleHelper(dataLocation: String) async {
@@ -71,22 +123,62 @@ final class AroHubService {
             errorMessage = SyncPreferences.protectedLocationMessage
             return
         }
+        // Always restarts the LaunchAgent once per app launch, rather than only
+        // when the currently running helper is unreachable/incompatible. SMAppService
+        // validates a helper's ad-hoc code signature at *registration* time, not on
+        // every relaunch — if `aro-server`'s binary changed since the last
+        // registration (any app update changes it, since ad-hoc signing hashes
+        // binary content) but the previously registered helper process is still
+        // alive and responding fine, skipping this leaves the registration stale
+        // until that process happens to exit for any reason, at which point macOS's
+        // launch-constraint enforcement SIGKILLs it on respawn with "Code Signature
+        // Invalid" (observed directly, recurring — see
+        // `aro_macos_helper_relaunch_requires_quit` in the project's notes). A short
+        // unregister/register round-trip once per launch is cheap next to that.
         let client = HubControlClient(
             socketURL: URL(fileURLWithPath: dataLocation)
                 .appendingPathComponent("control.sock")
         )
-        if await waitForCompatibleHelper(client) {
-            return
+
+        // Retries the *whole* unregister/register cycle, not just registration.
+        // `register()` reporting success is not evidence the helper actually runs:
+        // right after an install, `smd` accepts the registration while still holding
+        // the previous build's cached code signature, then launch-constraint
+        // enforcement SIGKILLs every spawn as "Code Signature Invalid"
+        // (`OS_REASON_CODESIGNING`, exit 78/EX_CONFIG, with `runs` climbing in
+        // `launchctl print`). Re-registering once the cache has caught up is what
+        // actually clears it — which is why manually quitting and relaunching the app
+        // has been the only reliable recovery. Doing that here makes the app
+        // self-heal on the launch where it matters instead of leaving the helper dead
+        // for the whole session.
+        for attempt in 1 ... Self.helperStartAttempts {
+            await restartForUpgrade()
+            if errorMessage == nil, await waitForCompatibleHelper(client) {
+                errorMessage = nil
+                Self.logger.info(
+                    "Background Service listening after attempt \(attempt, privacy: .public)"
+                )
+                return
+            }
+            Self.logger.warning(
+                "Background Service not listening after attempt \(attempt, privacy: .public)"
+            )
+            if attempt < Self.helperStartAttempts {
+                try? await Task.sleep(for: Self.helperStartRetryDelay)
+            }
         }
-        await restartForUpgrade()
-        guard errorMessage == nil else { return }
-        guard await waitForCompatibleHelper(client) else {
-            errorMessage = "The Aro Background Service is enabled but did not start "
-                + "listening. Use Restart Background Service in Advanced Devices settings."
-            return
-        }
-        errorMessage = nil
+
+        Self.logger.error("Background Service did not start listening after restart")
+        errorMessage = "The Aro Background Service is enabled but did not start "
+            + "listening. Use Restart Background Service in Advanced Devices settings."
     }
+
+    /// How many full unregister/register/verify cycles to run before giving up, and
+    /// how long to pause between them — long enough for `smd` to re-evaluate a
+    /// just-replaced bundle's signature. See the call site for why one cycle isn't
+    /// enough.
+    private static let helperStartAttempts = 3
+    private static let helperStartRetryDelay = Duration.seconds(2)
 
     private func waitForCompatibleHelper(
         _ client: HubControlClient
@@ -348,6 +440,14 @@ private struct MacHubConfigurationWriter {
         enabled = false
         bind = "0.0.0.0:4849"
         """
+        // Fixed at the server's own initialization, same as the standalone CLI's
+        // `init --mode`: once `aro.toml` exists, its `storage_mode` is preserved
+        // verbatim on every rewrite, never re-derived from `importMode`. Only a
+        // brand-new config (no prior file) takes the current preference — this is
+        // the only "first write" a storage mode is allowed to come from.
+        let storageMode = existing.flatMap(Self.storageMode)
+            ?? defaults.string(forKey: "sync.host.importMode")
+            ?? "managed"
         let content = """
         hub_id = "\(hubID)"
         display_name = "\(Host.current().localizedName ?? "Aro")"
@@ -358,7 +458,7 @@ private struct MacHubConfigurationWriter {
         control_socket = "\(escapedDataLocation)/control.sock"
         admin_token = "\(secrets.adminToken)"
         advertise_mdns = true
-        storage_mode = "\(defaults.string(forKey: "sync.host.importMode") ?? "managed")"
+        storage_mode = "\(storageMode)"
         source_rescan_seconds = 300
         acoustid_api_key = "\(escapedAcoustidApiKey)"
 
@@ -393,6 +493,19 @@ private struct MacHubConfigurationWriter {
         return lines[start..<end]
             .joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func storageMode(_ contents: String) -> String? {
+        for line in contents.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("storage_mode") else { continue }
+            guard let start = trimmed.firstIndex(of: "\""),
+                  let end = trimmed.lastIndex(of: "\""), start < end else {
+                return nil
+            }
+            return String(trimmed[trimmed.index(after: start)..<end])
+        }
+        return nil
     }
 
     private func stableValue(

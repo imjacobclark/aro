@@ -14,7 +14,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 #[serde(tag = "command", rename_all = "snake_case")]
 enum ControlCommand {
     OpenPairing,
@@ -89,12 +89,76 @@ enum ControlCommand {
     /// Auto-generated playlists derived from this hub's canonical analytics (listening
     /// events, favourites, MusicBrainz mood tags) — see `crate::playlists`. Keyed by
     /// content hash; the macOS app maps hashes onto its local catalog and renders. The
-    /// hub generates, clients never do.
-    Playlists,
+    /// hub generates, clients never do. `utc_offset_minutes` (the caller's local UTC
+    /// offset, positive east of UTC) scopes the Morning Rotation/Late Night playlists
+    /// to *this* caller's timezone rather than the hub's.
+    Playlists {
+        #[serde(default)]
+        utc_offset_minutes: i32,
+    },
+    /// Tier 3 "seed-track radio" (see `crate::playlists::radio`) — the tracks most
+    /// similar to `content_hash` by measured audio-feature vector, nearest first,
+    /// with the seed itself in front. `None`/empty result if the seed hasn't been
+    /// analyzed yet.
+    Radio {
+        content_hash: String,
+        #[serde(default = "default_radio_limit")]
+        limit: usize,
+    },
+    /// Pulls this hub's own operation log, oldest-first after `after_sequence` —
+    /// the local-profile analogue of `/v1/exchange`'s pull side, for a
+    /// same-machine client replicating its library from its own hub instead of
+    /// scanning independently. Unlike `/v1/exchange`, this needs no device
+    /// credential or pairing: the control socket is already filesystem-permission
+    /// gated to the local user, and a hub never needs to authenticate to itself.
+    ChangesAfter {
+        after_sequence: u64,
+        #[serde(default = "default_changes_after_limit")]
+        limit: u32,
+    },
+    /// Resolves a content hash to its on-disk path so a same-machine client can
+    /// open the file directly for playback, instead of reading its bytes through
+    /// the socket the way `Blob` does (appropriate for artwork, not for streaming
+    /// an entire song into memory first).
+    TrackLocation {
+        hash: String,
+    },
+    /// Reads a single config field by dotted key (e.g. `dashboard.bind`) — the
+    /// control-socket analogue of `aro-server config get`, so callers on this
+    /// machine (the macOS app's Settings UI) never hand-write `aro.toml`.
+    GetConfig {
+        key: String,
+    },
+    /// Writes a single config field and persists it, same validation as the
+    /// CLI's `config set`. Never applies live — every field is only read at
+    /// `serve()` startup, so the caller must restart the server to apply it.
+    SetConfig {
+        key: String,
+        value: String,
+    },
+    /// Verifies every blob's bytes still hash to the content hash the store
+    /// recorded for it — the control-socket analogue of `aro-server verify`,
+    /// runnable against the live store without stopping the server (unlike
+    /// `migrate`, which needs the exclusive instance lock).
+    Verify,
+    /// Deletes an unreferenced blob (one no track points at) by content hash —
+    /// the control-socket analogue of `aro-server purge`. Only reachable from a
+    /// hash a prior `Verify` named, by convention of callers, not enforced here.
+    Purge {
+        hash: String,
+    },
     Status,
 }
 
-#[derive(Deserialize)]
+fn default_changes_after_limit() -> u32 {
+    500
+}
+
+fn default_radio_limit() -> usize {
+    crate::playlists::RADIO_DEFAULT_LIMIT
+}
+
+#[derive(Deserialize, Debug)]
 struct IdentifyTrackRequest {
     content_hash: String,
     path: PathBuf,
@@ -113,7 +177,7 @@ struct ControlResponse {
     error: Option<String>,
 }
 
-const CONTROL_PROTOCOL_VERSION: u16 = 7;
+const CONTROL_PROTOCOL_VERSION: u16 = 9;
 
 pub async fn start(path: &Path, state: Arc<AppState>) -> Result<JoinHandle<()>> {
     if let Some(parent) = path.parent() {
@@ -143,7 +207,14 @@ pub async fn start(path: &Path, state: Arc<AppState>) -> Result<JoinHandle<()>> 
     }))
 }
 
+/// A control-socket client (this app's own macOS helper connections) that connects
+/// but never finishes sending its request would otherwise leak its `tokio::spawn`ed
+/// task forever, blocked on `read_until` — this is the local-socket equivalent of an
+/// HTTP request timeout.
+const CONTROL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 async fn respond(mut stream: UnixStream, state: Arc<AppState>) -> Result<()> {
+    let started = std::time::Instant::now();
     let response = match handle(&mut stream, state).await {
         Ok(result) => ControlResponse {
             ok: true,
@@ -151,7 +222,11 @@ async fn respond(mut stream: UnixStream, state: Arc<AppState>) -> Result<()> {
             error: None,
         },
         Err(error) => {
-            tracing::warn!(%error, "control socket request rejected");
+            tracing::warn!(
+                %error,
+                elapsed_ms = started.elapsed().as_millis(),
+                "control socket request rejected"
+            );
             ControlResponse {
                 ok: false,
                 result: None,
@@ -159,6 +234,11 @@ async fn respond(mut stream: UnixStream, state: Arc<AppState>) -> Result<()> {
             }
         }
     };
+    tracing::debug!(
+        ok = response.ok,
+        elapsed_ms = started.elapsed().as_millis(),
+        "control socket request handled"
+    );
     stream.write_all(&serde_json::to_vec(&response)?).await?;
     stream.shutdown().await?;
     Ok(())
@@ -168,12 +248,15 @@ async fn handle(stream: &mut UnixStream, state: Arc<AppState>) -> Result<Value> 
     let mut request = Vec::new();
     {
         let mut reader = BufReader::new(stream);
-        reader.read_until(b'\n', &mut request).await?;
+        tokio::time::timeout(CONTROL_READ_TIMEOUT, reader.read_until(b'\n', &mut request))
+            .await
+            .map_err(|_| anyhow::anyhow!("control request timed out waiting for data"))??;
     }
     if request.len() > 64 * 1_024 {
         anyhow::bail!("control request too large");
     }
     let command: ControlCommand = serde_json::from_slice(&request)?;
+    tracing::debug!(command = ?command, "control command received");
     let result = match command {
         ControlCommand::OpenPairing => {
             let code = state.pairing.open(Duration::minutes(5));
@@ -272,10 +355,62 @@ async fn handle(stream: &mut UnixStream, state: Arc<AppState>) -> Result<Value> 
                 )
             })
         }
-        ControlCommand::Playlists => {
+        ControlCommand::Playlists {
+            utc_offset_minutes,
+        } => {
             let store = state.store.clone();
             let seeds = tokio::task::spawn_blocking(move || store.playlist_seeds()).await??;
-            serde_json::to_value(crate::playlists::generate(&seeds, chrono::Utc::now()))?
+            serde_json::to_value(crate::playlists::generate(
+                &seeds,
+                chrono::Utc::now(),
+                utc_offset_minutes,
+            ))?
+        }
+        ControlCommand::Radio {
+            content_hash,
+            limit,
+        } => {
+            let store = state.store.clone();
+            let seeds = tokio::task::spawn_blocking(move || store.playlist_seeds()).await??;
+            serde_json::to_value(crate::playlists::radio(&seeds, &content_hash, limit))?
+        }
+        ControlCommand::ChangesAfter {
+            after_sequence,
+            limit,
+        } => serde_json::to_value(state.store.changes_after(after_sequence, limit)?)?,
+        ControlCommand::TrackLocation { hash } => {
+            let path = state
+                .store
+                .blob_path_for_download(&hash)?
+                .ok_or_else(|| anyhow::anyhow!("track not found"))?;
+            json!({"path": path})
+        }
+        ControlCommand::GetConfig { key } => {
+            let config = crate::config::Config::load(&state.config_path)?;
+            let value = serde_json::to_value(&config)?;
+            let field = key
+                .split('.')
+                .try_fold(&value, |current, part| current.get(part))
+                .ok_or_else(|| anyhow::anyhow!("unknown config field: {key}"))?;
+            json!({"value": field})
+        }
+        ControlCommand::SetConfig { key, value } => {
+            let mut config = crate::config::Config::load(&state.config_path)?;
+            config.set_field(&key, &value)?;
+            config.save(&state.config_path)?;
+            json!({"ok": true, "restart_required": true})
+        }
+        ControlCommand::Verify => {
+            let store = state.store.clone();
+            let (count, failures) =
+                tokio::task::spawn_blocking(move || store.verify_all()).await??;
+            json!({"verified": count, "failures": failures})
+        }
+        ControlCommand::Purge { hash } => {
+            let store = state.store.clone();
+            let removed =
+                tokio::task::spawn_blocking(move || store.purge_blob(&hash)).await??;
+            json!({"removed": removed})
         }
         ControlCommand::Status => json!({
             "control_protocol_version": CONTROL_PROTOCOL_VERSION,
@@ -287,4 +422,190 @@ async fn handle(stream: &mut UnixStream, state: Arc<AppState>) -> Result<Value> 
         }),
     };
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{config::Config, config::StorageMode, sources::SourceManager};
+    use aro_sync_store::HubStore;
+    use aro_track_id::{
+        IdentificationQueue, audio_features::AudioFeatureQueue, loudness::LoudnessQueue,
+    };
+
+    async fn test_state() -> (Arc<AppState>, tempfile::TempDir) {
+        let root = tempfile::tempdir().unwrap();
+        let data_dir = root.path().join("Hub");
+        let store = HubStore::open(&data_dir).unwrap();
+        let hub_id = Uuid::new_v4();
+        let identification = IdentificationQueue::start(store.clone(), hub_id, None);
+        let loudness = LoudnessQueue::start(store.clone(), hub_id);
+        let audio_features =
+            AudioFeatureQueue::start(Arc::new(|_, _, _| Ok(())), Arc::new(|_, _, _| {}));
+        let sources = SourceManager::start(
+            store.clone(),
+            hub_id,
+            StorageMode::Managed,
+            3_600,
+            identification,
+            loudness,
+            audio_features,
+        )
+        .unwrap();
+
+        let mut config = Config::default();
+        config.data_dir = data_dir;
+        config.hub_id = hub_id;
+        let config_path = root.path().join("aro.toml");
+        config.save(&config_path).unwrap();
+
+        let state = Arc::new(AppState {
+            config_path,
+            hub_id,
+            display_name: "Test Hub".into(),
+            admin_token: config.admin_token.clone(),
+            admin_allow: config.admin_allow.clone(),
+            pairing: aro_sync_core::PairingManager::new("test-fingerprint".into()),
+            jobs: aro_sync_core::JobRegistry::default(),
+            store,
+            sources,
+            telemetry: crate::http::RuntimeTelemetry::default(),
+            identification_available: false,
+        });
+        (state, root)
+    }
+
+    async fn dispatch(state: &Arc<AppState>, command: Value) -> Result<Value> {
+        let (mut client, mut server) = UnixStream::pair()?;
+        let mut request = serde_json::to_vec(&command)?;
+        request.push(b'\n');
+        client.write_all(&request).await?;
+        client.shutdown().await?;
+        handle(&mut server, state.clone()).await
+    }
+
+    #[tokio::test]
+    async fn changes_after_returns_operations_past_the_given_sequence() {
+        let (state, _root) = test_state().await;
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("Song.flac"), b"audio").unwrap();
+        state.sources.add(source.path()).unwrap();
+
+        let all = dispatch(
+            &state,
+            json!({"command": "changes_after", "after_sequence": 0}),
+        )
+        .await
+        .unwrap();
+        let all = all.as_array().unwrap();
+        assert!(!all.is_empty());
+
+        let latest_sequence = state.store.latest_sequence().unwrap();
+        let none = dispatch(
+            &state,
+            json!({
+                "command": "changes_after",
+                "after_sequence": latest_sequence
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(none.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn track_location_resolves_a_managed_import_to_its_blob_path() {
+        let (state, _root) = test_state().await;
+        let source = tempfile::tempdir().unwrap();
+        let song = source.path().join("Song.flac");
+        std::fs::write(&song, b"audio").unwrap();
+        state.sources.add(source.path()).unwrap();
+        let hash = state.store.content_hashes().unwrap().into_iter().next().unwrap();
+
+        let result = dispatch(
+            &state,
+            json!({"command": "track_location", "hash": hash}),
+        )
+        .await
+        .unwrap();
+        let path = result["path"].as_str().unwrap();
+        assert!(std::path::Path::new(path).is_file());
+    }
+
+    #[tokio::test]
+    async fn track_location_rejects_an_unknown_hash() {
+        let (state, _root) = test_state().await;
+        let result = dispatch(
+            &state,
+            json!({"command": "track_location", "hash": "0".repeat(64)}),
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_and_set_config_round_trip_through_the_file() {
+        let (state, _root) = test_state().await;
+
+        dispatch(
+            &state,
+            json!({
+                "command": "set_config",
+                "key": "display_name",
+                "value": "Living Room"
+            }),
+        )
+        .await
+        .unwrap();
+
+        let result = dispatch(
+            &state,
+            json!({"command": "get_config", "key": "display_name"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["value"].as_str().unwrap(), "Living Room");
+    }
+
+    #[tokio::test]
+    async fn set_config_rejects_storage_mode() {
+        let (state, _root) = test_state().await;
+        let result = dispatch(
+            &state,
+            json!({
+                "command": "set_config",
+                "key": "storage_mode",
+                "value": "referenced"
+            }),
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn verify_reports_a_deleted_blob_as_a_failure() {
+        let (state, _root) = test_state().await;
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("Song.flac"), b"audio").unwrap();
+        state.sources.add(source.path()).unwrap();
+        let hash = state.store.content_hashes().unwrap().into_iter().next().unwrap();
+        let path = state.store.blob_path_for_download(&hash).unwrap().unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        let result = dispatch(&state, json!({"command": "verify"})).await.unwrap();
+        let failures = result["failures"].as_array().unwrap();
+        assert!(failures.iter().any(|value| value.as_str() == Some(hash.as_str())));
+    }
+
+    #[tokio::test]
+    async fn purge_reports_whether_a_blob_existed() {
+        let (state, _root) = test_state().await;
+        let missing = dispatch(
+            &state,
+            json!({"command": "purge", "hash": "0".repeat(64)}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(missing["removed"], json!(false));
+    }
 }

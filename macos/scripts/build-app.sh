@@ -8,6 +8,7 @@ app_name=Aro
 app_dir="$project_dir/dist/$app_name.app"
 icon_source="$project_dir/Assets/app-icon.png"
 info_plist="$project_dir/Packaging/Info.plist"
+asset_catalog="$project_dir/Assets.xcassets"
 app_version=${APP_VERSION:-0.0.0}
 build_number=${BUILD_NUMBER:-$(date -u +%Y%m%d%H%M%S)}
 
@@ -18,6 +19,11 @@ fi
 
 if [[ ! -f "$info_plist" ]]; then
     print -u2 "Missing app metadata: $info_plist"
+    exit 1
+fi
+
+if [[ ! -d "$asset_catalog" ]]; then
+    print -u2 "Missing asset catalog: $asset_catalog"
     exit 1
 fi
 
@@ -119,6 +125,37 @@ do
 done
 
 iconutil --convert icns "$iconset" --output "$staged_resources/$app_name.icns"
+
+# Declaring a bundled "AccentColor" is the only way to make AppKit-drawn chrome that
+# ignores SwiftUI's `.tint()` — sidebar/source-list selection highlighting, in
+# particular — follow Aro's violet instead of the user's system-wide accent color
+# preference. `swift build` alone (running the raw executable, not this .app) won't
+# pick this up, since it's only discoverable from a real bundle's Resources.
+#
+# `--accent-color-name` is what makes the compiled asset actually *apply*: it is
+# paired with `NSAccentColorName` in Packaging/Info.plist, without which AppKit
+# never looks the colour up and silently falls back to the stock system blue.
+# Xcode sets both from a build setting; this bundle is assembled by hand, so they
+# are spelled out here and asserted below.
+# actool reports failures as XML on *stdout* and still exits non-zero, so its output is
+# captured and echoed on failure rather than discarded — silently swallowing it turns a
+# broken accent colour into a build that "succeeds" and looks stock-blue at runtime.
+if ! actool_output=$(xcrun actool "$asset_catalog" \
+    --compile "$staged_resources" \
+    --platform macosx \
+    --minimum-deployment-target 13.0 \
+    --accent-color AccentColor \
+    --output-partial-info-plist "$staging_dir/assetcatalog-info.plist" 2>&1); then
+    print -u2 "actool failed to compile $asset_catalog:"
+    print -u2 "$actool_output"
+    exit 1
+fi
+
+if [[ ! -f "$staged_resources/Assets.car" ]]; then
+    print -u2 "actool did not produce Assets.car — the app accent colour would fall back to system blue"
+    exit 1
+fi
+
 chmod 755 "$staged_macos/$app_name"
 chmod 755 "$staged_macos/aro-server"
 
@@ -133,6 +170,15 @@ codesign --verify --strict \
     "$staged_macos/aro-server"
 codesign --verify --deep --strict "$staged_app"
 plutil -lint "$staged_contents/Info.plist" >/dev/null
+
+# Pairs with the actool invocation above: the compiled colour is inert unless the
+# bundle also names it here, and the failure mode is silent (stock blue chrome).
+accent_name=$(/usr/libexec/PlistBuddy -c "Print :NSAccentColorName" \
+    "$staged_contents/Info.plist" 2>/dev/null || true)
+if [[ "$accent_name" != "AccentColor" ]]; then
+    print -u2 "Info.plist is missing NSAccentColorName=AccentColor — accent colour would fall back to system blue"
+    exit 1
+fi
 
 mkdir -p "$project_dir/dist"
 rm -rf "$app_dir"

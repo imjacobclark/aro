@@ -23,6 +23,7 @@ struct LibrarySettingsView: View {
     @State private var pairingSession: PairingSession?
     @State private var addDeviceError: String?
     @State private var showingConnect = false
+    @State private var showingCreateLibrary = false
     @State private var connectionInitialAddress = ""
     @State private var showingOfflineSettings = false
     @State private var deviceToRemove: ControlledHubDevice?
@@ -37,6 +38,8 @@ struct LibrarySettingsView: View {
             if !registry.isConfigured && !registry.setupDismissed {
                 LibrarySetupView(
                     registry: registry,
+                    service: service,
+                    preferences: preferences,
                     activateProfile: activateProfile,
                     completeRemoteConnection: completeRemoteConnection
                 )
@@ -60,6 +63,17 @@ struct LibrarySettingsView: View {
                     ? registry.activeProfile?.hubID
                     : nil
             )
+        }
+        .sheet(isPresented: $showingCreateLibrary) {
+            LibrarySetupView(
+                registry: registry,
+                service: service,
+                preferences: preferences,
+                activateProfile: activateProfile,
+                completeRemoteConnection: completeRemoteConnection,
+                onFinished: { showingCreateLibrary = false }
+            )
+            .frame(minWidth: 760, minHeight: 560)
         }
         .sheet(isPresented: $showingOfflineSettings) {
             if let profile = registry.activeProfile {
@@ -195,7 +209,7 @@ struct LibrarySettingsView: View {
                     .font(.system(size: 30))
                     .foregroundStyle(.tint)
                     .frame(width: 48, height: 48)
-                    .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+                    .background(AroTheme.violet.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
                 VStack(alignment: .leading, spacing: 7) {
                     Text(profile.name)
                         .font(.title2.weight(.semibold))
@@ -285,7 +299,11 @@ struct LibrarySettingsView: View {
                 }
             }
 
-            Button("Connect to Another Library…") {
+            Button("Create New Library…") {
+                showingCreateLibrary = true
+            }
+
+            Button("Connect to an Existing Library…") {
                 connectionInitialAddress = ""
                 showingConnect = true
             }
@@ -499,6 +517,7 @@ struct LibrarySettingsView: View {
             libraryFiles: libraryFiles,
             activeProfile: registry.activeProfile,
             registry: registry,
+            library: library,
             activateProfile: activateProfile
         )
     }
@@ -516,7 +535,7 @@ struct LibrarySettingsView: View {
                     registry.setupDismissed = false
                 }
                 .buttonStyle(.borderedProminent)
-                Button("Connect to a Library") {
+                Button("Connect to an Existing Library") {
                     showingConnect = true
                 }
             }
@@ -815,7 +834,7 @@ struct LibrarySettingsView: View {
         .font(.caption)
         .padding(.horizontal, 7)
         .padding(.vertical, 3)
-        .background(Color.accentColor.opacity(0.13), in: Capsule())
+        .background(AroTheme.violet.opacity(0.13), in: Capsule())
     }
 
     private func policyTitle(_ policy: OfflineDownloadPolicy) -> String {

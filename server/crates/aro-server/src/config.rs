@@ -46,6 +46,7 @@ pub struct Config {
     pub storage_mode: StorageMode,
     pub source_rescan_seconds: u64,
     pub dashboard: DashboardConfig,
+    pub dlna: DlnaConfig,
     /// Personal AcoustID API key used for background track identification. Empty
     /// disables identification entirely (its background queue is never started) —
     /// this is the expected state until a user enters a key in Settings.
@@ -70,6 +71,29 @@ impl Default for DashboardConfig {
         Self {
             enabled: false,
             bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 4849),
+        }
+    }
+}
+
+/// Optional DLNA media server. DLNA renderers speak plain HTTP with no
+/// authentication, so enabling this exposes the whole library to any device on
+/// the LAN — it is off by default and its bind is held to the same
+/// private/loopback constraint as every other listener.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DlnaConfig {
+    pub enabled: bool,
+    pub bind: SocketAddr,
+    /// Name renderers display for this server; empty falls back to `display_name`.
+    pub friendly_name: String,
+}
+
+impl Default for DlnaConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 4850),
+            friendly_name: String::new(),
         }
     }
 }
@@ -102,6 +126,7 @@ impl Default for Config {
             storage_mode: StorageMode::Managed,
             source_rescan_seconds: 300,
             dashboard: DashboardConfig::default(),
+            dlna: DlnaConfig::default(),
             acoustid_api_key: String::new(),
             musicbrainz_user_agent: default_musicbrainz_user_agent(),
         }
@@ -128,6 +153,14 @@ impl Config {
             config.admin_token = value;
         }
         if let Ok(value) = std::env::var("ARO_STORAGE_MODE") {
+            if store_exists(&config.data_dir) {
+                bail!(
+                    "storage_mode is fixed at initialization and cannot be changed via \
+                     ARO_STORAGE_MODE once a store exists at {}; initialize a fresh data_dir \
+                     to switch modes",
+                    config.data_dir.display()
+                );
+            }
             config.storage_mode = match value.to_ascii_lowercase().as_str() {
                 "managed" => StorageMode::Managed,
                 "referenced" => StorageMode::Referenced,
@@ -136,6 +169,9 @@ impl Config {
         }
         if let Ok(value) = std::env::var("ACOUSTID_API_KEY") {
             config.acoustid_api_key = value;
+        }
+        if let Ok(value) = std::env::var("ARO_DLNA_BIND") {
+            config.dlna.bind = value.parse().context("invalid ARO_DLNA_BIND")?;
         }
         if let Ok(value) = std::env::var("ARO_ADMIN_ALLOW") {
             config.admin_allow = value
@@ -161,6 +197,56 @@ impl Config {
         Ok(())
     }
 
+    /// Changes a single field by name, for the CLI's `config set` and the
+    /// control socket's `SetConfig`, so neither platform hand-writes TOML.
+    /// `storage_mode` is deliberately not settable here: it is fixed at
+    /// initialization (see `Config::load`'s `ARO_STORAGE_MODE` handling) —
+    /// switching modes means initializing a fresh `data_dir`.
+    pub fn set_field(&mut self, key: &str, value: &str) -> Result<()> {
+        match key {
+            "storage_mode" => bail!(
+                "storage_mode is fixed at initialization and cannot be changed; \
+                 initialize a fresh data_dir to switch modes"
+            ),
+            "display_name" => self.display_name = value.to_string(),
+            "bind" => self.bind = value.parse().context("invalid bind address")?,
+            "advertise_mdns" => {
+                self.advertise_mdns = value.parse().context("advertise_mdns must be true or false")?;
+            }
+            "source_rescan_seconds" => {
+                self.source_rescan_seconds = value
+                    .parse()
+                    .context("source_rescan_seconds must be a positive integer")?;
+            }
+            "dashboard.enabled" => {
+                self.dashboard.enabled =
+                    value.parse().context("dashboard.enabled must be true or false")?;
+            }
+            "dashboard.bind" => {
+                self.dashboard.bind = value.parse().context("invalid dashboard.bind address")?;
+            }
+            "dlna.enabled" => {
+                self.dlna.enabled = value.parse().context("dlna.enabled must be true or false")?;
+            }
+            "dlna.bind" => {
+                self.dlna.bind = value.parse().context("invalid dlna.bind address")?;
+            }
+            "dlna.friendly_name" => self.dlna.friendly_name = value.to_string(),
+            "acoustid_api_key" => self.acoustid_api_key = value.to_string(),
+            "musicbrainz_user_agent" => self.musicbrainz_user_agent = value.to_string(),
+            "admin_allow" => {
+                self.admin_allow = value
+                    .split(',')
+                    .map(|entry| entry.trim().parse())
+                    .collect::<std::result::Result<_, _>>()
+                    .context("invalid admin_allow; expected comma-separated CIDR networks")?;
+            }
+            other => bail!("unknown or unsettable config field: {other}"),
+        }
+        self.validate()?;
+        Ok(())
+    }
+
     fn validate(&self) -> Result<()> {
         if self.admin_token.len() < 16 {
             bail!("admin_token must contain at least 16 characters");
@@ -177,9 +263,22 @@ impl Config {
                 bail!("dashboard.bind must use a different port from the sync listener");
             }
         }
+        if self.dlna.enabled {
+            validate_lan_bind(self.dlna.bind, "dlna.bind")?;
+            if self.dlna.bind.port() == self.bind.port() {
+                bail!("dlna.bind must use a different port from the sync listener");
+            }
+            if self.dashboard.enabled && self.dlna.bind.port() == self.dashboard.bind.port() {
+                bail!("dlna.bind must use a different port from the dashboard");
+            }
+        }
         validate_lan_bind(self.bind, "bind")?;
         Ok(())
     }
+}
+
+fn store_exists(data_dir: &Path) -> bool {
+    data_dir.join("hub.sqlite3").is_file()
 }
 
 fn validate_lan_bind(bind: SocketAddr, field: &str) -> Result<()> {
@@ -277,5 +376,92 @@ mod admin_allow_tests {
         assert!(config.validate().is_err());
         config.dashboard.bind = "127.0.0.1:4849".parse().unwrap();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn dlna_is_disabled_on_a_separate_port_by_default() {
+        let config = Config::default();
+        assert!(!config.dlna.enabled);
+        assert_eq!(config.dlna.bind.port(), 4850);
+    }
+
+    #[test]
+    fn enabled_dlna_rejects_public_addresses_and_port_collisions() {
+        let mut config = Config::default();
+        config.dlna.enabled = true;
+        config.dlna.bind = "8.8.8.8:4850".parse().unwrap();
+        assert!(config.validate().is_err());
+        config.dlna.bind = "127.0.0.1:4848".parse().unwrap();
+        assert!(config.validate().is_err(), "should reject the sync port");
+        config.dashboard.enabled = true;
+        config.dlna.bind = "127.0.0.1:4849".parse().unwrap();
+        assert!(config.validate().is_err(), "should reject the dashboard port");
+        config.dlna.bind = "127.0.0.1:4850".parse().unwrap();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn set_field_updates_dlna_fields() {
+        let mut config = Config::default();
+        config.set_field("dlna.enabled", "true").unwrap();
+        config.set_field("dlna.bind", "127.0.0.1:4850").unwrap();
+        config.set_field("dlna.friendly_name", "Living Room Aro").unwrap();
+        assert!(config.dlna.enabled);
+        assert_eq!(config.dlna.friendly_name, "Living Room Aro");
+        assert!(
+            config.set_field("dlna.bind", "8.8.8.8:4850").is_err(),
+            "should reject a public dlna bind via validate()"
+        );
+    }
+
+    #[test]
+    fn set_field_rejects_storage_mode() {
+        let mut config = Config::default();
+        assert!(config.set_field("storage_mode", "referenced").is_err());
+        assert_eq!(config.storage_mode, StorageMode::Managed);
+    }
+
+    #[test]
+    fn set_field_updates_known_fields_and_validates() {
+        let mut config = Config::default();
+        config.set_field("display_name", "Living Room").unwrap();
+        assert_eq!(config.display_name, "Living Room");
+        config.set_field("dashboard.enabled", "true").unwrap();
+        config.set_field("dashboard.bind", "127.0.0.1:4849").unwrap();
+        assert!(config.dashboard.enabled);
+        assert!(
+            config
+                .set_field("dashboard.bind", "8.8.8.8:4849")
+                .is_err(),
+            "should reject a public dashboard bind via validate()"
+        );
+    }
+
+    #[test]
+    fn set_field_rejects_unknown_keys() {
+        let mut config = Config::default();
+        assert!(config.set_field("nonexistent", "value").is_err());
+    }
+
+    #[test]
+    fn storage_mode_env_override_is_ignored_once_a_store_exists() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_dir = directory.path().join("Hub");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("hub.sqlite3"), b"").unwrap();
+
+        let config_path = directory.path().join("aro.toml");
+        let mut config = Config::default();
+        config.data_dir = data_dir;
+        config.storage_mode = StorageMode::Managed;
+        config.save(&config_path).unwrap();
+
+        // SAFETY: single-threaded test process; no other thread reads/writes
+        // this env var concurrently.
+        unsafe { std::env::set_var("ARO_STORAGE_MODE", "referenced") };
+        let result = Config::load(&config_path);
+        unsafe { std::env::remove_var("ARO_STORAGE_MODE") };
+
+        assert!(result.is_err(), "expected the override to be rejected");
     }
 }

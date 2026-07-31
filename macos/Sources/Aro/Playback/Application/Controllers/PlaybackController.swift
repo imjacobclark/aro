@@ -380,7 +380,19 @@ final class PlaybackController {
             stallRetryCount = 0
         }
 
-        listeningSession.end()
+        // A deliberate move to a *different* song while the current one was still
+        // early (under 30s, or under half its length) is a real "skipped" signal for
+        // Tier 1 behavioural playlists — distinct from a same-song reload (queue
+        // reconciliation, a playback-settings change, a stall retry), which restarts
+        // the exact song at `currentIndex` and isn't the user moving on from
+        // anything. Computed here, before `duration`/`elapsedTime` below are
+        // overwritten with the *new* song's values.
+        if !isStallRetry, let currentIndex, currentIndex != index, duration > 0 {
+            let wasSkipped = elapsedTime < min(30, duration / 2)
+            listeningSession.end(skipped: wasSkipped)
+        } else {
+            listeningSession.end()
+        }
         stopProgressUpdates()
         preparationTask?.cancel()
         preparationTask = nil

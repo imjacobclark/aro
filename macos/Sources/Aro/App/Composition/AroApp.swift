@@ -93,6 +93,19 @@ struct AroApp: App {
         _nowPlayingCoordinator = State(initialValue: nowPlayingCoordinator)
         _runtime = State(initialValue: runtime)
         _profileRegistry = State(initialValue: registry)
+
+        // The local hub is always-on infrastructure, not an opt-in "sharing"
+        // feature: every `.local` profile (including a brand-new one, where
+        // `selectedProfile` is still nil) needs its own hub running to scan,
+        // hash, and identify anything, whether or not the user ever turns on
+        // LAN sharing/pairing on top of it.
+        if selectedProfile == nil || selectedProfile?.kind == .local {
+            if syncPreferences.dataLocation.isEmpty {
+                self.syncPreferences.dataLocation =
+                    SyncPreferences.recommendedDataLocation
+            }
+            hubService.setEnabled(true)
+        }
     }
 
     var body: some Scene {
@@ -124,6 +137,27 @@ struct AroApp: App {
                 await hubService.ensureCompatibleHelper(
                     dataLocation: syncPreferences.dataLocation
                 )
+                // Keeps this Mac's local database current with its own hub's
+                // operation log on an ongoing basis -- new identification
+                // results, loudness analysis, and safety-rescan changes all
+                // land here, not just what importInitialFoldersAndSync pulled
+                // in once at profile-activation time. Tied to `runtime` via
+                // `.id(ObjectIdentifier(runtime))` above, so switching
+                // profiles cancels and restarts this loop against the newly
+                // active one.
+                while !Task.isCancelled {
+                    if profileRegistry.activeProfile?.kind == .local,
+                       hubService.isEnabled,
+                       !syncPreferences.dataLocation.isEmpty {
+                        let control = HubControlClient(
+                            socketURL: URL(
+                                fileURLWithPath: syncPreferences.dataLocation
+                            ).appendingPathComponent("control.sock")
+                        )
+                        await synchronizeLocalHub(client: control, into: runtime)
+                    }
+                    try? await Task.sleep(for: .seconds(5))
+                }
             }
         }
         .windowStyle(.hiddenTitleBar)
@@ -169,21 +203,86 @@ struct AroApp: App {
             profile: profile,
             localAdminToken: syncPreferences.localAdminToken
         )
-        let initialPaths = profile.managedMusicPath.map { [$0] }
-            ?? profile.referencedMusicPaths
-        for path in initialPaths {
-            replacement.libraryStore.addFolder(URL(fileURLWithPath: path))
-        }
         replacement.libraryStore.selection = .settings
         runtime = replacement
         nowPlayingCoordinator.rebind(to: replacement.playbackController)
-        if profile.kind == .local, profile.sharingEnabled {
+        // The local hub is always-on: every `.local` profile gets one, whether
+        // or not LAN sharing/pairing is ever turned on on top of it (see
+        // `init()`'s matching comment). Folders are imported through it rather
+        // than scanned in-process -- this Mac's library is a replica of its
+        // own hub's operation log (`LocalHubReplicaCoordinator`), not a
+        // second, independent scanner.
+        if profile.kind == .local {
             if syncPreferences.dataLocation.isEmpty {
                 syncPreferences.dataLocation =
                     SyncPreferences.recommendedDataLocation
             }
             hubService.setEnabled(true)
+            // Always the user's actual chosen folder(s), never
+            // `managedMusicPath` itself: that's an empty destination
+            // directory at this point (see `LibrarySetupView.createLibrary()`)
+            // -- the *source* to import is always `referencedMusicPaths`,
+            // with `mode` alone telling the hub whether to copy it into its
+            // own managed blob store or just index it in place.
+            let initialPaths = profile.referencedMusicPaths
+            let importMode: HubImportMode = profile.managedMusicPath != nil
+                ? .managed
+                : .referenced
+            Task {
+                await importInitialFoldersAndSync(
+                    paths: initialPaths,
+                    mode: importMode,
+                    into: replacement
+                )
+            }
         }
+    }
+
+    /// Imports this profile's initial folders through the local hub (its
+    /// `SourceManager`, not this app's own scanner) and pulls the resulting
+    /// library state back into `runtime`'s local database. Best-effort: a
+    /// helper that hasn't finished starting yet just means nothing to import
+    /// this pass -- the periodic sync in `body`'s `.task` will catch up once
+    /// it has.
+    private func importInitialFoldersAndSync(
+        paths: [String],
+        mode: HubImportMode,
+        into runtime: LibraryRuntime
+    ) async {
+        await hubService.ensureCompatibleHelper(
+            dataLocation: syncPreferences.dataLocation
+        )
+        guard hubService.isEnabled, !syncPreferences.dataLocation.isEmpty else {
+            return
+        }
+        let control = HubControlClient(
+            socketURL: URL(fileURLWithPath: syncPreferences.dataLocation)
+                .appendingPathComponent("control.sock")
+        )
+        for path in paths {
+            _ = try? await control.importFolder(path: path, mode: mode)
+        }
+        await synchronizeLocalHub(client: control, into: runtime)
+    }
+
+    /// Pulls this Mac's own local hub's operation log into `runtime`'s local
+    /// database via `LocalHubReplicaCoordinator`, then refreshes the UI's
+    /// folder/song lists to reflect whatever landed -- including a brand-new
+    /// synthetic "folder" row the coordinator may just have created, which
+    /// `LibraryStore`'s in-memory folder list doesn't know about until asked
+    /// to re-read the database.
+    private func synchronizeLocalHub(
+        client: HubControlClient,
+        into runtime: LibraryRuntime
+    ) async {
+        guard let status = try? await client.status() else { return }
+        let coordinator = LocalHubReplicaCoordinator(
+            hubID: status.hubID,
+            client: client,
+            operations: runtime.syncOperationStore
+        )
+        _ = try? await coordinator.synchronize()
+        runtime.libraryStore.refreshFoldersFromDatabase()
     }
 
     /// Client-only action: disconnects this Mac from a remote library it

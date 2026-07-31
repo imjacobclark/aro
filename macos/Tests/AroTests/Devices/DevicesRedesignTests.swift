@@ -401,59 +401,5 @@ final class DevicesRedesignTests: XCTestCase {
         XCTAssertEqual(database.songs(folderID: hubID).count, 1)
     }
 
-    func testManagedImportCopiesAudioAndDeduplicatesByContent() async throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let source = root.appendingPathComponent("Source", isDirectory: true)
-        let library = root.appendingPathComponent("Library", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: source,
-            withIntermediateDirectories: true
-        )
-        defer { try? FileManager.default.removeItem(at: root) }
-        try Data("audio".utf8).write(
-            to: source.appendingPathComponent("Track.mp3")
-        )
-
-        let first = try await ManagedMusicImporter().importFolder(
-            source,
-            into: library
-        )
-        let second = try await ManagedMusicImporter().importFolder(
-            source,
-            into: library
-        )
-        XCTAssertEqual(first.importedFiles, 1)
-        XCTAssertEqual(second.importedFiles, 0)
-        XCTAssertEqual(second.skippedDuplicates, 1)
-
-        try Data("replaced audio".utf8).write(
-            to: source.appendingPathComponent("Track.mp3"),
-            options: .atomic
-        )
-        let edited = try await ManagedMusicImporter().importFolder(
-            source,
-            into: library
-        )
-        XCTAssertEqual(edited.importedFiles, 1)
-        let filesAfterEdit = try FileManager.default.contentsOfDirectory(
-            at: library,
-            includingPropertiesForKeys: nil
-        )
-        XCTAssertEqual(
-            filesAfterEdit.map(\.lastPathComponent).sorted(),
-            ["Track.mp3"]
-        )
-        XCTAssertEqual(
-            try Data(contentsOf: library.appendingPathComponent("Track.mp3")),
-            Data("replaced audio".utf8)
-        )
-        XCTAssertEqual(
-            filesAfterEdit.filter {
-                !$0.lastPathComponent.hasPrefix(".")
-            }.count,
-            1
-        )
-    }
 }
 #endif

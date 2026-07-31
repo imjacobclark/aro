@@ -144,7 +144,7 @@ struct ConnectLibrarySheet: View {
                     .padding()
                     .background(
                         selectedHubID == hub.id
-                            ? Color.accentColor.opacity(0.12)
+                            ? AroTheme.violet.opacity(0.12)
                             : Color.secondary.opacity(0.08),
                         in: RoundedRectangle(cornerRadius: 12)
                     )

@@ -176,7 +176,7 @@ final class LibraryDatabaseTests: XCTestCase {
             trackID: track.libraryID
         )
         Thread.sleep(forTimeInterval: 0.02)
-        recorder.endSession(sessionID: sessionID, completed: true)
+        recorder.endSession(sessionID: sessionID, completed: true, skipped: false)
 
         let reopened = LibraryDatabase(url: databaseURL)
         let stats = SQLiteStatsQuery(database: reopened)

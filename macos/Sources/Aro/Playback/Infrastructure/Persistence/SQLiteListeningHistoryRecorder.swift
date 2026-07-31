@@ -40,22 +40,25 @@ struct SQLiteListeningHistoryRecorder: ListeningHistoryRecording {
         update(
             sessionID: sessionID,
             ended: false,
-            completed: false
+            completed: false,
+            skipped: false
         )
     }
 
-    func endSession(sessionID: UUID, completed: Bool) {
+    func endSession(sessionID: UUID, completed: Bool, skipped: Bool) {
         update(
             sessionID: sessionID,
             ended: true,
-            completed: completed
+            completed: completed,
+            skipped: skipped
         )
     }
 
     private func update(
         sessionID: UUID,
         ended: Bool,
-        completed: Bool
+        completed: Bool,
+        skipped: Bool
     ) {
         database.withConnection { connection in
             let now = Date().timeIntervalSince1970
@@ -66,7 +69,8 @@ struct SQLiteListeningHistoryRecorder: ListeningHistoryRecording {
                     + MAX(0, MIN(? - last_heartbeat_at, 10)),
                     last_heartbeat_at = ?,
                     ended_at = CASE WHEN ? THEN ? ELSE ended_at END,
-                    completed = MAX(completed, ?)
+                    completed = MAX(completed, ?),
+                    skipped = MAX(skipped, ?)
                 WHERE id = ? AND ended_at IS NULL
                 """,
                 connection: connection
@@ -79,7 +83,8 @@ struct SQLiteListeningHistoryRecorder: ListeningHistoryRecording {
             sqlite3_bind_int(statement, 3, ended ? 1 : 0)
             sqlite3_bind_double(statement, 4, now)
             sqlite3_bind_int(statement, 5, completed ? 1 : 0)
-            bind(sessionID.uuidString, to: statement, at: 6)
+            sqlite3_bind_int(statement, 6, skipped ? 1 : 0)
+            bind(sessionID.uuidString, to: statement, at: 7)
             sqlite3_step(statement)
             if ended, sqlite3_changes(connection) == 1 {
                 appendCompletedSession(
@@ -103,9 +108,10 @@ struct SQLiteListeningHistoryRecorder: ListeningHistoryRecording {
                  payload, physical_millis, logical_counter, created_at)
             SELECT ?, device_id, 'listening_session', id, 'upsert',
                    printf(
-                       '{"track_id":"%s","started_at":%f,"ended_at":%f,"listened_seconds":%f,"completed":%s}',
+                       '{"track_id":"%s","started_at":%f,"ended_at":%f,"listened_seconds":%f,"completed":%s,"skipped":%s}',
                        track_id, started_at, ended_at, listened_seconds,
-                       CASE completed WHEN 1 THEN 'true' ELSE 'false' END
+                       CASE completed WHEN 1 THEN 'true' ELSE 'false' END,
+                       CASE skipped WHEN 1 THEN 'true' ELSE 'false' END
                    ),
                    ?, 0, ?
             FROM listening_sessions WHERE id = ?

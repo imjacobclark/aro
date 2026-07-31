@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import MatterController
+import OSLog
 import Security
 import AroCommon
 
@@ -112,6 +113,11 @@ final class PinnedTLSDelegate: NSObject, URLSessionDelegate, @unchecked Sendable
 }
 
 actor AroSyncClient {
+    private static let logger = Logger(
+        subsystem: "com.othyn.aro",
+        category: "SyncClient"
+    )
+
     private let baseURL: URL
     private let session: URLSession
     private let encoder: JSONEncoder
@@ -147,6 +153,29 @@ actor AroSyncClient {
         session = URLSession(
             configuration: configuration,
             delegate: PairingTLSDelegate(),
+            delegateQueue: nil
+        )
+        encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        encoder.dateEncodingStrategy = .iso8601
+        decoder = JSONDecoder.aroSyncProtocol()
+        adminToken = nil
+    }
+
+    /// Pinned like the main initializer, but with a deliberately short timeout: this
+    /// is used by `HubEndpointResolver` to probe candidate addresses, several of which
+    /// are expected to be dead. A black-holed address must cost a couple of seconds,
+    /// not the 15s a real request is allowed, or probing would be slower than the
+    /// timeout it exists to avoid.
+    init(probeBaseURL baseURL: URL, pinnedTLSFingerprint: String) {
+        self.baseURL = baseURL
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.waitsForConnectivity = false
+        configuration.timeoutIntervalForRequest = 3
+        configuration.timeoutIntervalForResource = 4
+        session = URLSession(
+            configuration: configuration,
+            delegate: PinnedTLSDelegate(fingerprint: pinnedTLSFingerprint),
             delegateQueue: nil
         )
         encoder = JSONEncoder()
@@ -404,13 +433,48 @@ actor AroSyncClient {
         )
     }
 
+    /// Remote equivalent of `HubControlClient.identificationResults(after:)`.
+    /// Identification results are keyed by content hash and deliberately live outside
+    /// the CRDT operation log, so they never arrive through `exchange` the way track
+    /// metadata does — without this a remote client could never receive them, leaving
+    /// tracks with no *embedded* cover stuck on the placeholder artwork even though
+    /// the hub had already fetched and cached one for them.
+    ///
+    /// `after` is the `identifiedAt` of the last result already merged (0 fetches
+    /// everything), and results come back oldest-first so that cursor can simply
+    /// advance to the last element's `identifiedAt`.
+    func identificationResults(
+        after: Int64,
+        credential: HubDeviceCredential
+    ) async throws -> [IdentificationResult] {
+        try await getAuthenticated(
+            "v1/identification/results?after=\(after)",
+            credential: credential
+        )
+    }
+
     /// Remote equivalent of `HubControlClient.playlists()` — the hub's auto-generated
     /// playlists, keyed by content hash, for a pure remote client's Home screen.
+    /// `utcOffsetMinutes` scopes Morning Rotation/Late Night to this device's timezone.
     func playlists(
-        credential: HubDeviceCredential
+        credential: HubDeviceCredential,
+        utcOffsetMinutes: Int = TimeZone.current.secondsFromGMT() / 60
     ) async throws -> [ServerGeneratedPlaylist] {
         try await getAuthenticated(
-            "v1/playlists",
+            "v1/playlists?utc_offset_minutes=\(utcOffsetMinutes)",
+            credential: credential
+        )
+    }
+
+    /// Remote equivalent of `HubControlClient.radio(contentHash:)` — Tier 3
+    /// "seed-track radio" for a pure remote client.
+    func radio(
+        contentHash: String,
+        limit: Int = 30,
+        credential: HubDeviceCredential
+    ) async throws -> ServerGeneratedPlaylist? {
+        try await getAuthenticated(
+            "v1/radio/\(contentHash)?limit=\(limit)",
             credential: credential
         )
     }
@@ -419,13 +483,15 @@ actor AroSyncClient {
         _ snapshot: PlaybackActivitySnapshot,
         credential: HubDeviceCredential?
     ) async throws {
-        var request = URLRequest(url: try url(for: "v1/playback/activity"))
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        authenticate(&request, credential: credential)
-        request.httpBody = try encoder.encode(snapshot)
-        let (data, response) = try await session.data(for: request)
-        try validate(response, data: data)
+        try await logged("POST", "v1/playback/activity") {
+            var request = URLRequest(url: try url(for: "v1/playback/activity"))
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            authenticate(&request, credential: credential)
+            request.httpBody = try encoder.encode(snapshot)
+            let (data, response) = try await session.data(for: request)
+            try validate(response, data: data)
+        }
     }
 
     func downloadBlob(
@@ -433,13 +499,15 @@ actor AroSyncClient {
         from offset: UInt64,
         credential: HubDeviceCredential? = nil
     ) async throws -> Data {
-        var request = URLRequest(url: try url(for: "v1/blobs/\(hash)"))
-        request.httpMethod = "GET"
-        request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range")
-        authenticate(&request, credential: credential)
-        let (data, response) = try await session.data(for: request)
-        try validate(response, data: data)
-        return data
+        try await logged("GET", "v1/blobs/\(hash)") {
+            var request = URLRequest(url: try url(for: "v1/blobs/\(hash)"))
+            request.httpMethod = "GET"
+            request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range")
+            authenticate(&request, credential: credential)
+            let (data, response) = try await session.data(for: request)
+            try validate(response, data: data)
+            return data
+        }
     }
 
     func uploadBlob(
@@ -469,22 +537,24 @@ actor AroSyncClient {
                   !chunk.isEmpty else {
                 throw AroSyncClientError.invalidResponse
             }
-            var request = URLRequest(
-                url: try url(for: "v1/blobs/\(expectedHash)")
-            )
-            request.httpMethod = "PUT"
-            request.setValue(
-                "application/octet-stream",
-                forHTTPHeaderField: "Content-Type"
-            )
-            request.setValue("identity", forHTTPHeaderField: "Content-Encoding")
-            request.setValue(String(offset), forHTTPHeaderField: "X-Aro-Offset")
-            authenticate(&request, credential: credential)
-            let (data, response) = try await session.upload(
-                for: request,
-                from: chunk
-            )
-            try validate(response, data: data)
+            try await logged("PUT", "v1/blobs/\(expectedHash)") {
+                var request = URLRequest(
+                    url: try url(for: "v1/blobs/\(expectedHash)")
+                )
+                request.httpMethod = "PUT"
+                request.setValue(
+                    "application/octet-stream",
+                    forHTTPHeaderField: "Content-Type"
+                )
+                request.setValue("identity", forHTTPHeaderField: "Content-Encoding")
+                request.setValue(String(offset), forHTTPHeaderField: "X-Aro-Offset")
+                authenticate(&request, credential: credential)
+                let (data, response) = try await session.upload(
+                    for: request,
+                    from: chunk
+                )
+                try validate(response, data: data)
+            }
             offset += UInt64(chunk.count)
         }
         let _: AroBlobStatus = try await postAuthenticated(
@@ -522,24 +592,28 @@ actor AroSyncClient {
     private func get<Response: Decodable>(
         _ path: String
     ) async throws -> Response {
-        let (data, response) = try await session.data(
-            from: try url(for: path)
-        )
-        try validate(response, data: data)
-        return try decoder.decode(Response.self, from: data)
+        try await logged("GET", path) {
+            let (data, response) = try await session.data(
+                from: try url(for: path)
+            )
+            try validate(response, data: data)
+            return try decoder.decode(Response.self, from: data)
+        }
     }
 
     private func post<Body: Encodable, Response: Decodable>(
         _ path: String,
         body: Body
     ) async throws -> Response {
-        var request = URLRequest(url: try url(for: path))
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try encoder.encode(body)
-        let (data, response) = try await session.data(for: request)
-        try validate(response, data: data)
-        return try decoder.decode(Response.self, from: data)
+        try await logged("POST", path) {
+            var request = URLRequest(url: try url(for: path))
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try encoder.encode(body)
+            let (data, response) = try await session.data(for: request)
+            try validate(response, data: data)
+            return try decoder.decode(Response.self, from: data)
+        }
     }
 
     private func postAuthenticated<Body: Encodable, Response: Decodable>(
@@ -547,33 +621,63 @@ actor AroSyncClient {
         body: Body,
         credential: HubDeviceCredential
     ) async throws -> Response {
-        var request = URLRequest(url: try url(for: path))
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(
-            "Bearer \(credential.credential)",
-            forHTTPHeaderField: "Authorization"
-        )
-        request.setValue(
-            credential.deviceID.uuidString,
-            forHTTPHeaderField: "X-Aro-Device"
-        )
-        request.httpBody = try encoder.encode(body)
-        let (data, response) = try await session.data(for: request)
-        try validate(response, data: data)
-        return try decoder.decode(Response.self, from: data)
+        try await logged("POST", path) {
+            var request = URLRequest(url: try url(for: path))
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue(
+                "Bearer \(credential.credential)",
+                forHTTPHeaderField: "Authorization"
+            )
+            request.setValue(
+                credential.deviceID.uuidString,
+                forHTTPHeaderField: "X-Aro-Device"
+            )
+            request.httpBody = try encoder.encode(body)
+            let (data, response) = try await session.data(for: request)
+            try validate(response, data: data)
+            return try decoder.decode(Response.self, from: data)
+        }
     }
 
     private func getAuthenticated<Response: Decodable>(
         _ path: String,
         credential: HubDeviceCredential? = nil
     ) async throws -> Response {
-        var request = URLRequest(url: try url(for: path))
-        request.httpMethod = "GET"
-        authenticate(&request, credential: credential)
-        let (data, response) = try await session.data(for: request)
-        try validate(response, data: data)
-        return try decoder.decode(Response.self, from: data)
+        try await logged("GET", path) {
+            var request = URLRequest(url: try url(for: path))
+            request.httpMethod = "GET"
+            authenticate(&request, credential: credential)
+            let (data, response) = try await session.data(for: request)
+            try validate(response, data: data)
+            return try decoder.decode(Response.self, from: data)
+        }
+    }
+
+    /// Wraps every request this client makes with start/duration/failure logging —
+    /// before this, a failed or hung request (TLS pinning rejection, timeout, 5xx)
+    /// was completely invisible: every call site above either propagated the error
+    /// silently up to a `try?` at the UI layer, or was never logged at all, which is
+    /// why prior debugging of "requests are timing out" via `log show` found zero
+    /// entries for this subsystem.
+    private func logged<T>(
+        _ method: String,
+        _ path: String,
+        _ operation: () async throws -> T
+    ) async throws -> T {
+        let started = ContinuousClock.now
+        do {
+            let result = try await operation()
+            Self.logger.debug(
+                "\(method, privacy: .public) \(path, privacy: .public) succeeded in \(started.duration(to: .now).formatted(), privacy: .public)"
+            )
+            return result
+        } catch {
+            Self.logger.error(
+                "\(method, privacy: .public) \(path, privacy: .public) failed after \(started.duration(to: .now).formatted(), privacy: .public): \(String(describing: error), privacy: .public)"
+            )
+            throw error
+        }
     }
 
     private func authenticate(

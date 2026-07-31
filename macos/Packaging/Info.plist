@@ -39,6 +39,8 @@
     <string>public.app-category.music</string>
     <key>LSMinimumSystemVersion</key>
     <string>26.0</string>
+    <key>NSAccentColorName</key>
+    <string>AccentColor</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSLocalNetworkUsageDescription</key>

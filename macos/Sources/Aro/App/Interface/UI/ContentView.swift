@@ -1,8 +1,64 @@
 import AppKit
 import AroCommon
+import OSLog
 import SwiftUI
 
+/// Disk-backed last-known-good cache for `ContentView`'s `cachedPlaylists`/
+/// `cachedRemoteHubInfo`, keyed per profile. `ContentView`'s own `@State` (see its
+/// doc comment) already gives Home/Metadata a stale-while-revalidate feel *within* a
+/// running session, but resets to empty on every fresh app launch since in-memory
+/// state doesn't survive process exit — the first launch after any restart still
+/// shows the empty/false-negative state until the network round trip completes. This
+/// persists the same values to `UserDefaults` so a fresh launch has something to show
+/// immediately too, revalidated in the background exactly as within a session.
+@MainActor
+private enum ScreenDataCache {
+    private static let defaults = UserDefaults.standard
+
+    private static func key(_ prefix: String, _ profileID: UUID?) -> String? {
+        guard let profileID else { return nil }
+        return "\(prefix).\(profileID.uuidString)"
+    }
+
+    static func playlists(for profileID: UUID?) -> [ServerGeneratedPlaylist] {
+        guard let key = key("screenCache.playlists", profileID),
+              let data = defaults.data(forKey: key),
+              let decoded = try? JSONDecoder().decode([ServerGeneratedPlaylist].self, from: data)
+        else { return [] }
+        return decoded
+    }
+
+    static func savePlaylists(_ playlists: [ServerGeneratedPlaylist], for profileID: UUID?) {
+        guard let key = key("screenCache.playlists", profileID),
+              let data = try? JSONEncoder().encode(playlists)
+        else { return }
+        defaults.set(data, forKey: key)
+    }
+
+    static func hubInfo(for profileID: UUID?) -> AroHubInfo? {
+        guard let key = key("screenCache.hubInfo", profileID),
+              let data = defaults.data(forKey: key),
+              let decoded = try? JSONDecoder().decode(AroHubInfo.self, from: data)
+        else { return nil }
+        return decoded
+    }
+
+    static func saveHubInfo(_ hubInfo: AroHubInfo?, for profileID: UUID?) {
+        guard let key = key("screenCache.hubInfo", profileID) else { return }
+        guard let hubInfo, let data = try? JSONEncoder().encode(hubInfo) else {
+            defaults.removeObject(forKey: key)
+            return
+        }
+        defaults.set(data, forKey: key)
+    }
+}
+
 struct ContentView: View {
+    private static let logger = Logger(
+        subsystem: "com.othyn.aro",
+        category: "RemoteSync"
+    )
+
     @Bindable var store: LibraryStore
     let playback: PlaybackController
     @Bindable var preferences: PlaybackPreferences
@@ -26,13 +82,23 @@ struct ContentView: View {
         OfflineDownloadPolicy
     ) -> Void
     @State private var importStatus: String?
-    @State private var managedSourceMonitors: [String: FolderMonitor] = [:]
     @State private var importError: String?
     @State private var syncDataStatus: String?
     @State private var isSynchronizingRemoteLibrary = false
     @State private var canContributeToActiveRemote = false
     @State private var identificationLocalServers = LocalAroServerMonitor()
     @State private var spacebarMonitor: Any?
+    /// Held here, not inside `HomeView`/`MetadataView`, because those views are
+    /// torn down and rebuilt every time the sidebar selection moves away and
+    /// back (see the `if/else if` content switcher below) — a view-local `@State`
+    /// would reset to empty on every revisit and force a blank/false-negative
+    /// flash until the next network round trip finishes. `ContentView` itself
+    /// isn't recreated by a `store.selection` change, so these survive
+    /// navigation and give both screens a stale-while-revalidate feel: last
+    /// known data renders immediately, refreshed quietly in the background.
+    @State private var cachedPlaylists: [ServerGeneratedPlaylist] = []
+    @State private var cachedIdentificationStatus: IdentificationStatus?
+    @State private var cachedRemoteHubInfo: AroHubInfo?
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -73,8 +139,12 @@ struct ContentView: View {
                             identificationLocalServers.refresh()
                             return await homePlaylistsBridge.playlists()
                         },
+                        loadRadio: { contentHash in
+                            await homePlaylistsBridge.radio(contentHash: contentHash)
+                        },
                         removeSong: removeSong,
-                        syncTrackData: syncTrackData
+                        syncTrackData: syncTrackData,
+                        playlists: $cachedPlaylists
                     )
                 } else if store.selection == .artists {
                     ArtistsView(
@@ -116,7 +186,9 @@ struct ContentView: View {
                         songs: store.allSongs,
                         preferences: syncPreferences,
                         profileRegistry: profileRegistry,
-                        syncStore: syncStore
+                        syncStore: syncStore,
+                        status: $cachedIdentificationStatus,
+                        remoteHubInfo: $cachedRemoteHubInfo
                     )
                 } else if case .folder(let folderID) = store.selection,
                           let folder = store.folders.first(where: {
@@ -170,19 +242,41 @@ struct ContentView: View {
             .padding(.bottom, 16)
         }
         .task {
-            store.start()
             playback.reconcileAvailableSongs(store.allSongs)
-            startManagedSourceMonitors()
+        }
+        .onChange(of: cachedPlaylists) { _, newValue in
+            ScreenDataCache.savePlaylists(newValue, for: profileRegistry.activeProfileID)
+        }
+        .onChange(of: cachedRemoteHubInfo) { _, newValue in
+            ScreenDataCache.saveHubInfo(newValue, for: profileRegistry.activeProfileID)
         }
         .task(id: profileRegistry.activeProfileID) {
             canContributeToActiveRemote = false
+            // A profile switch points Home/Metadata at a different library entirely --
+            // the previous profile's cached playlists/queue status/hub info must not
+            // linger and render as if they belonged to the new one. Re-seed from this
+            // profile's own persisted cache (if any) rather than blanking to empty, so
+            // switching profiles gets the same stale-while-revalidate treatment as a
+            // fresh launch instead of a guaranteed empty-state flash.
+            cachedPlaylists = ScreenDataCache.playlists(for: profileRegistry.activeProfileID)
+            cachedIdentificationStatus = nil
+            cachedRemoteHubInfo = ScreenDataCache.hubInfo(for: profileRegistry.activeProfileID)
             while !Task.isCancelled {
                 if let profile = profileRegistry.activeProfile,
                    profile.kind == .remote {
+                    let started = ContinuousClock.now
                     await synchronizeRemoteLibrary(profile)
+                    Self.logger.debug(
+                        "remote sync loop tick finished in \(started.duration(to: .now).formatted(), privacy: .public)"
+                    )
+                } else {
+                    Self.logger.debug(
+                        "remote sync loop tick skipped: active profile is not remote"
+                    )
                 }
                 try? await Task.sleep(for: .seconds(30))
             }
+            Self.logger.warning("remote sync loop exited (task cancelled)")
         }
         .task {
             // aro-server's identification results land in its own hub.sqlite3, not
@@ -242,10 +336,29 @@ struct ContentView: View {
     }
 
     private func synchronizeRemoteLibrary(_ profile: LibraryProfile) async {
-        guard !isSynchronizingRemoteLibrary,
-              let hubID = profile.hubID,
-              let baseURL = profile.baseURL,
-              let membership = syncStore.membership(baseURL: baseURL) else {
+        // Every branch of this guard used to fail completely silently — no log, no
+        // UI feedback — which made a stuck `isSynchronizingRemoteLibrary` flag (or
+        // any other precondition failure) indistinguishable from "nothing new to
+        // sync" from the outside. Logging which specific condition failed turns a
+        // silent no-op into something diagnosable.
+        guard !isSynchronizingRemoteLibrary else {
+            Self.logger.warning(
+                "synchronizeRemoteLibrary skipped: already in progress (isSynchronizingRemoteLibrary stuck true?)"
+            )
+            return
+        }
+        guard let hubID = profile.hubID else {
+            Self.logger.warning("synchronizeRemoteLibrary skipped: profile has no hubID")
+            return
+        }
+        guard let baseURL = profile.baseURL else {
+            Self.logger.warning("synchronizeRemoteLibrary skipped: profile has no baseURL")
+            return
+        }
+        guard let membership = syncStore.membership(baseURL: baseURL) else {
+            Self.logger.warning(
+                "synchronizeRemoteLibrary skipped: no stored membership for \(baseURL.absoluteString, privacy: .public)"
+            )
             return
         }
         isSynchronizingRemoteLibrary = true
@@ -258,10 +371,18 @@ struct ContentView: View {
             ) else {
                 throw HubCredentialError.missingRecord
             }
+            // Resolved rather than used as stored — the recorded Bonjour hostname can
+            // point at advertised-but-unroutable addresses, and picking one costs a
+            // full request timeout. See `HubEndpointResolver`.
+            let endpoint = await HubEndpointResolver.resolve(
+                storedBaseURL: baseURL,
+                hubID: hubID,
+                tlsFingerprint: membership.tlsFingerprint
+            )
             let result = try await HubSyncCoordinator(
                 hubID: hubID,
                 client: AroSyncClient(
-                    baseURL: baseURL,
+                    baseURL: endpoint,
                     pinnedTLSFingerprint: membership.tlsFingerprint
                 ),
                 credential: credential,
@@ -283,6 +404,12 @@ struct ContentView: View {
                 hubID: hubID,
                 message: error.localizedDescription
             )
+            // Drop the pinned endpoint so the next attempt re-probes from scratch.
+            // An address that worked before means nothing after a network change (or
+            // a hub that moved), and without this a cached-but-now-dead endpoint
+            // would be retried first every time, reintroducing exactly the timeout
+            // this resolver exists to avoid.
+            HubEndpointResolver.invalidate(hubID: hubID)
             // The full history is always available in Devices via
             // `syncStore.syncStatus`; this is just a transient heads-up for
             // whoever happens to be looking at this screen when it fails.
@@ -298,26 +425,11 @@ struct ContentView: View {
     /// Needed because the hub's `/v1/blobs/{hash}` HTTP endpoint (unlike the local
     /// control socket `pullIdentificationResults` uses) requires both.
     private func resolveRemoteArtworkBlob(hash: String) async -> Data? {
-        guard let profile = profileRegistry.activeProfile,
-              profile.kind == .remote,
-              let hubID = profile.hubID,
-              let baseURL = profile.baseURL,
-              let membership = syncStore.membership(baseURL: baseURL),
-              let credential = try? FileHubCredentialStore().load(
-                hubID: hubID,
-                deviceID: libraryDeviceID
-              )
-        else {
-            return nil
-        }
-        let client = AroSyncClient(
-            baseURL: baseURL,
-            pinnedTLSFingerprint: membership.tlsFingerprint
-        )
-        return try? await client.downloadBlob(
+        guard let remote = await remoteSyncContext else { return nil }
+        return try? await remote.client.downloadBlob(
             hash: hash,
             from: 0,
-            credential: credential
+            credential: remote.credential
         )
     }
 
@@ -344,55 +456,50 @@ struct ContentView: View {
             return
         }
 
-        if let managedPath = profileRegistry.activeProfile?.managedMusicPath {
-            importStatus = "Importing music…"
-            Task {
-                do {
-                    let destination = URL(fileURLWithPath: managedPath)
-                    let result = try await ManagedMusicImporter().importFolder(
-                        url,
-                        into: destination
-                    )
-                    store.addFolder(destination)
-                    if var profile = profileRegistry.activeProfile,
-                       !profile.referencedMusicPaths.contains(url.path) {
-                        profile.referencedMusicPaths.append(url.path)
-                        profileRegistry.update(profile)
-                    }
-                    watchManagedSource(url, destination: destination)
-                    importStatus = "Imported \(result.importedFiles) files"
-                    try? await Task.sleep(for: .seconds(3))
-                    importStatus = nil
-                } catch {
-                    importStatus = nil
-                    importError = error.localizedDescription
-                }
-            }
-        } else {
-            store.addFolder(url)
-        }
-    }
-
-    private func startManagedSourceMonitors() {
-        guard let profile = profileRegistry.activeProfile,
-              let managedPath = profile.managedMusicPath else { return }
-        let destination = URL(fileURLWithPath: managedPath)
-        for path in profile.referencedMusicPaths {
-            watchManagedSource(
-                URL(fileURLWithPath: path),
-                destination: destination
-            )
-        }
-    }
-
-    private func watchManagedSource(_ source: URL, destination: URL) {
-        guard managedSourceMonitors[source.path] == nil else { return }
-        managedSourceMonitors[source.path] = FolderMonitor(url: source) {
-            Task {
-                _ = try? await ManagedMusicImporter().importFolder(
-                    source,
-                    into: destination
+        // Imported through the local hub (its `SourceManager`), not this app's
+        // own scanner: the hub already does managed-mode copying, hashing, and
+        // watching -- `ManagedMusicImporter`/`watchManagedSource` duplicated
+        // exactly that, client-side, for folders added this way. See
+        // `AroApp.importInitialFoldersAndSync`, which does the same thing for
+        // a profile's initial folders.
+        let mode: HubImportMode = profileRegistry.activeProfile?.managedMusicPath == nil
+            ? .referenced
+            : .managed
+        importStatus = "Importing music…"
+        Task {
+            do {
+                await hubService.ensureCompatibleHelper(
+                    dataLocation: syncPreferences.dataLocation
                 )
+                guard hubService.isEnabled, !syncPreferences.dataLocation.isEmpty else {
+                    importStatus = nil
+                    importError =
+                        "Aro couldn't reach the Background Service to import this folder."
+                    return
+                }
+                let control = HubControlClient(
+                    socketURL: URL(fileURLWithPath: syncPreferences.dataLocation)
+                        .appendingPathComponent("control.sock")
+                )
+                let imported = try await control.importFolder(
+                    path: url.path,
+                    mode: mode
+                )
+                if let status = try? await control.status() {
+                    let coordinator = LocalHubReplicaCoordinator(
+                        hubID: status.hubID,
+                        client: control,
+                        operations: syncStore
+                    )
+                    _ = try? await coordinator.synchronize()
+                    store.refreshFoldersFromDatabase()
+                }
+                importStatus = "Imported \(imported) files"
+                try? await Task.sleep(for: .seconds(3))
+                importStatus = nil
+            } catch {
+                importStatus = nil
+                importError = error.localizedDescription
             }
         }
     }
@@ -412,16 +519,6 @@ struct ContentView: View {
         }
 
         store.relocateFolder(id: id, to: url)
-    }
-
-    /// True for the one Sync that is this Mac's managed library folder — the
-    /// canonical store `aro-server` actually shares from when sharing is on,
-    /// as opposed to an arbitrary externally-watched folder.
-    private func isHostLibraryFolder(_ folder: WatchedFolder) -> Bool {
-        guard let managedMusicPath = profileRegistry.activeProfile?.managedMusicPath else {
-            return false
-        }
-        return folder.url.path == managedMusicPath
     }
 
     /// Spacebar play/pause, scoped so it never steals Space from text entry
@@ -535,23 +632,101 @@ struct ContentView: View {
 
     private static let lastAppliedIdentificationKey = "identification.lastAppliedAt"
 
+    /// Pulls the active hub's identification results (title/artist/album/artwork URL/
+    /// genres/moods) and merges them into this app's own catalog by content hash.
+    ///
+    /// Identification results deliberately live outside the CRDT operation log, so
+    /// unlike track metadata they never arrive via `exchange` — they have to be pulled
+    /// explicitly, over whichever transport actually reaches the active hub. A remote
+    /// profile has no local control socket to *its* hub, so before this routed by
+    /// profile kind it silently pulled nothing at all for remote libraries, stranding
+    /// hub-side Cover Art Archive artwork: any track without embedded art stayed on
+    /// the placeholder cover permanently.
     private func pullIdentificationResults() async {
-        identificationLocalServers.refresh()
-        guard let client = identificationControlClient else { return }
-        let after = Int64(
-            UserDefaults.standard.integer(forKey: Self.lastAppliedIdentificationKey)
-        )
-        guard let results = try? await client.identificationResults(after: after),
-              !results.isEmpty else {
+        if let remote = await remoteSyncContext {
+            await pullIdentificationResults(
+                hubKey: remote.hubID.uuidString,
+                fetch: { after in
+                    try? await remote.client.identificationResults(
+                        after: after,
+                        credential: remote.credential
+                    )
+                },
+                blob: { hash in
+                    try? await remote.client.downloadBlob(
+                        hash: hash,
+                        from: 0,
+                        credential: remote.credential
+                    )
+                }
+            )
             return
         }
-        await store.applyIdentificationResults(results) { hash in
-            try? await client.blob(hash: hash)
-        }
+
+        identificationLocalServers.refresh()
+        guard let client = identificationControlClient else { return }
+        await pullIdentificationResults(
+            hubKey: "local",
+            fetch: { after in try? await client.identificationResults(after: after) },
+            blob: { hash in try? await client.blob(hash: hash) }
+        )
+    }
+
+    private func pullIdentificationResults(
+        hubKey: String,
+        fetch: (Int64) async -> [IdentificationResult]?,
+        blob: @escaping (String) async -> Data?
+    ) async {
+        // Keyed per hub: a local hub and a remote hub each stamp `identifiedAt` from
+        // their own clock over their own independent set of results, so a single
+        // shared cursor would let whichever hub is behind skip everything the other
+        // had already advanced past.
+        let cursorKey = "\(Self.lastAppliedIdentificationKey).\(hubKey)"
+        let after = Int64(UserDefaults.standard.integer(forKey: cursorKey))
+        guard let results = await fetch(after), !results.isEmpty else { return }
+        await store.applyIdentificationResults(results, resolveBlobHash: blob)
         if let newest = results.map(\.identifiedAt).max() {
-            UserDefaults.standard.set(
-                Int(newest),
-                forKey: Self.lastAppliedIdentificationKey
+            UserDefaults.standard.set(Int(newest), forKey: cursorKey)
+        }
+    }
+
+    /// The active profile's remote hub client plus the credential it authenticates
+    /// with — `nil` whenever this Mac is hosting its own library rather than acting as
+    /// a client of someone else's.
+    ///
+    /// The base URL is resolved to a *reachable* endpoint rather than used as stored:
+    /// the stored Bonjour hostname can resolve to advertised-but-dead addresses, which
+    /// cost a full request timeout each time one is picked. See `HubEndpointResolver`.
+    private var remoteSyncContext: (
+        client: AroSyncClient,
+        credential: HubDeviceCredential,
+        hubID: UUID
+    )? {
+        get async {
+            guard let profile = profileRegistry.activeProfile,
+                  profile.kind == .remote,
+                  let hubID = profile.hubID,
+                  let baseURL = profile.baseURL,
+                  let membership = syncStore.membership(baseURL: baseURL),
+                  let credential = try? FileHubCredentialStore().load(
+                    hubID: hubID,
+                    deviceID: libraryDeviceID
+                  )
+            else {
+                return nil
+            }
+            let endpoint = await HubEndpointResolver.resolve(
+                storedBaseURL: baseURL,
+                hubID: hubID,
+                tlsFingerprint: membership.tlsFingerprint
+            )
+            return (
+                AroSyncClient(
+                    baseURL: endpoint,
+                    pinnedTLSFingerprint: membership.tlsFingerprint
+                ),
+                credential,
+                hubID
             )
         }
     }

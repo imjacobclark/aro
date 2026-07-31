@@ -159,6 +159,12 @@ struct SQLiteSchemaMigrator {
             """
         )
 
+        // Whether the user moved on from this track early (see
+        // `PlaybackController.startSong`'s skip-detection doc comment) — a real
+        // negative signal for Tier 1 behavioural playlists (Forgotten Favourites,
+        // Deep Cuts), synced up via the same `listening_session` op as `completed`.
+        try? execute("ALTER TABLE listening_sessions ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0")
+
         try execute(
             """
             CREATE TABLE IF NOT EXISTS hub_memberships (
@@ -169,6 +175,24 @@ struct SQLiteSchemaMigrator {
                 replica_mode TEXT NOT NULL DEFAULT 'on_demand',
                 server_cursor INTEGER NOT NULL DEFAULT 0,
                 joined_at REAL NOT NULL
+            );
+            -- A same-machine hub this Mac runs itself (see AroHubService) has no
+            -- base URL, TLS fingerprint, or download-policy replica mode to
+            -- record -- those are meaningful only for a genuinely remote,
+            -- paired hub reached over HTTPS. Kept as its own table rather than
+            -- widening hub_memberships so neither concept has to fake fields
+            -- that don't apply to it.
+            CREATE TABLE IF NOT EXISTS local_hub_membership (
+                hub_id TEXT PRIMARY KEY,
+                server_cursor INTEGER NOT NULL DEFAULT 0,
+                joined_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS local_hub_track_mappings (
+                hub_id TEXT NOT NULL REFERENCES local_hub_membership(hub_id),
+                local_track_id TEXT NOT NULL REFERENCES tracks(id),
+                hub_track_id TEXT NOT NULL,
+                PRIMARY KEY(hub_id, local_track_id),
+                UNIQUE(hub_id, hub_track_id)
             );
             CREATE TABLE IF NOT EXISTS hub_track_mappings (
                 hub_id TEXT NOT NULL REFERENCES hub_memberships(hub_id),

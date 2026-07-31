@@ -142,6 +142,7 @@ private final class RecordingHistory:
     var begins = 0
     var heartbeats = 0
     var ends = 0
+    var skips = 0
 
     func beginSession(trackID: UUID) -> UUID {
         begins += 1
@@ -152,8 +153,9 @@ private final class RecordingHistory:
         heartbeats += 1
     }
 
-    func endSession(sessionID: UUID, completed: Bool) {
+    func endSession(sessionID: UUID, completed: Bool, skipped: Bool) {
         ends += 1
+        if skipped { skips += 1 }
     }
 }
 

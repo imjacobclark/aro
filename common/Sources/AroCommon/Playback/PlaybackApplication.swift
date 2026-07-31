@@ -149,7 +149,11 @@ public extension AudioPlaybackEngine {
 public protocol ListeningHistoryRecording: Sendable {
     func beginSession(trackID: UUID) -> UUID
     func heartbeat(sessionID: UUID)
-    func endSession(sessionID: UUID, completed: Bool)
+    /// `skipped` is a real negative signal for Tier 1 behavioural playlists (see
+    /// `PlaybackController.startSong`'s doc comment for exactly when it's set) — a
+    /// track abandoned early and often should be treated differently from one simply
+    /// never played.
+    func endSession(sessionID: UUID, completed: Bool, skipped: Bool)
 }
 
 public struct NoOpListeningHistoryRecorder: ListeningHistoryRecording, Sendable {
@@ -157,7 +161,7 @@ public struct NoOpListeningHistoryRecorder: ListeningHistoryRecording, Sendable 
 
     public func beginSession(trackID: UUID) -> UUID { UUID() }
     public func heartbeat(sessionID: UUID) {}
-    public func endSession(sessionID: UUID, completed: Bool) {}
+    public func endSession(sessionID: UUID, completed: Bool, skipped: Bool) {}
 }
 
 public protocol PlaybackActivityReporting: Sendable {
@@ -317,9 +321,9 @@ public final class ListeningSessionTracker {
         )
     }
 
-    public func end(completed: Bool = false) {
+    public func end(completed: Bool = false, skipped: Bool = false) {
         guard let sessionID else { return }
-        history.endSession(sessionID: sessionID, completed: completed)
+        history.endSession(sessionID: sessionID, completed: completed, skipped: skipped)
         emit(state: .stopped, completed: completed, now: Date())
         self.sessionID = nil
         lastHeartbeat = .distantPast

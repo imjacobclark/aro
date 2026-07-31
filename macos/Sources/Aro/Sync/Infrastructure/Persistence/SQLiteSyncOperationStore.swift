@@ -1104,6 +1104,417 @@ struct SQLiteSyncOperationStore {
         return try result.get()
     }
 
+    /// Creates this Mac's `local_hub_membership` row the first time it replicates
+    /// from its own local hub, if one doesn't already exist (idempotent: never
+    /// resets `server_cursor` on a hub already known), and a matching
+    /// `watched_folders` row so replicated songs have somewhere to group under
+    /// in the existing folder-scoped song list -- the same trick
+    /// `ensureRemoteLibraryFolder` uses for a remote hub's synced content, with
+    /// `id = hub_id` again standing in for "this isn't really a folder."
+    func ensureLocalHubMembership(hubID: UUID, displayName: String) {
+        database.withConnection { connection in
+            try? run(
+                """
+                INSERT OR IGNORE INTO local_hub_membership
+                    (hub_id, server_cursor, joined_at)
+                VALUES (?, 0, ?)
+                """,
+                connection
+            ) {
+                bind(hubID.uuidString, $0, 1)
+                sqlite3_bind_double($0, 2, Date().timeIntervalSince1970)
+            }
+            try? run(
+                """
+                INSERT INTO watched_folders
+                    (id, display_name, path, bookmark, added_at, removed_at)
+                VALUES (?, ?, ?, NULL, ?, NULL)
+                ON CONFLICT(id) DO UPDATE SET
+                    display_name = excluded.display_name,
+                    removed_at = NULL
+                """,
+                connection
+            ) {
+                bind(hubID.uuidString, $0, 1)
+                bind(displayName, $0, 2)
+                bind("aro-local-hub://\(hubID.uuidString)", $0, 3)
+                sqlite3_bind_double($0, 4, Date().timeIntervalSince1970)
+            }
+        }
+    }
+
+    func localHubServerCursor(hubID: UUID) -> UInt64 {
+        database.withReadConnection { connection in
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                connection,
+                "SELECT server_cursor FROM local_hub_membership WHERE hub_id = ?",
+                -1,
+                &statement,
+                nil
+            ) == SQLITE_OK,
+                  let statement else {
+                return 0
+            }
+            defer { sqlite3_finalize(statement) }
+            bind(hubID.uuidString, statement, 1)
+            return sqlite3_step(statement) == SQLITE_ROW
+                ? UInt64(sqlite3_column_int64(statement, 0))
+                : 0
+        } ?? 0
+    }
+
+    /// Applies one operation pulled from this Mac's own local hub over the
+    /// control socket (`HubControlClient.changesAfter`), mirroring
+    /// `applyRemote`'s per-operation CRDT merge but against
+    /// `local_hub_membership`/`local_hub_track_mappings` rather than
+    /// `hub_memberships`/`hub_track_mappings` — see those tables' comments in
+    /// `SQLiteSchemaMigrator` for why a same-machine hub needs its own, simpler
+    /// membership concept instead of reusing the remote-hub-shaped ones.
+    ///
+    /// `localPath`, when the operation is a `track` with a resolvable content
+    /// hash, should already have been resolved via
+    /// `HubControlClient.trackLocation(hash:)` by the caller — a control-socket
+    /// round trip can't happen inside this synchronous SQLite transaction.
+    /// `track_state`/`loudness` reuse the exact same private apply helpers
+    /// `applyRemote` uses; only track application and hub-track-id lookup
+    /// differ, because `applyTrack` writes an HTTPS blob URL into
+    /// `file_locations` (correct for a genuinely remote hub's streamed/cached
+    /// content) where this needs a real on-disk path instead.
+    @discardableResult
+    func applyLocalHub(
+        _ sequenced: SequencedSyncOperation,
+        hubID: UUID,
+        localPath: String?
+    ) throws -> Bool {
+        let result: Result<Bool, Error>? = database.withConnection {
+            connection in
+            do {
+                try execute("BEGIN IMMEDIATE", connection)
+                try run(
+                    """
+                    INSERT OR IGNORE INTO applied_sync_operations
+                        (operation_id, hub_id, server_sequence, applied_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    connection
+                ) {
+                    bind(sequenced.operationID.uuidString, $0, 1)
+                    bind(hubID.uuidString, $0, 2)
+                    sqlite3_bind_int64($0, 3, Int64(sequenced.sequence))
+                    sqlite3_bind_double(
+                        $0,
+                        4,
+                        Date().timeIntervalSince1970
+                    )
+                }
+                guard sqlite3_changes(connection) == 1 else {
+                    try execute("COMMIT", connection)
+                    return .success(false)
+                }
+
+                let mergedPayload = mergeablePayload(
+                    sequenced,
+                    hubID: hubID,
+                    connection: connection
+                )
+                if sequenced.entityType == "track" {
+                    try applyLocalHubTrack(
+                        sequenced,
+                        payload: mergedPayload,
+                        hubID: hubID,
+                        localPath: localPath,
+                        connection: connection
+                    )
+                } else if sequenced.entityType == "track_state",
+                   let localTrackID = localTrackIDForLocalHub(
+                    hubTrackID: sequenced.entityID,
+                    hubID: hubID,
+                    connection: connection
+                   ) {
+                    try applyTrackState(
+                        sequenced,
+                        payload: mergedPayload,
+                        localTrackID: localTrackID,
+                        connection: connection
+                    )
+                } else if sequenced.entityType == "loudness" {
+                    try applyLoudness(
+                        sequenced,
+                        connection: connection
+                    )
+                }
+                // "listening_session" is deliberately not handled: this Mac's own
+                // local hub never originates that entity type (its operation log
+                // only ever contains what SourceManager scans, plus whatever this
+                // Mac itself pushes -- and this pull-only coordinator never
+                // pushes), so it would never actually appear here. Listening
+                // history stays purely local, recorded directly by
+                // SQLiteListeningHistoryRecorder.
+                for (field, version) in sequenced.fieldVersions {
+                    try run(
+                        """
+                        INSERT INTO sync_field_versions
+                            (hub_id, entity_type, entity_id, field_name,
+                             physical_millis, logical_counter, device_id)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(hub_id, entity_type, entity_id, field_name)
+                        DO UPDATE SET
+                            physical_millis = excluded.physical_millis,
+                            logical_counter = excluded.logical_counter,
+                            device_id = excluded.device_id
+                        WHERE excluded.physical_millis > physical_millis
+                           OR (
+                                excluded.physical_millis = physical_millis
+                                AND excluded.logical_counter > logical_counter
+                           )
+                           OR (
+                                excluded.physical_millis = physical_millis
+                                AND excluded.logical_counter = logical_counter
+                                AND excluded.device_id > device_id
+                           )
+                        """,
+                        connection
+                    ) {
+                        bind(hubID.uuidString, $0, 1)
+                        bind(sequenced.entityType, $0, 2)
+                        bind(sequenced.entityID, $0, 3)
+                        bind(field, $0, 4)
+                        sqlite3_bind_int64(
+                            $0,
+                            5,
+                            version.physicalMilliseconds
+                        )
+                        sqlite3_bind_int64($0, 6, Int64(version.logical))
+                        bind(version.deviceID.uuidString, $0, 7)
+                    }
+                }
+                try run(
+                    """
+                    UPDATE local_hub_membership
+                    SET server_cursor = MAX(server_cursor, ?)
+                    WHERE hub_id = ?
+                    """,
+                    connection
+                ) {
+                    sqlite3_bind_int64($0, 1, Int64(sequenced.sequence))
+                    bind(hubID.uuidString, $0, 2)
+                }
+                try execute("COMMIT", connection)
+                return .success(true)
+            } catch {
+                try? execute("ROLLBACK", connection)
+                return .failure(error)
+            }
+        }
+        guard let result else {
+            throw LibraryDatabaseError.unavailable
+        }
+        return try result.get()
+    }
+
+    private func localTrackIDForLocalHub(
+        hubTrackID: String,
+        hubID: UUID,
+        connection: OpaquePointer
+    ) -> String? {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(
+            connection,
+            """
+            SELECT local_track_id FROM local_hub_track_mappings
+            WHERE hub_id = ? AND hub_track_id = ?
+            """,
+            -1,
+            &statement,
+            nil
+        ) == SQLITE_OK,
+              let statement else {
+            return nil
+        }
+        defer { sqlite3_finalize(statement) }
+        bind(hubID.uuidString, statement, 1)
+        bind(hubTrackID, statement, 2)
+        return sqlite3_step(statement) == SQLITE_ROW
+            ? text(statement, 0)
+            : nil
+    }
+
+    /// Same shape as `applyTrack`, but for a same-machine hub: `file_locations`
+    /// gets a real filesystem path (already resolved by the caller via
+    /// `HubControlClient.trackLocation(hash:)`) instead of an HTTPS blob URL.
+    /// `folder_id` still points at the synthetic `watched_folders` row
+    /// `ensureLocalHubMembership` creates (`id = hub_id`), same trick
+    /// `ensureRemoteLibraryFolder` uses for a remote hub -- without it, synced
+    /// songs would have no folder to group under in `LibraryStore.folders` and
+    /// would never appear in the song list.
+    private func applyLocalHubTrack(
+        _ sequenced: SequencedSyncOperation,
+        payload: [String: JSONValue],
+        hubID: UUID,
+        localPath: String?,
+        connection: OpaquePointer
+    ) throws {
+        guard UUID(uuidString: sequenced.entityID) != nil,
+              case .object = sequenced.payload else { return }
+        let contentHash = string(payload["content_hash"])
+        let localTrackID = localTrackIDForLocalHub(
+            hubTrackID: sequenced.entityID,
+            hubID: hubID,
+            connection: connection
+        ) ?? contentHash.flatMap {
+            trackID(
+                contentHash: $0,
+                connection: connection
+            )
+        } ?? UUID().uuidString
+        let now = Date().timeIntervalSince1970
+
+        try run(
+            """
+            INSERT INTO tracks (id, content_hash, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                content_hash = COALESCE(excluded.content_hash, content_hash),
+                updated_at = excluded.updated_at
+            """,
+            connection
+        ) {
+            bind(localTrackID, $0, 1)
+            bindOptional(contentHash, $0, 2)
+            sqlite3_bind_double($0, 3, now)
+            sqlite3_bind_double($0, 4, now)
+        }
+        try run(
+            """
+            INSERT INTO local_hub_track_mappings
+                (hub_id, local_track_id, hub_track_id)
+            VALUES (?, ?, ?)
+            ON CONFLICT(hub_id, local_track_id) DO UPDATE SET
+                hub_track_id = excluded.hub_track_id
+            """,
+            connection
+        ) {
+            bind(hubID.uuidString, $0, 1)
+            bind(localTrackID, $0, 2)
+            bind(sequenced.entityID, $0, 3)
+        }
+        try run(
+            """
+            INSERT INTO scan_metadata
+                (track_id, title, artist, duration, codec, sample_rate,
+                 bit_depth, channel_count, bitrate, scanned_at, album, genre,
+                 release_year, artwork_url)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(track_id) DO UPDATE SET
+                title = COALESCE(excluded.title, title),
+                artist = COALESCE(excluded.artist, artist),
+                duration = COALESCE(excluded.duration, duration),
+                codec = COALESCE(excluded.codec, codec),
+                sample_rate = COALESCE(excluded.sample_rate, sample_rate),
+                bit_depth = COALESCE(excluded.bit_depth, bit_depth),
+                channel_count = COALESCE(
+                    excluded.channel_count,
+                    channel_count
+                ),
+                bitrate = COALESCE(excluded.bitrate, bitrate),
+                scanned_at = excluded.scanned_at,
+                album = COALESCE(excluded.album, album),
+                genre = COALESCE(excluded.genre, genre),
+                release_year = COALESCE(
+                    excluded.release_year,
+                    release_year
+                ),
+                artwork_url = COALESCE(excluded.artwork_url, artwork_url)
+            """,
+            connection
+        ) {
+            bind(localTrackID, $0, 1)
+            bindOptional(string(payload["title"]), $0, 2)
+            bindOptional(string(payload["artist"]), $0, 3)
+            bindOptional(number(payload["duration"]), $0, 4)
+            bindOptional(string(payload["codec"]), $0, 5)
+            bindOptional(number(payload["sample_rate"]), $0, 6)
+            bindOptional(integer(payload["bit_depth"]), $0, 7)
+            bindOptional(integer(payload["channel_count"]), $0, 8)
+            bindOptional(number(payload["bitrate"]), $0, 9)
+            sqlite3_bind_double($0, 10, now)
+            bindOptional(string(payload["album"]), $0, 11)
+            bindOptional(string(payload["genre"]), $0, 12)
+            bindOptional(integer(payload["release_year"]), $0, 13)
+            bindOptional(string(payload["artwork_url"]), $0, 14)
+        }
+        try run(
+            """
+            INSERT OR IGNORE INTO track_state (track_id, updated_at)
+            VALUES (?, ?)
+            """,
+            connection
+        ) {
+            bind(localTrackID, $0, 1)
+            sqlite3_bind_double($0, 2, now)
+        }
+        try applyTrackState(
+            sequenced,
+            payload: payload,
+            localTrackID: localTrackID,
+            connection: connection
+        )
+        if let contentHash,
+           let byteCount = integer(payload["byte_count"]) {
+            try run(
+                """
+                INSERT INTO blob_availability
+                    (content_hash, local_path, byte_count, verified, pinned,
+                     download_state)
+                VALUES (?, ?, ?, 1, 0, 'available')
+                ON CONFLICT(content_hash) DO UPDATE SET
+                    local_path = COALESCE(excluded.local_path, local_path),
+                    byte_count = excluded.byte_count,
+                    verified = 1,
+                    download_state = 'available'
+                """,
+                connection
+            ) {
+                bind(contentHash, $0, 1)
+                bindOptional(localPath, $0, 2)
+                sqlite3_bind_int64($0, 3, byteCount)
+            }
+            if let localPath {
+                try run(
+                    """
+                    INSERT INTO file_locations
+                        (id, track_id, device_id, folder_id, path, file_size,
+                         available, last_seen_token, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        track_id = excluded.track_id,
+                        folder_id = excluded.folder_id,
+                        path = excluded.path,
+                        file_size = excluded.file_size,
+                        available = 1,
+                        last_seen_token = excluded.last_seen_token,
+                        updated_at = excluded.updated_at
+                    """,
+                    connection
+                ) {
+                    bind(
+                        "\(hubID.uuidString):\(sequenced.entityID)",
+                        $0,
+                        1
+                    )
+                    bind(localTrackID, $0, 2)
+                    bind(database.deviceID.uuidString, $0, 3)
+                    bind(hubID.uuidString, $0, 4)
+                    bind(localPath, $0, 5)
+                    sqlite3_bind_int64($0, 6, byteCount)
+                    bind("local-hub-\(sequenced.sequence)", $0, 7)
+                    sqlite3_bind_double($0, 8, now)
+                }
+            }
+        }
+    }
+
     /// Records the remote operation before its mutation is applied. Retrying a
     /// page therefore cannot create a local outbox echo or apply twice.
     func beginRemoteApply(
