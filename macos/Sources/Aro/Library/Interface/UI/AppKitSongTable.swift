@@ -42,6 +42,9 @@ struct AppKitSongTable: NSViewRepresentable {
     let onPlay: @MainActor (Song) -> Void
     let onSyncTrackData: @MainActor (Song) async -> Void
     let onRequestRemoval: (@MainActor (Song) -> Void)?
+    /// Optional so surfaces without a reachable hub (or without the notion of a
+    /// seed track) simply don't offer the item, same as `onRequestRemoval`.
+    let onStartRadio: (@MainActor (Song) -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -52,7 +55,8 @@ struct AppKitSongTable: NSViewRepresentable {
             presentation: presentation,
             onPlay: onPlay,
             onSyncTrackData: onSyncTrackData,
-            onRequestRemoval: onRequestRemoval
+            onRequestRemoval: onRequestRemoval,
+            onStartRadio: onStartRadio
         )
     }
 
@@ -68,7 +72,8 @@ struct AppKitSongTable: NSViewRepresentable {
             usesStreamOnlyIcon: usesStreamOnlyIcon,
             onPlay: onPlay,
             onSyncTrackData: onSyncTrackData,
-            onRequestRemoval: onRequestRemoval
+            onRequestRemoval: onRequestRemoval,
+            onStartRadio: onStartRadio
         )
     }
 
@@ -93,6 +98,7 @@ struct AppKitSongTable: NSViewRepresentable {
         private var onPlay: @MainActor (Song) -> Void
         private var onSyncTrackData: @MainActor (Song) async -> Void
         private var onRequestRemoval: (@MainActor (Song) -> Void)?
+        private var onStartRadio: (@MainActor (Song) -> Void)?
         private weak var tableView: NativeSongTableView?
 
         init(
@@ -104,7 +110,8 @@ struct AppKitSongTable: NSViewRepresentable {
             onPlay: @escaping @MainActor (Song) -> Void,
             onSyncTrackData:
                 @escaping @MainActor (Song) async -> Void,
-            onRequestRemoval: (@MainActor (Song) -> Void)?
+            onRequestRemoval: (@MainActor (Song) -> Void)?,
+            onStartRadio: (@MainActor (Song) -> Void)?
         ) {
             self.songs = songs
             self.currentSongID = currentSongID
@@ -114,6 +121,7 @@ struct AppKitSongTable: NSViewRepresentable {
             self.onPlay = onPlay
             self.onSyncTrackData = onSyncTrackData
             self.onRequestRemoval = onRequestRemoval
+            self.onStartRadio = onStartRadio
         }
 
         func makeScrollView() -> NSScrollView {
@@ -205,6 +213,15 @@ struct AppKitSongTable: NSViewRepresentable {
                     keyEquivalent: ""
                 )
             )
+            if onStartRadio != nil {
+                menu.addItem(
+                    NSMenuItem(
+                        title: "More Like This",
+                        action: #selector(startRadioForSelected(_:)),
+                        keyEquivalent: ""
+                    )
+                )
+            }
             if onRequestRemoval != nil {
                 menu.addItem(.separator())
                 menu.addItem(
@@ -242,11 +259,13 @@ struct AppKitSongTable: NSViewRepresentable {
             onPlay: @escaping @MainActor (Song) -> Void,
             onSyncTrackData:
                 @escaping @MainActor (Song) async -> Void,
-            onRequestRemoval: (@MainActor (Song) -> Void)?
+            onRequestRemoval: (@MainActor (Song) -> Void)?,
+            onStartRadio: (@MainActor (Song) -> Void)?
         ) {
             self.onPlay = onPlay
             self.onSyncTrackData = onSyncTrackData
             self.onRequestRemoval = onRequestRemoval
+            self.onStartRadio = onStartRadio
 
             guard let tableView else {
                 songs = newSongs
@@ -377,6 +396,15 @@ struct AppKitSongTable: NSViewRepresentable {
             Task { @MainActor [onSyncTrackData] in
                 await onSyncTrackData(song)
             }
+        }
+
+        /// Starts a station seeded from the selected track — the same measured
+        /// audio-feature nearest-neighbour search Home's cards offer, surfaced where
+        /// people actually browse their library rather than only on generated
+        /// playlists.
+        @objc private func startRadioForSelected(_ sender: Any?) {
+            guard let song = selectedSong, let onStartRadio else { return }
+            onStartRadio(song)
         }
 
         @objc private func removeSelected(_ sender: Any?) {

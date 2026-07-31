@@ -218,7 +218,8 @@ struct ContentView: View {
                         storesLibraryCopy:
                             profileRegistry.activeProfile?.managedMusicPath != nil,
                         removeSong: removeSong,
-                        syncTrackData: syncTrackData
+                        syncTrackData: syncTrackData,
+                        startRadio: startRadioFromLibrary
                     )
                 }
                 }
@@ -424,6 +425,25 @@ struct ContentView: View {
     /// time, the same trust path `synchronizeRemoteLibrary` above already uses.
     /// Needed because the hub's `/v1/blobs/{hash}` HTTP endpoint (unlike the local
     /// control socket `pullIdentificationResults` uses) requires both.
+    /// Plays a station seeded from `song`, built server-side from measured audio
+    /// features (see `aro-server`'s `playlists::radio`). Silently does nothing when
+    /// the seed hasn't been analyzed yet or no hub is reachable — this is a
+    /// convenience action, not something worth interrupting browsing with an error.
+    private func startRadioFromLibrary(_ song: Song) async {
+        guard let contentHash = song.contentHash,
+              let station = await homePlaylistsBridge.radio(contentHash: contentHash)
+        else { return }
+        let songsByHash = Dictionary(
+            store.allSongs.compactMap { candidate in
+                candidate.contentHash.map { ($0, candidate) }
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let queue = station.contentHashes.compactMap { songsByHash[$0] }
+        guard let first = queue.first else { return }
+        playback.play(song: first, queue: queue)
+    }
+
     private func resolveRemoteArtworkBlob(hash: String) async -> Data? {
         guard let remote = await remoteSyncContext else { return nil }
         return try? await remote.client.downloadBlob(
