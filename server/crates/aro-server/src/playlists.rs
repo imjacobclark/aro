@@ -262,14 +262,18 @@ struct ArtistAggregate {
     album_count: usize,
 }
 
+/// One artist's running totals while aggregating: name, the content hashes seen for them,
+/// play count, listened seconds, and the distinct albums those plays came from.
+type ArtistTally = (
+    String,
+    Vec<String>,
+    i64,
+    f64,
+    std::collections::HashSet<String>,
+);
+
 fn artist_aggregates(seeds: &PlaylistSeeds) -> Vec<ArtistAggregate> {
-    let mut by_artist: Vec<(
-        String,
-        Vec<String>,
-        i64,
-        f64,
-        std::collections::HashSet<String>,
-    )> = Vec::new();
+    let mut by_artist: Vec<ArtistTally> = Vec::new();
     let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for track in &seeds.tracks {
         let Some(artist) = track.artist.as_ref().filter(|a| !a.is_empty()) else {
@@ -457,7 +461,7 @@ fn push_lost_albums(
         .into_iter()
         .filter(|album| album.content_hashes.len() >= LOST_ALBUM_MIN_TRACKS)
         .filter(|album| {
-            album.last_played_at.map_or(true, |last_played_at| {
+            album.last_played_at.is_none_or(|last_played_at| {
                 (now_secs - last_played_at) / 86_400.0 >= LOST_ALBUM_MIN_DAYS_SINCE_PLAY
             })
         })
@@ -527,9 +531,13 @@ fn push_time_capsule(
 /// "Hits of `<year>`" — the top 3 release years by aggregate recent listening, each
 /// showing that year's most-played tracks. Only tracks that have actually been played
 /// qualify (an unplayed track isn't a "hit"), which also means a year with plenty of
+/// A track considered for a year's playlist: content hash, play count, listened seconds,
+/// and album.
+type YearlyTrack<'a> = (&'a String, i64, f64, Option<&'a String>);
+
 /// library coverage but no listening simply won't appear.
 fn push_hits_by_year(playlists: &mut Vec<GeneratedPlaylist>, seeds: &PlaylistSeeds) {
-    let mut by_year: std::collections::HashMap<i64, Vec<(&String, i64, f64, Option<&String>)>> =
+    let mut by_year: std::collections::HashMap<i64, Vec<YearlyTrack<'_>>> =
         std::collections::HashMap::new();
     for track in &seeds.tracks {
         let Some(year) = track.release_year else {
@@ -883,10 +891,10 @@ pub fn smart_shuffle(
 
     let mut vectors: std::collections::HashMap<&str, Vec<f64>> = std::collections::HashMap::new();
     for track in &seeds.tracks {
-        if requested.contains(track.content_hash.as_str()) {
-            if let Some(features) = decoded_features(track) {
-                vectors.insert(track.content_hash.as_str(), features.vector());
-            }
+        if requested.contains(track.content_hash.as_str())
+            && let Some(features) = decoded_features(track)
+        {
+            vectors.insert(track.content_hash.as_str(), features.vector());
         }
     }
 
@@ -1344,7 +1352,6 @@ mod tests {
                 .map(|i| track(&format!("hash-{i}"), false, &[]))
                 .collect(),
             listening,
-            ..Default::default()
         };
 
         let first = generate_utc(&seeds, wednesday());
@@ -1433,11 +1440,7 @@ mod tests {
         let mut listening = HashMap::new();
         listening.insert("overplayed".to_string(), summary(2, 0.0, 0.0));
 
-        let seeds = PlaylistSeeds {
-            tracks,
-            listening,
-            ..Default::default()
-        };
+        let seeds = PlaylistSeeds { tracks, listening };
 
         let playlists = generate(&seeds, now, 0);
         let fresh = playlists.iter().find(|p| p.id == "fresh-finds").unwrap();
@@ -1522,11 +1525,7 @@ mod tests {
             tracks.push(track_full(&format!("gamma-{i}"), Some("Gamma"), None, None));
         }
 
-        let seeds = PlaylistSeeds {
-            tracks,
-            listening,
-            ..Default::default()
-        };
+        let seeds = PlaylistSeeds { tracks, listening };
         let playlists = generate_utc(&seeds, wednesday());
 
         let artist_mixes: Vec<&GeneratedPlaylist> = playlists
@@ -1568,11 +1567,7 @@ mod tests {
             listening.insert(hash, summary(1, 100.0, 5.0));
         }
 
-        let seeds = PlaylistSeeds {
-            tracks,
-            listening,
-            ..Default::default()
-        };
+        let seeds = PlaylistSeeds { tracks, listening };
         let playlists = generate_utc(&seeds, wednesday());
 
         let artist_mixes: Vec<&GeneratedPlaylist> = playlists
@@ -1605,11 +1600,7 @@ mod tests {
             listening.insert(hash, summary(1, 3_000.0, 1.0));
         }
 
-        let seeds = PlaylistSeeds {
-            tracks,
-            listening,
-            ..Default::default()
-        };
+        let seeds = PlaylistSeeds { tracks, listening };
         let playlists = generate_utc(&seeds, wednesday());
 
         let albums: Vec<&GeneratedPlaylist> = playlists
@@ -1659,11 +1650,7 @@ mod tests {
             ));
         }
 
-        let seeds = PlaylistSeeds {
-            tracks,
-            listening,
-            ..Default::default()
-        };
+        let seeds = PlaylistSeeds { tracks, listening };
         let playlists = generate(&seeds, now, 0);
 
         let lost: Vec<&GeneratedPlaylist> = playlists
@@ -1724,11 +1711,7 @@ mod tests {
             );
         }
 
-        let seeds = PlaylistSeeds {
-            tracks,
-            listening,
-            ..Default::default()
-        };
+        let seeds = PlaylistSeeds { tracks, listening };
         let playlists = generate(&seeds, now, 0);
 
         let capsule = playlists
@@ -1764,11 +1747,7 @@ mod tests {
             }
         }
 
-        let seeds = PlaylistSeeds {
-            tracks,
-            listening,
-            ..Default::default()
-        };
+        let seeds = PlaylistSeeds { tracks, listening };
         let playlists = generate_utc(&seeds, wednesday());
 
         let hits: Vec<&GeneratedPlaylist> = playlists
@@ -1801,11 +1780,7 @@ mod tests {
             listening.insert(hash, summary(1, 1.0, 5.0));
         }
 
-        let seeds = PlaylistSeeds {
-            tracks,
-            listening,
-            ..Default::default()
-        };
+        let seeds = PlaylistSeeds { tracks, listening };
         let playlists = generate_utc(&seeds, wednesday());
 
         let hits: Vec<&GeneratedPlaylist> = playlists
@@ -2103,11 +2078,7 @@ mod tests {
                 last_played_year: None,
             },
         );
-        let seeds = PlaylistSeeds {
-            tracks,
-            listening,
-            ..Default::default()
-        };
+        let seeds = PlaylistSeeds { tracks, listening };
 
         let result = radio(&seeds, "seed", 10).unwrap();
 

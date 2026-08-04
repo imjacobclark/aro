@@ -115,6 +115,9 @@ pub fn analyze_file(path: &Path) -> Result<LoudnessResult, Error> {
         let mut samples = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
         samples.copy_interleaved_ref(decoded);
         let interleaved = samples.samples();
+        // The index is the channel's offset into the interleaved frame as well as the
+        // meter to feed, so it is genuinely arithmetic rather than mere addressing.
+        #[allow(clippy::needless_range_loop)]
         for channel in 0..channel_count {
             let channel_samples = interleaved
                 .iter()

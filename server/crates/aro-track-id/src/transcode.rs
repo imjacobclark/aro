@@ -76,7 +76,7 @@ impl StreamQuality {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "original" => Some(Self::Original),
             "high" => Some(Self::High),
@@ -359,7 +359,10 @@ impl PcmSource {
                 }
                 other => Error::Symphonia(other),
             })?;
-        let source_rate = track.codec_params.sample_rate.ok_or(Error::UnknownSampleRate)?;
+        let source_rate = track
+            .codec_params
+            .sample_rate
+            .ok_or(Error::UnknownSampleRate)?;
         let channels = track
             .codec_params
             .channels
@@ -526,9 +529,9 @@ mod tests {
             StreamQuality::Saver,
             StreamQuality::Minimum,
         ] {
-            assert_eq!(StreamQuality::from_str(quality.as_str()), Some(quality));
+            assert_eq!(StreamQuality::parse(quality.as_str()), Some(quality));
         }
-        assert_eq!(StreamQuality::from_str("lossless"), None);
+        assert_eq!(StreamQuality::parse("lossless"), None);
     }
 
     /// Writes a minimal PCM16 WAV so the decode → resample → encode path can be exercised

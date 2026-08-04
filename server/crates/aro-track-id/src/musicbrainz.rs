@@ -716,11 +716,7 @@ pub async fn fetch_release_group_cover_art_manifest(
     .await
 }
 
-async fn fetch_manifest(
-    http: &reqwest::Client,
-    user_agent: &str,
-    url: &str,
-) -> Vec<CoverArtImage> {
+async fn fetch_manifest(http: &reqwest::Client, user_agent: &str, url: &str) -> Vec<CoverArtImage> {
     let Ok(response) = http
         .get(url)
         .header(reqwest::header::USER_AGENT, user_agent)
@@ -860,10 +856,9 @@ mod tests {
         .unwrap();
         assert_eq!(only_sized.thumbnail_url(), Some("500.jpg"));
 
-        let none: CoverArtImage = serde_json::from_str(
-            r#"{"image": "https://coverartarchive.org/release/x/1.jpg"}"#,
-        )
-        .unwrap();
+        let none: CoverArtImage =
+            serde_json::from_str(r#"{"image": "https://coverartarchive.org/release/x/1.jpg"}"#)
+                .unwrap();
         assert_eq!(none.thumbnail_url(), None);
     }
 

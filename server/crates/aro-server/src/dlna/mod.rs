@@ -700,9 +700,11 @@ mod integration_tests {
             audio_features,
         )
         .unwrap();
-        let mut config = Config::default();
-        config.hub_id = hub_id;
-        config.display_name = "Test Hub".into();
+        let config = Config {
+            hub_id,
+            display_name: "Test Hub".into(),
+            ..Config::default()
+        };
         let app = AppState {
             config_path: root.path().join("aro.toml"),
             hub_id,

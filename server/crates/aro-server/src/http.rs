@@ -1225,11 +1225,8 @@ async fn transcode_plan(
         let pending = store.tracks_missing_transcode(&quality_name)?;
         let total = store.active_track_count()?;
         let pending_audio_seconds: f64 = pending.iter().map(|(_, duration)| *duration).sum();
-        let estimated_seconds = aro_track_id::transcode::estimate_seconds(
-            pending_audio_seconds,
-            quality,
-            concurrency,
-        );
+        let estimated_seconds =
+            aro_track_id::transcode::estimate_seconds(pending_audio_seconds, quality, concurrency);
         let bits = quality.bits_per_second().unwrap_or(0) as f64;
         Ok::<_, aro_sync_store::StoreError>(TranscodePlan {
             quality: quality_name,
@@ -1386,7 +1383,7 @@ async fn transcode_usage(
 fn parse_quality(value: Option<&str>) -> Result<aro_track_id::transcode::StreamQuality, ApiError> {
     let quality = value
         .map(|value| {
-            aro_track_id::transcode::StreamQuality::from_str(value)
+            aro_track_id::transcode::StreamQuality::parse(value)
                 .ok_or_else(|| ApiError::bad_request("unknown_quality"))
         })
         .transpose()?
@@ -1424,7 +1421,7 @@ async fn stream_blob(
         .quality
         .as_deref()
         .map(|value| {
-            aro_track_id::transcode::StreamQuality::from_str(value)
+            aro_track_id::transcode::StreamQuality::parse(value)
                 .ok_or_else(|| ApiError::bad_request("unknown_quality"))
         })
         .transpose()?
@@ -1737,7 +1734,9 @@ async fn resolve_artwork(
     require_device_or_admin(&state, &headers)?;
     // Only the archive serves these, and the URL arrives from a client: without this an
     // authenticated device could point the hub at an arbitrary host.
-    if !request.image_url.starts_with("https://coverartarchive.org/")
+    if !request
+        .image_url
+        .starts_with("https://coverartarchive.org/")
         && !request.image_url.starts_with("https://archive.org/")
         && !request.image_url.starts_with("https://ia")
     {

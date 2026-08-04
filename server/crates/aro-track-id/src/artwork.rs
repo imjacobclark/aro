@@ -115,8 +115,7 @@ pub async fn discover_candidates(
             .await
             .unwrap_or_default();
         for release in releases.into_iter().take(MAX_PRESSINGS) {
-            let images =
-                musicbrainz::fetch_cover_art_manifest(http, user_agent, &release.id).await;
+            let images = musicbrainz::fetch_cover_art_manifest(http, user_agent, &release.id).await;
             for image in images.into_iter().take(MAX_IMAGES_PER_RELEASE) {
                 push_candidate(
                     &mut candidates,
@@ -126,10 +125,7 @@ pub async fn discover_candidates(
                     user_agent,
                     &image,
                     ArtworkOrigin::ThisAlbum,
-                    release
-                        .title
-                        .clone()
-                        .or_else(|| album.map(str::to_owned)),
+                    release.title.clone().or_else(|| album.map(str::to_owned)),
                     Some(release.id.clone()),
                     Some(group_id.to_owned()),
                 )

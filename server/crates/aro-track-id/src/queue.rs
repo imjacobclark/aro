@@ -602,6 +602,7 @@ impl Drop for PendingGuard<'_> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run(
     inner: Arc<Inner>,
     store: HubStore,
@@ -881,6 +882,7 @@ async fn reconcile_sweep(
 /// (stale-generation and group-retry) since the "run the group path again, diff the
 /// before/after" logic is identical; only what happens *after* differs (advancing
 /// generation vs. counting an attempt), which each caller does for itself.
+#[allow(clippy::too_many_arguments)]
 async fn reconcile_one_folder(
     store: &HubStore,
     hub_id: Uuid,
@@ -988,6 +990,7 @@ impl From<&IdentificationResult> for ResultShape {
 /// was found upstream (not an error — just try again later, e.g. via a manual "Sync
 /// Track Data"). Errors are reserved for genuine failures (decode error, network
 /// error, etc.), not "no match."
+#[allow(clippy::too_many_arguments)]
 async fn identify_file(
     store: &HubStore,
     hub_id: Uuid,
@@ -1244,6 +1247,7 @@ struct PerFileFields {
 /// passed separately (rather than always using `prepared.tags.album`) so a group match's
 /// leftover files can be given the winning release's title as a much stronger hint than
 /// their own (possibly wrong or absent) album tag — see `identify_group`.
+#[allow(clippy::too_many_arguments)]
 async fn per_file_fields(
     prepared: &PreparedFile,
     store: &HubStore,
@@ -1599,6 +1603,7 @@ async fn finish_per_file_with_hint(
 /// artist identity, which keeps artist-spanning retrospectives such as
 /// `Eric Clapton/The Cream Of Clapton` together instead of presenting one album per
 /// historical performing act.
+#[allow(clippy::too_many_arguments)]
 async fn finish_per_file_with_group_identity(
     store: &HubStore,
     hub_id: Uuid,
@@ -1812,6 +1817,7 @@ fn dominant_artist_affinity(
 /// ordinary per-file path for every member of a rejected or under-sized group. Never
 /// returns an error itself — a per-file failure within the group is logged and counted,
 /// not allowed to abort the rest of the folder.
+#[allow(clippy::too_many_arguments)]
 async fn identify_group(
     store: &HubStore,
     hub_id: Uuid,

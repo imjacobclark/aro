@@ -358,14 +358,18 @@ fn mel_filterbank(sample_rate: u32, frame_size: usize, bands: usize) -> Vec<Vec<
             let mut filter = vec![0.0_f32; bin_count];
             let (left, center, right) =
                 (bin_points[band], bin_points[band + 1], bin_points[band + 2]);
-            for bin in left..center {
-                if center > left {
-                    filter[bin] = (bin - left) as f32 / (center - left) as f32;
+            // `offset` is `bin - left` / `bin - center` by construction, so the ramps are
+            // unchanged — iterating the slice just states the relationship directly.
+            if center > left {
+                let span = (center - left) as f32;
+                for (offset, value) in filter[left..center].iter_mut().enumerate() {
+                    *value = offset as f32 / span;
                 }
             }
-            for bin in center..right {
-                if right > center {
-                    filter[bin] = 1.0 - (bin - center) as f32 / (right - center) as f32;
+            if right > center {
+                let span = (right - center) as f32;
+                for (offset, value) in filter[center..right].iter_mut().enumerate() {
+                    *value = 1.0 - offset as f32 / span;
                 }
             }
             filter

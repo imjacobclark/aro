@@ -588,9 +588,11 @@ mod tests {
         )
         .unwrap();
 
-        let mut config = Config::default();
-        config.data_dir = data_dir;
-        config.hub_id = hub_id;
+        let config = Config {
+            data_dir,
+            hub_id,
+            ..Config::default()
+        };
         let config_path = root.path().join("aro.toml");
         config.save(&config_path).unwrap();
 

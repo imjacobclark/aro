@@ -46,16 +46,16 @@ jobs:
           components: rustfmt, clippy
       # aro-track-id links the real libchromaprint (see its fingerprint.rs) via
       # pkg-config at build time — install it per-platform before anything else.
-      - name: Install libchromaprint (macOS)
+      - name: Install libchromaprint and libopus (macOS)
         if: runner.os == 'macOS'
-        run: brew install chromaprint pkgconf
-      - name: Install libchromaprint (Linux)
+        run: brew install chromaprint opus pkgconf
+      - name: Install libchromaprint and libopus (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libchromaprint-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libchromaprint-dev libopus-dev pkg-config
       - name: Install libchromaprint (Windows)
         if: runner.os == 'Windows'
         run: |
-          vcpkg install chromaprint:x64-windows
+          vcpkg install chromaprint:x64-windows opus:x64-windows
           echo "PKG_CONFIG_PATH=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\lib\pkgconfig" >> $env:GITHUB_ENV
       - run: cargo test --manifest-path server/Cargo.toml --workspace
       - run: cargo clippy --manifest-path server/Cargo.toml --workspace --all-targets -- -D warnings
@@ -65,8 +65,8 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
-      - name: Install libchromaprint
-        run: brew install chromaprint pkgconf
+      - name: Install libchromaprint and libopus
+        run: brew install chromaprint opus pkgconf
       - run: swift test --package-path common
       - name: Test Swift and Rust pairing interoperability
         run: |

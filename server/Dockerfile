@@ -1,12 +1,12 @@
 FROM rust:1.97-bookworm AS builder
-RUN apt-get update && apt-get install -y --no-install-recommends libchromaprint-dev pkg-config \
+RUN apt-get update && apt-get install -y --no-install-recommends libchromaprint-dev libopus-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
 RUN cargo build --locked --release -p aro-server
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends libchromaprint1 \
+RUN apt-get update && apt-get install -y --no-install-recommends libchromaprint1 libopus0 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --home /var/lib/aro aro \
     && mkdir -p /var/lib/aro /etc/aro \

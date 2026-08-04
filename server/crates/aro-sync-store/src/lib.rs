@@ -560,11 +560,11 @@ impl HubStore {
                 .unwrap_or(Value::Object(Default::default()));
             let effective = |key: &str| {
                 if metadata
-                    .get(&format!("manual_{key}_set"))
+                    .get(format!("manual_{key}_set"))
                     .and_then(Value::as_bool)
                     == Some(true)
                 {
-                    metadata.get(&format!("manual_{key}"))
+                    metadata.get(format!("manual_{key}"))
                 } else {
                     metadata.get(key)
                 }
@@ -1638,20 +1638,20 @@ impl HubStore {
             let title = metadata["title"].as_str().unwrap_or("Unknown Track");
             let artist = metadata["artist"].as_str().unwrap_or("Unknown Artist");
             let album = metadata["album"].as_str().unwrap_or("Unknown Album");
-            if let Some(started_at) = started_at {
-                if let Some(date) = chrono::DateTime::from_timestamp(
+            if let Some(started_at) = started_at
+                && let Some(date) = chrono::DateTime::from_timestamp(
                     started_at as i64,
                     ((started_at.fract() * 1_000_000_000.0) as u32).min(999_999_999),
-                ) {
-                    *seconds_by_day.entry(date.date_naive()).or_default() += listened_seconds;
-                    if recent.len() < 8 {
-                        recent.push(serde_json::json!({
-                            "id": event_id,
-                            "title": title,
-                            "subtitle": format!("{artist} — {album}"),
-                            "played_at": date,
-                        }));
-                    }
+                )
+            {
+                *seconds_by_day.entry(date.date_naive()).or_default() += listened_seconds;
+                if recent.len() < 8 {
+                    recent.push(serde_json::json!({
+                        "id": event_id,
+                        "title": title,
+                        "subtitle": format!("{artist} — {album}"),
+                        "played_at": date,
+                    }));
                 }
             }
             let entry = top_tracks
@@ -3146,10 +3146,9 @@ impl HubStore {
                 "SELECT artist_normalized, release_group_id \
                  FROM release_group_affinity_members WHERE content_hash = ?1",
             )?;
-            let rows = statement
+            statement
                 .query_map([content_hash], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
-            rows
+                .collect::<Result<Vec<_>, _>>()?
         };
         // Cleared across every artist, not just this one: a manual artist edit changes the
         // normalized key, which would otherwise strand the old rows unreachable.
@@ -3275,10 +3274,9 @@ impl HubStore {
             let mut statement = connection.prepare(
                 "SELECT blob_hash, byte_count FROM transcoded_blobs WHERE quality <> ?1",
             )?;
-            let rows = statement
+            statement
                 .query_map([keep], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
-            rows
+                .collect::<Result<Vec<_>, _>>()?
         };
         self.connection
             .lock()
@@ -5723,7 +5721,7 @@ mod tests {
         let store = HubStore::open(directory.path()).unwrap();
         let source = directory.path().join("encoded.opus");
         std::fs::write(&source, b"pretend this is ogg opus").unwrap();
-        let (blob_hash, size) = store.import_managed(&source).unwrap();
+        let (blob_hash, _size) = store.import_managed(&source).unwrap();
 
         // Unreferenced by anything, it is fair game.
         assert!(store.purge_blob(&blob_hash).unwrap());
@@ -5762,16 +5760,27 @@ mod tests {
 
         let (removed, freed) = store.purge_transcodes_except("saver").unwrap();
         assert_eq!(removed, 2);
-        assert!(freed > 0, "freeing two encodes should report bytes reclaimed");
+        assert!(
+            freed > 0,
+            "freeing two encodes should report bytes reclaimed"
+        );
 
         let remaining = store.transcode_usage().unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].0, "saver");
         assert!(
-            store.transcoded_blob("track-hash", "saver").unwrap().is_some(),
+            store
+                .transcoded_blob("track-hash", "saver")
+                .unwrap()
+                .is_some(),
             "the kept quality must still resolve"
         );
-        assert!(store.transcoded_blob("track-hash", "minimum").unwrap().is_none());
+        assert!(
+            store
+                .transcoded_blob("track-hash", "minimum")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

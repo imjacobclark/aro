@@ -365,8 +365,10 @@ mod admin_allow_tests {
 
     #[test]
     fn accepts_a_widened_lan_subnet() {
-        let mut config = Config::default();
-        config.admin_allow = vec!["192.168.1.0/24".parse().unwrap()];
+        let config = Config {
+            admin_allow: vec!["192.168.1.0/24".parse().unwrap()],
+            ..Config::default()
+        };
         assert!(config.validate().is_ok());
     }
 
@@ -467,9 +469,11 @@ mod admin_allow_tests {
         std::fs::write(data_dir.join("hub.sqlite3"), b"").unwrap();
 
         let config_path = directory.path().join("aro.toml");
-        let mut config = Config::default();
-        config.data_dir = data_dir;
-        config.storage_mode = StorageMode::Managed;
+        let config = Config {
+            data_dir,
+            storage_mode: StorageMode::Managed,
+            ..Config::default()
+        };
         config.save(&config_path).unwrap();
 
         // SAFETY: single-threaded test process; no other thread reads/writes

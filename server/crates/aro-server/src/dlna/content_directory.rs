@@ -144,10 +144,10 @@ fn soap_fields(body: &str, names: &[&str]) -> HashMap<String, String> {
                 }
             }
             Ok(Event::Text(text)) => {
-                if let Some(name) = &current {
-                    if let Ok(value) = text.unescape() {
-                        fields.insert(name.clone(), value.to_string());
-                    }
+                if let Some(name) = &current
+                    && let Ok(value) = text.unescape()
+                {
+                    fields.insert(name.clone(), value.to_string());
                 }
             }
             Ok(Event::End(_)) => current = None,
