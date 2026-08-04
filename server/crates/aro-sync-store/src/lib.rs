@@ -382,6 +382,12 @@ impl HubStore {
         after_sequence: u64,
         limit: u32,
     ) -> Result<Vec<SequencedOperation>, StoreError> {
+        // SQLite's INTEGER is signed, so binding a u64 above i64::MAX fails the
+        // conversion outright rather than simply matching no rows. A push-only
+        // exchange legitimately sends u64::MAX to mean "return nothing to me",
+        // and a cursor that large can never match a real sequence anyway, so
+        // saturating here is lossless and keeps client input from 500ing.
+        let after_sequence = after_sequence.min(i64::MAX as u64);
         let connection = self.connection.lock();
         let mut statement = connection.prepare(
             r#"
@@ -1143,6 +1149,10 @@ impl HubStore {
         offline_track_count: Option<u64>,
     ) -> Result<(), StoreError> {
         let now = chrono::Utc::now().to_rfc3339();
+        // Same signed-INTEGER constraint as `changes_after`: this count comes
+        // straight off the wire, and a device reporting an absurd figure should
+        // record a saturated count rather than fail the whole exchange.
+        let offline_track_count = offline_track_count.map(|count| count.min(i64::MAX as u64));
         self.connection.lock().execute(
             r#"
             UPDATE device_credentials
@@ -3918,6 +3928,38 @@ mod tests {
         assert_eq!(store.append_operations(&[op]).unwrap().len(), 1);
         assert_eq!(store.changes_after(0, 10).unwrap().len(), 1);
         assert!(store.changes_after(1, 10).unwrap().is_empty());
+    }
+
+    /// A push-only exchange sends `u64::MAX` to mean "return nothing to me".
+    /// SQLite's INTEGER is signed, so binding that unsaturated fails the
+    /// conversion and turns an ordinary sync into a 500 for every client.
+    #[test]
+    fn a_cursor_beyond_the_signed_range_returns_nothing_rather_than_failing() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        store
+            .append_operations(&[operation(Uuid::new_v4())])
+            .unwrap();
+        assert!(store.changes_after(u64::MAX, 1).unwrap().is_empty());
+        assert!(
+            store
+                .changes_after(i64::MAX as u64 + 1, 500)
+                .unwrap()
+                .is_empty()
+        );
+        // The ordinary cursor path must be untouched by the saturation.
+        assert_eq!(store.changes_after(0, 10).unwrap().len(), 1);
+    }
+
+    /// The offline count arrives straight off the wire and lands in the same
+    /// signed column, so an absurd report must not fail the whole exchange.
+    #[test]
+    fn an_out_of_range_offline_track_count_is_saturated_not_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        store
+            .record_device_seen(Uuid::new_v4(), true, Some(u64::MAX))
+            .unwrap();
     }
 
     #[test]
