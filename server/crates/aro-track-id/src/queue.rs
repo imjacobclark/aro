@@ -1326,6 +1326,7 @@ async fn per_file_fields(
                     artist,
                     release_group_id,
                     release.title.as_deref(),
+                    &prepared.job.content_hash,
                 )?;
             }
         }
@@ -2078,6 +2079,7 @@ async fn identify_group(
                     &artist_normalized,
                     release_group_id,
                     best.release_title.as_deref(),
+                    &file.job.content_hash,
                 )
             {
                 tracing::warn!(%error, "failed to record release-group affinity");

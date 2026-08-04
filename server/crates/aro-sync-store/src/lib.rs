@@ -3115,29 +3115,50 @@ impl HubStore {
         Ok(json.and_then(|value| serde_json::from_str(&value).ok()))
     }
 
-    /// Records that `artist_normalized`'s track identification resolved to
-    /// `release_group_id` this time, incrementing its running tally. Used by
-    /// `aro-track-id`'s "Intelligent" album-matching mode to let a release-group
-    /// that already has several of an artist's tracks pull in the rest, instead of
-    /// each track picking independently. Never overwrites `release_title` with
-    /// `None` — later calls for the same release-group may not always have a title
-    /// on hand, but earlier ones did.
+    /// Records that `content_hash` resolved to `release_group_id` for
+    /// `artist_normalized`. Used by `aro-track-id`'s "Intelligent" album-matching mode
+    /// to let a release-group that already has several of an artist's tracks pull in the
+    /// rest, instead of each track picking independently. Never overwrites
+    /// `release_title` with `None` — later calls for the same release-group may not
+    /// always have a title on hand, but earlier ones did.
+    ///
+    /// The tally is the number of *distinct tracks* that chose this release-group, not
+    /// the number of times identification has run. Re-identifying the same track (a new
+    /// generation, a manual re-scan, a retry) has to leave the tally where it was:
+    /// otherwise affinity measures how often the queue has run rather than how much of
+    /// the artist's music actually lives on that release, and grows without bound.
     pub fn record_release_group_choice(
         &self,
         artist_normalized: &str,
         release_group_id: &str,
         release_title: Option<&str>,
+        content_hash: &str,
     ) -> Result<(), StoreError> {
-        self.connection.lock().execute(
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            r#"
+            INSERT OR IGNORE INTO release_group_affinity_members
+                (artist_normalized, release_group_id, content_hash)
+            VALUES (?1, ?2, ?3)
+            "#,
+            params![artist_normalized, release_group_id, content_hash],
+        )?;
+        transaction.execute(
             r#"
             INSERT INTO release_group_affinity(artist_normalized, release_group_id, release_title, track_count)
             VALUES (?1, ?2, ?3, 1)
             ON CONFLICT(artist_normalized, release_group_id) DO UPDATE SET
                 release_title = COALESCE(excluded.release_title, release_group_affinity.release_title),
-                track_count = release_group_affinity.track_count + 1
+                track_count = (
+                    SELECT COUNT(*) FROM release_group_affinity_members AS members
+                    WHERE members.artist_normalized = ?1
+                      AND members.release_group_id = ?2
+                )
             "#,
             params![artist_normalized, release_group_id, release_title],
         )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -3724,6 +3745,34 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
             last_attempted_at INTEGER NOT NULL
         );
         INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (12, unixepoch());
+        "#,
+    )?;
+    // Affinity used to be a bare counter bumped on every identification, so re-running
+    // identification inflated it without bound — a 355-track library had accumulated a
+    // tally of 53,710 for one release group, which drowns out every genuine signal.
+    // Recording which tracks voted makes the tally idempotent, and rebuilding it from
+    // `identification_results` repairs libraries that already ran away.
+    connection.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS release_group_affinity_members (
+            artist_normalized TEXT NOT NULL,
+            release_group_id TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            PRIMARY KEY(artist_normalized, release_group_id, content_hash)
+        );
+        INSERT OR IGNORE INTO release_group_affinity_members
+            (artist_normalized, release_group_id, content_hash)
+        SELECT affinity.artist_normalized, results.release_group_id, results.content_hash
+        FROM identification_results AS results
+        JOIN release_group_affinity AS affinity
+            ON affinity.release_group_id = results.release_group_id
+        WHERE results.release_group_id IS NOT NULL;
+        UPDATE release_group_affinity SET track_count = (
+            SELECT COUNT(*) FROM release_group_affinity_members AS members
+            WHERE members.artist_normalized = release_group_affinity.artist_normalized
+              AND members.release_group_id = release_group_affinity.release_group_id
+        );
+        INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (13, unixepoch());
         "#,
     )?;
     Ok(())
@@ -5339,6 +5388,7 @@ mod tests {
                 "neck deep",
                 "rg-real-album",
                 Some("Life's Not Out to Get You"),
+                "hash-track-one",
             )
             .unwrap();
         store
@@ -5346,15 +5396,37 @@ mod tests {
                 "neck deep",
                 "rg-real-album",
                 Some("Life's Not Out to Get You"),
+                "hash-track-two",
             )
             .unwrap();
         store
-            .record_release_group_choice("the beatles", "rg-one", Some("1"))
+            .record_release_group_choice("the beatles", "rg-one", Some("1"), "hash-beatles-one")
             .unwrap();
 
         let neck_deep = store.release_group_affinity("neck deep").unwrap();
         assert_eq!(neck_deep.get("rg-real-album"), Some(&2));
         assert_eq!(neck_deep.len(), 1);
+
+        // Re-identifying a track already counted must not inflate the tally: affinity
+        // measures how much of the artist's music sits on the release, not how many
+        // times identification has run over it.
+        for _ in 0..5 {
+            store
+                .record_release_group_choice(
+                    "neck deep",
+                    "rg-real-album",
+                    Some("Life's Not Out to Get You"),
+                    "hash-track-one",
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            store
+                .release_group_affinity("neck deep")
+                .unwrap()
+                .get("rg-real-album"),
+            Some(&2)
+        );
 
         // Scoped per artist: the Beatles tally never shows up for Neck Deep and
         // vice versa.

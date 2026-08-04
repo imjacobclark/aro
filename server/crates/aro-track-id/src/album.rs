@@ -97,7 +97,8 @@ const MIN_SHORTLIST_SUPPORT_FRACTION: f64 = 0.15;
 /// just the winning one) — the union across all files is the candidate pool.
 ///
 /// Ranking, most to least significant: **support** (how many distinct files offered this
-/// release) descending; **track-count agreement** with the group's size ascending (a
+/// *album*, counting every pressing of it as one — see [`title_class`]) descending;
+/// **track-count agreement** with the group's size ascending (a
 /// release stub without `media` track-count data sorts last on this term, not excluded);
 /// **is-album** descending (reuses `musicbrainz::classify`, the same check
 /// `select_release` uses, so the two paths never disagree); **affinity** (this artist's
@@ -112,14 +113,21 @@ pub fn shortlist_candidates(
 ) -> Vec<String> {
     let mut support: HashMap<String, usize> = HashMap::new();
     let mut summary: HashMap<String, ReleaseSummary> = HashMap::new();
+    let mut releases_in_class: HashMap<String, HashSet<String>> = HashMap::new();
 
     for releases in releases_per_file {
-        let mut seen_in_this_file: HashSet<&str> = HashSet::new();
+        let mut seen_in_this_file: HashSet<String> = HashSet::new();
         for release in releases {
-            if !seen_in_this_file.insert(&release.id) {
-                continue;
+            let class = title_class(release);
+            releases_in_class
+                .entry(class.clone())
+                .or_default()
+                .insert(release.id.clone());
+            // Support counts *files*, so a file offering three pressings of one album is
+            // one voice for that album rather than three.
+            if seen_in_this_file.insert(class.clone()) {
+                *support.entry(class).or_insert(0) += 1;
             }
-            *support.entry(release.id.clone()).or_insert(0) += 1;
             summary.entry(release.id.clone()).or_insert_with(|| {
                 let group = release.release_group.as_ref();
                 ReleaseSummary {
@@ -143,33 +151,68 @@ pub fn shortlist_candidates(
     let member_count = files.len();
     let threshold = ((MIN_SHORTLIST_SUPPORT_FRACTION * member_count as f64).ceil() as usize)
         .max(MIN_SHORTLIST_SUPPORT_FLOOR);
-
-    let mut candidates: Vec<(String, usize)> = support
-        .into_iter()
-        .filter(|(_, count)| *count >= threshold)
-        .collect();
-
-    candidates.sort_by_key(|(release_id, count)| {
+    let rank_of = |release_id: &str| {
         let info = &summary[release_id];
         let track_total_diff = info
             .track_total
             .map(|total| (i64::from(total) - member_count as i64).unsigned_abs() as u32)
             .unwrap_or(u32::MAX);
         (
-            Reverse(*count),
             track_total_diff,
             Reverse(info.is_album),
             Reverse(info.affinity),
             Reverse(info.is_official),
-            release_id.clone(),
+            release_id.to_owned(),
         )
-    });
+    };
+
+    // One release per class actually gets its tracklist fetched: the pressing whose track
+    // count best fits this folder. Picking within the class rather than across the whole
+    // pool is what stops a 31-track compilation from representing a 15-track album.
+    let mut candidates: Vec<(String, usize)> = support
+        .into_iter()
+        .filter(|(_, count)| *count >= threshold)
+        .filter_map(|(class, count)| {
+            let representative = releases_in_class
+                .get(&class)?
+                .iter()
+                .min_by_key(|release_id| rank_of(release_id))?
+                .clone();
+            Some((representative, count))
+        })
+        .collect();
+
+    candidates.sort_by_key(|(release_id, count)| (Reverse(*count), rank_of(release_id)));
 
     candidates
         .into_iter()
         .take(limit)
         .map(|(release_id, _)| release_id)
         .collect()
+}
+
+/// Groups pressings of the same album together for support counting. MusicBrainz routinely
+/// carries one album as many release ids — nine separate "Greatest Hits" pressings for The
+/// Shadows, observed directly — and counting each separately splits an album's support
+/// until it drops under the shortlist threshold, handing the folder to whichever unrelated
+/// compilation happens to exist as a single release. This mirrors what `AffinityIndex`
+/// already does for affinity, so the two tiers agree on what counts as "the same album".
+///
+/// Keyed on release-group id when the titles agree, so two genuinely different albums that
+/// happen to share a title (a self-titled record and a compilation of it) stay distinct.
+/// A release with no usable title falls back to its own id and stays a singleton class.
+fn title_class(release: &musicbrainz::Release) -> String {
+    let group = release.release_group.as_ref();
+    let title = group
+        .and_then(|group| group.title.as_deref())
+        .or(release.title.as_deref())
+        .map(matching::normalize_matching_key)
+        .filter(|title| !title.is_empty());
+    match title {
+        // NUL cannot appear in a real MusicBrainz title, so this never collides with one.
+        Some(title) => title,
+        None => format!("\0untitled:{}", release.id),
+    }
 }
 
 /// A pair scores below this are never assigned, regardless of whether a track slot is
@@ -793,6 +836,87 @@ mod tests {
 
         assert!(!accept(&weak, None, 1));
         assert!(accept(&strong, None, 1));
+    }
+
+    /// As [`synthetic_stub_release`], but with a release-group *title* — what
+    /// [`title_class`] groups pressings by.
+    fn titled_stub_release(
+        id: &str,
+        group_id: &str,
+        group_title: &str,
+        track_total: u32,
+    ) -> musicbrainz::Release {
+        let mut release = synthetic_stub_release(id, Some(group_id), Some(track_total));
+        if let Some(group) = release.release_group.as_mut() {
+            group.title = Some(group_title.to_string());
+        }
+        release
+    }
+
+    /// The real shape of The Shadows' "Greatest Hits" folder: MusicBrainz carries that
+    /// album as nine separate pressings, while an unrelated compilation exists as a
+    /// single release. Counting support per release id split the album nine ways —
+    /// every pressing landed under the threshold and the folder was handed to the
+    /// compilation, which is how 13 tracks ended up filed as "Shadows Are Go!".
+    #[test]
+    fn pressings_of_one_album_are_counted_together_not_split_apart() {
+        let releases_per_file: Vec<Vec<musicbrainz::Release>> = (0..15)
+            .map(|file_index| {
+                let mut releases = Vec::new();
+                if file_index < 9 {
+                    // Each file offers a *different* pressing of the same album, so no
+                    // single release id gets more than one voice.
+                    releases.push(titled_stub_release(
+                        &format!("rel-greatest-hits-{file_index}"),
+                        &format!("rg-greatest-hits-{file_index}"),
+                        "Greatest Hits",
+                        17,
+                    ));
+                }
+                if file_index < 5 {
+                    releases.push(titled_stub_release(
+                        "rel-30-all-time",
+                        "rg-30-all-time",
+                        "30 All Time Greatest Hits",
+                        31,
+                    ));
+                }
+                releases
+            })
+            .collect();
+        let owned: Vec<OwnedGroupFile> = (0..15)
+            .map(|_| OwnedGroupFile {
+                path: PathBuf::from("f.mp3"),
+                duration_secs: 200,
+                tags: ExistingTags::default(),
+                candidate_recording_ids: Vec::new(),
+            })
+            .collect();
+        let files = borrow_group_files(&owned);
+
+        let shortlisted = shortlist_candidates(
+            &files,
+            &releases_per_file,
+            &musicbrainz::AffinityIndex::default(),
+            3,
+        );
+
+        assert!(
+            shortlisted
+                .first()
+                .is_some_and(|id| id.starts_with("rel-greatest-hits-")),
+            "the album nine files agree on should outrank the compilation five do, got {shortlisted:?}"
+        );
+        // One pressing represents the album; the others must not crowd out the limited
+        // tracklist-fetch budget with duplicates of the same record.
+        assert_eq!(
+            shortlisted
+                .iter()
+                .filter(|id| id.starts_with("rel-greatest-hits-"))
+                .count(),
+            1,
+            "expected a single representative pressing, got {shortlisted:?}"
+        );
     }
 
     fn synthetic_stub_release(
