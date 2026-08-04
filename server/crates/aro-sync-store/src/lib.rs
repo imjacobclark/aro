@@ -3228,6 +3228,86 @@ impl HubStore {
             .optional()?)
     }
 
+    /// Live tracks with no encode yet at `quality`, as (content hash, duration seconds).
+    /// Duration drives the time estimate shown before a conversion is agreed to, so it is
+    /// returned here rather than recomputed by the caller.
+    pub fn tracks_missing_transcode(
+        &self,
+        quality: &str,
+    ) -> Result<Vec<(String, f64)>, StoreError> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            r#"
+            SELECT tracks.content_hash,
+                   COALESCE(json_extract(tracks.metadata, '$.duration_seconds'), 0)
+            FROM tracks
+            WHERE tracks.tombstoned_at IS NULL
+              AND tracks.purged_at IS NULL
+              AND tracks.content_hash IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM transcoded_blobs
+                  WHERE transcoded_blobs.content_hash = tracks.content_hash
+                    AND transcoded_blobs.quality = ?1
+              )
+            "#,
+        )?;
+        let rows = statement
+            .query_map([quality], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Every encode held at qualities other than `keep`, so a listener who moves back up
+    /// the ladder can reclaim the space rather than silently keeping copies they will never
+    /// play again. Returns what was removed and how many bytes it freed.
+    pub fn purge_transcodes_except(&self, keep: &str) -> Result<(u64, u64), StoreError> {
+        let doomed: Vec<(String, u64)> = {
+            let connection = self.connection.lock();
+            let mut statement = connection.prepare(
+                "SELECT blob_hash, byte_count FROM transcoded_blobs WHERE quality <> ?1",
+            )?;
+            let rows = statement
+                .query_map([keep], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        self.connection
+            .lock()
+            .execute("DELETE FROM transcoded_blobs WHERE quality <> ?1", [keep])?;
+        let mut removed = 0u64;
+        let mut freed = 0u64;
+        for (blob_hash, bytes) in doomed {
+            // Deleting the row first means `purge_blob` no longer counts it as referenced.
+            // A blob shared with something else (the same encode reached from two rows)
+            // stays put, which is what `purge_blob` returning `BlobReferenced` expresses.
+            match self.purge_blob(&blob_hash) {
+                Ok(true) => {
+                    removed += 1;
+                    freed += bytes;
+                }
+                Ok(false) | Err(StoreError::BlobReferenced) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok((removed, freed))
+    }
+
+    /// How much disk the encodes at each quality are using, for the settings screen and the
+    /// dashboard.
+    pub fn transcode_usage(&self) -> Result<Vec<(String, u64, u64)>, StoreError> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            "SELECT quality, COUNT(*), COALESCE(SUM(byte_count), 0) \
+             FROM transcoded_blobs GROUP BY quality ORDER BY quality",
+        )?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn record_transcoded_blob(
         &self,
         content_hash: &str,
@@ -3381,6 +3461,7 @@ impl HubStore {
                  ))
               + (SELECT COUNT(*) FROM identification_results
                  WHERE artwork_url = ?2)
+              + (SELECT COUNT(*) FROM transcoded_blobs WHERE blob_hash = ?1)
             "#,
             params![hash, blob_url],
             |row| row.get(0),
@@ -5571,6 +5652,67 @@ mod tests {
 
         // No source_files row exists for this track, so it isn't reachable on disk.
         assert!(store.live_path_for_track(track_id).unwrap().is_none());
+    }
+
+    /// A generated encode is real work — minutes of CPU on a slow hub — and lives in the
+    /// blob store like any other blob. Nothing points at it from `tracks`, so before
+    /// `transcoded_blobs` was counted as a reference an ordinary purge treated it as an
+    /// orphan and deleted it.
+    #[test]
+    fn a_cached_transcode_is_not_mistaken_for_an_orphan_blob() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let source = directory.path().join("encoded.opus");
+        std::fs::write(&source, b"pretend this is ogg opus").unwrap();
+        let (blob_hash, size) = store.import_managed(&source).unwrap();
+
+        // Unreferenced by anything, it is fair game.
+        assert!(store.purge_blob(&blob_hash).unwrap());
+
+        let (blob_hash, size) = store.import_managed(&source).unwrap();
+        store
+            .record_transcoded_blob("track-hash", "saver", &blob_hash, size)
+            .unwrap();
+        assert!(
+            matches!(
+                store.purge_blob(&blob_hash),
+                Err(StoreError::BlobReferenced)
+            ),
+            "a cached transcode must not be purgeable as an orphan"
+        );
+    }
+
+    /// Moving back up the quality ladder should be able to reclaim the space, but only the
+    /// qualities being abandoned — never the one still in use.
+    #[test]
+    fn cleanup_removes_other_qualities_and_keeps_the_chosen_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+
+        for (index, quality) in ["saver", "minimum", "balanced"].iter().enumerate() {
+            let source = directory.path().join(format!("{quality}.opus"));
+            // Distinct bytes per quality, so each gets its own blob rather than deduping
+            // into one and confusing what "freed" means.
+            std::fs::write(&source, format!("encoded audio {index}").as_bytes()).unwrap();
+            let (blob_hash, size) = store.import_managed(&source).unwrap();
+            store
+                .record_transcoded_blob("track-hash", quality, &blob_hash, size)
+                .unwrap();
+        }
+        assert_eq!(store.transcode_usage().unwrap().len(), 3);
+
+        let (removed, freed) = store.purge_transcodes_except("saver").unwrap();
+        assert_eq!(removed, 2);
+        assert!(freed > 0, "freeing two encodes should report bytes reclaimed");
+
+        let remaining = store.transcode_usage().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].0, "saver");
+        assert!(
+            store.transcoded_blob("track-hash", "saver").unwrap().is_some(),
+            "the kept quality must still resolve"
+        );
+        assert!(store.transcoded_blob("track-hash", "minimum").unwrap().is_none());
     }
 
     #[test]

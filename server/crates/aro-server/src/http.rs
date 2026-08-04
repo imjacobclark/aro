@@ -246,6 +246,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/identification/status", get(identification_status))
         .route("/v1/identification/results", get(identification_results))
         .route("/v1/blobs/{hash}/stream", get(stream_blob))
+        .route("/v1/transcode/plan", get(transcode_plan))
+        .route("/v1/transcode/start", post(start_transcode))
+        .route("/v1/transcode/cleanup", post(cleanup_transcodes))
+        .route("/v1/transcode/usage", get(transcode_usage))
         .route("/v1/artwork/candidates", get(artwork_candidates))
         .route("/v1/artwork/resolve", post(resolve_artwork))
         .route("/v1/metadata-overrides", post(set_manual_metadata))
@@ -1184,6 +1188,210 @@ async fn download_blob(
         state.telemetry.clone(),
     )
     .await
+}
+
+#[derive(Serialize)]
+struct TranscodePlan {
+    quality: String,
+    tracks_total: u64,
+    tracks_pending: u64,
+    /// Music still to convert, so a caller can say "3 hours of music" rather than only a
+    /// track count.
+    pending_audio_seconds: f64,
+    /// Wall time on *this* hub, measured rather than assumed — the same library is minutes
+    /// of work on a fast machine and hours on a slow one.
+    estimated_seconds: f64,
+    /// What the finished encodes will occupy, from the tier's bitrate.
+    estimated_bytes: u64,
+    concurrency: usize,
+}
+
+/// What converting the library to `quality` would cost, before anyone commits to it.
+///
+/// Deliberately a separate call from starting the work: the price is very different from
+/// one hub to the next, and asking someone to accept an unknown wait is how a feature ends
+/// up feeling broken.
+async fn transcode_plan(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<StreamQualityQuery>,
+) -> Result<Json<TranscodePlan>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    let quality = parse_quality(query.quality.as_deref())?;
+    let concurrency = state.transcode_slots.available_permits().max(1);
+    let store = state.store.clone();
+    let quality_name = quality.as_str().to_string();
+    let plan = tokio::task::spawn_blocking(move || {
+        let pending = store.tracks_missing_transcode(&quality_name)?;
+        let total = store.active_track_count()?;
+        let pending_audio_seconds: f64 = pending.iter().map(|(_, duration)| *duration).sum();
+        let estimated_seconds = aro_track_id::transcode::estimate_seconds(
+            pending_audio_seconds,
+            quality,
+            concurrency,
+        );
+        let bits = quality.bits_per_second().unwrap_or(0) as f64;
+        Ok::<_, aro_sync_store::StoreError>(TranscodePlan {
+            quality: quality_name,
+            tracks_total: total,
+            tracks_pending: pending.len() as u64,
+            pending_audio_seconds,
+            estimated_seconds,
+            estimated_bytes: (pending_audio_seconds * bits / 8.0) as u64,
+            concurrency,
+        })
+    })
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))??;
+    Ok(Json(plan))
+}
+
+#[derive(Deserialize)]
+struct StartTranscodeRequest {
+    quality: String,
+}
+
+/// Converts everything not already held at this quality, reporting progress through the
+/// ordinary job registry so the app and the dashboard both watch the same thing.
+async fn start_transcode(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<StartTranscodeRequest>,
+) -> Result<Json<SyncJob>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    let quality = parse_quality(Some(request.quality.as_str()))?;
+    let quality_name = quality.as_str().to_string();
+    let pending = {
+        let store = state.store.clone();
+        let name = quality_name.clone();
+        tokio::task::spawn_blocking(move || store.tracks_missing_transcode(&name))
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))??
+    };
+    let job = state
+        .jobs
+        .create(format!("transcode:{quality_name}"), pending.len() as u64);
+    let job_id = job.job_id;
+    state.jobs.start(job_id);
+
+    let jobs = state.jobs.clone();
+    let store = state.store.clone();
+    let slots = state.transcode_slots.clone();
+    tokio::spawn(async move {
+        for (content_hash, _) in pending {
+            // A cancelled job stops at the next track rather than mid-encode, so nothing
+            // half-written is ever recorded.
+            if jobs
+                .get(job_id)
+                .is_some_and(|job| job.state == aro_sync_protocol::JobState::Cancelled)
+            {
+                return;
+            }
+            let Ok(permit) = slots.clone().acquire_owned().await else {
+                break;
+            };
+            let store = store.clone();
+            let name = quality_name.clone();
+            let hash = content_hash.clone();
+            let encoded = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let Some(source) = store.blob_path_for_download(&hash)? else {
+                    return Ok::<bool, anyhow::Error>(false);
+                };
+                let mut buffer = Vec::new();
+                aro_track_id::transcode::transcode_to_ogg_opus(&source, quality, &mut buffer)?;
+                let temp = tempfile::NamedTempFile::new()?;
+                std::fs::write(temp.path(), &buffer)?;
+                let (blob_hash, size) = store.import_managed(temp.path())?;
+                store.record_transcoded_blob(&hash, &name, &blob_hash, size)?;
+                Ok(true)
+            })
+            .await;
+            match encoded {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, hash = %content_hash, "transcode job: track failed");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "transcode job: worker panicked");
+                }
+            }
+            // A track that failed still advances the job: one unreadable file shouldn't
+            // strand progress at 99% forever.
+            jobs.advance(job_id, 1);
+        }
+        jobs.complete(job_id);
+    });
+    Ok(Json(job))
+}
+
+#[derive(Deserialize)]
+struct CleanupTranscodesRequest {
+    /// The quality to keep. Everything else is removed.
+    keep: String,
+}
+
+#[derive(Serialize)]
+struct CleanupTranscodesResponse {
+    removed: u64,
+    freed_bytes: u64,
+}
+
+/// Removes encodes at every quality but `keep`. Offered rather than automatic: moving back
+/// up the ladder shouldn't silently destroy hours of conversion someone may want again.
+async fn cleanup_transcodes(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<CleanupTranscodesRequest>,
+) -> Result<Json<CleanupTranscodesResponse>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    let keep = parse_quality(Some(request.keep.as_str()))?;
+    let store = state.store.clone();
+    let (removed, freed_bytes) =
+        tokio::task::spawn_blocking(move || store.purge_transcodes_except(keep.as_str()))
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))??;
+    Ok(Json(CleanupTranscodesResponse {
+        removed,
+        freed_bytes,
+    }))
+}
+
+#[derive(Serialize)]
+struct TranscodeUsage {
+    quality: String,
+    tracks: u64,
+    bytes: u64,
+}
+
+async fn transcode_usage(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<TranscodeUsage>>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    Ok(Json(
+        state
+            .store
+            .transcode_usage()?
+            .into_iter()
+            .map(|(quality, tracks, bytes)| TranscodeUsage {
+                quality,
+                tracks,
+                bytes,
+            })
+            .collect(),
+    ))
+}
+
+fn parse_quality(value: Option<&str>) -> Result<aro_track_id::transcode::StreamQuality, ApiError> {
+    let quality = value
+        .map(|value| {
+            aro_track_id::transcode::StreamQuality::from_str(value)
+                .ok_or_else(|| ApiError::bad_request("unknown_quality"))
+        })
+        .transpose()?
+        .unwrap_or(aro_track_id::transcode::StreamQuality::Original);
+    Ok(quality)
 }
 
 #[derive(Deserialize)]

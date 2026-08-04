@@ -88,6 +88,60 @@ impl StreamQuality {
     }
 }
 
+/// Decoding and resampling cost roughly this much again on top of encoding.
+///
+/// Measured on the reference hub: encoding alone ran at 8.1× realtime at 96 kbps, while the
+/// whole pipeline against a real lossless track managed 4.9× — a ratio of about 1.65. It is
+/// a correction on a calibration that is itself measured on the host, not a hardcoded speed,
+/// so a machine 30× faster still estimates 30× faster.
+const DECODE_OVERHEAD: f64 = 1.65;
+
+/// How fast this machine can encode, as a multiple of realtime.
+///
+/// Hosts differ by far too much to assume: the same code measures ~8× realtime on a 32-bit
+/// armv7 Raspberry Pi and ~254× on a 12-core laptop. Any estimate shown to someone before
+/// they agree to a conversion has to come from the machine that will actually do the work,
+/// so this encodes a short buffer and times it.
+pub fn measure_encode_throughput(quality: StreamQuality) -> Option<f64> {
+    let bitrate = quality.bits_per_second()?;
+    let mut encoder = audiopus::coder::Encoder::new(
+        audiopus::SampleRate::Hz48000,
+        audiopus::Channels::Stereo,
+        audiopus::Application::Audio,
+    )
+    .ok()?;
+    encoder
+        .set_bitrate(audiopus::Bitrate::BitsPerSecond(bitrate))
+        .ok()?;
+    // Two seconds of signal: long enough to swamp timer noise and per-call overhead, short
+    // enough that even the slowest host answers a settings screen promptly.
+    let frames = 100;
+    let mut pcm = vec![0i16; FRAME_SAMPLES * 2];
+    for (index, sample) in pcm.iter_mut().enumerate() {
+        *sample = ((index as f32 * 0.05).sin() * 8_000.0) as i16;
+    }
+    let mut scratch = vec![0u8; 8_000];
+    let started = std::time::Instant::now();
+    for _ in 0..frames {
+        encoder.encode(&pcm, &mut scratch).ok()?;
+    }
+    let elapsed = started.elapsed().as_secs_f64();
+    if elapsed <= 0.0 {
+        return None;
+    }
+    let audio_seconds = frames as f64 * FRAME_SAMPLES as f64 / OPUS_SAMPLE_RATE as f64;
+    Some(audio_seconds / elapsed)
+}
+
+/// Seconds of wall time to convert `audio_seconds` of music at `quality` on this host,
+/// accounting for however many encodes run at once.
+pub fn estimate_seconds(audio_seconds: f64, quality: StreamQuality, concurrency: usize) -> f64 {
+    let encode_rate = measure_encode_throughput(quality).unwrap_or(1.0);
+    let effective = (encode_rate / DECODE_OVERHEAD).max(0.01);
+    let lanes = concurrency.max(1) as f64;
+    audio_seconds / effective / lanes
+}
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("transcoding the original quality is a copy, not an encode")]
