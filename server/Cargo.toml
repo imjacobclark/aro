@@ -22,6 +22,9 @@ async-trait = "0.1"
 axum = { version = "0.8", features = ["http2", "json", "macros"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 base64 = "0.22"
+audiopus = "0.2"
+ogg = "0.9"
+rubato = "0.16"
 bs1770 = "1.0"
 bytes = "1.10"
 chrono = { version = "0.4", features = ["serde"] }
@@ -54,6 +57,7 @@ symphonia = { version = "0.5", features = ["aac", "alac", "flac", "isomp4", "mp3
 tempfile = "3.20"
 thiserror = "2.0"
 tokio = { version = "1.47", features = ["full"] }
+tokio-stream = "0.1"
 tokio-util = "0.7"
 toml = "0.9"
 tower-http = { version = "0.6", features = ["limit", "trace"] }

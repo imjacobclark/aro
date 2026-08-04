@@ -228,6 +228,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/identify", post(identify_tracks))
         .route("/v1/identification/status", get(identification_status))
         .route("/v1/identification/results", get(identification_results))
+        .route("/v1/blobs/{hash}/stream", get(stream_blob))
         .route("/v1/artwork/candidates", get(artwork_candidates))
         .route("/v1/artwork/resolve", post(resolve_artwork))
         .route("/v1/metadata-overrides", post(set_manual_metadata))
@@ -1166,6 +1167,141 @@ async fn download_blob(
         state.telemetry.clone(),
     )
     .await
+}
+
+#[derive(Deserialize)]
+struct StreamQualityQuery {
+    #[serde(default)]
+    quality: Option<String>,
+}
+
+/// Serves a track at a chosen quality, transcoding to Opus when one below `original` is
+/// asked for. This is what low data mode actually rides on: a losslessly-ripped library
+/// averages ~24 MB a track, and the same music at 96 kbps is a little over 2 MB.
+///
+/// Two paths, deliberately different:
+///
+/// - **Already encoded** — served as an ordinary blob, with range requests, so seeking
+///   works exactly as it does for an original file.
+/// - **Not yet encoded** — encoded and streamed at the same time. Waiting for a complete
+///   encode would mean 25–45 seconds of silence before playback starts on the reference
+///   hub; emitting frames as they are produced starts audio in about a second, and at
+///   6.5–8.7× realtime the encoder stays far ahead of the listener. The finished encode is
+///   then cached, so the seek-less first play happens at most once per track and quality.
+async fn stream_blob(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(hash): Path<String>,
+    Query(query): Query<StreamQualityQuery>,
+) -> Result<Response, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    let quality = query
+        .quality
+        .as_deref()
+        .map(|value| {
+            aro_track_id::transcode::StreamQuality::from_str(value)
+                .ok_or_else(|| ApiError::bad_request("unknown_quality"))
+        })
+        .transpose()?
+        .unwrap_or(aro_track_id::transcode::StreamQuality::Original);
+
+    let source = state
+        .store
+        .blob_path_for_download(&hash)?
+        .ok_or_else(|| ApiError::not_found("blob_not_found"))?;
+    if quality == aro_track_id::transcode::StreamQuality::Original {
+        return download_range_tracked(
+            source,
+            headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
+            state.telemetry.clone(),
+        )
+        .await;
+    }
+
+    if let Some(cached) = state.store.transcoded_blob(&hash, quality.as_str())?
+        && let Some(path) = state.store.blob_path_for_download(&cached)?
+    {
+        return download_range_tracked(
+            path,
+            headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
+            state.telemetry.clone(),
+        )
+        .await;
+    }
+
+    let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(8);
+    let store = state.store.clone();
+    let cache_hash = hash.clone();
+    // Encoding is CPU-bound and blocking, so it belongs off the async runtime's threads.
+    tokio::task::spawn_blocking(move || {
+        let mut sink = ChannelSink {
+            sender,
+            spill: Vec::new(),
+        };
+        let result = aro_track_id::transcode::transcode_to_ogg_opus(&source, quality, &mut sink);
+        match result {
+            Ok(()) => {
+                // Only a complete encode is worth caching: a half-written stream would be
+                // served forever as though it were the whole track.
+                if let Err(error) = cache_encoded(&store, &cache_hash, quality, &sink.spill) {
+                    tracing::warn!(%error, "failed to cache transcoded audio");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, hash = %cache_hash, "transcode failed");
+                let _ = sink.sender.blocking_send(Err(std::io::Error::other(error)));
+            }
+        }
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(receiver);
+    let mut response = Response::new(axum::body::Body::from_stream(stream));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("audio/ogg"),
+    );
+    // No length is known while encoding, and a partially-encoded stream cannot satisfy a
+    // range request — so seeking is unavailable until the cached copy exists.
+    response.headers_mut().insert(
+        header::ACCEPT_RANGES,
+        header::HeaderValue::from_static("none"),
+    );
+    Ok(response)
+}
+
+fn cache_encoded(
+    store: &HubStore,
+    content_hash: &str,
+    quality: aro_track_id::transcode::StreamQuality,
+    bytes: &[u8],
+) -> anyhow::Result<()> {
+    let temp = tempfile::NamedTempFile::new()?;
+    std::fs::write(temp.path(), bytes)?;
+    let (blob_hash, size) = store.import_managed(temp.path())?;
+    store.record_transcoded_blob(content_hash, quality.as_str(), &blob_hash, size)?;
+    Ok(())
+}
+
+/// Forwards encoded bytes to the HTTP response as they are produced, while keeping a copy
+/// so the finished encode can be cached. The copy is the whole point of doing both at once:
+/// the listener gets audio immediately *and* the next play is a cheap, seekable blob read.
+struct ChannelSink {
+    sender: tokio::sync::mpsc::Sender<Result<Vec<u8>, std::io::Error>>,
+    spill: Vec<u8>,
+}
+
+impl std::io::Write for ChannelSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.spill.extend_from_slice(buf);
+        // A closed receiver means the listener skipped or disconnected. Reporting success
+        // lets the encode run to completion so the work still lands in the cache.
+        let _ = self.sender.blocking_send(Ok(buf.to_vec()));
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 async fn export_manifest(

@@ -11,7 +11,10 @@ links = "chromaprint"
 
 [dependencies]
 anyhow.workspace = true
+audiopus.workspace = true
 bs1770.workspace = true
+ogg.workspace = true
+rubato.workspace = true
 chrono.workspace = true
 lofty.workspace = true
 reqwest.workspace = true

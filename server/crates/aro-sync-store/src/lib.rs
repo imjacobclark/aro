@@ -3205,6 +3205,51 @@ impl HubStore {
         Ok(())
     }
 
+    /// The blob holding `content_hash` already encoded at `quality`, if one exists.
+    ///
+    /// Transcoding is expensive enough to be worth never repeating: the reference hub
+    /// manages 6.5–8.7× realtime, so a three-minute track costs 20–30 seconds of CPU before
+    /// the source is even decoded. Cached, a re-play is an ordinary blob read — which also
+    /// restores range requests and therefore seeking, which a stream still being encoded
+    /// cannot support.
+    pub fn transcoded_blob(
+        &self,
+        content_hash: &str,
+        quality: &str,
+    ) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .connection
+            .lock()
+            .query_row(
+                "SELECT blob_hash FROM transcoded_blobs WHERE content_hash = ?1 AND quality = ?2",
+                params![content_hash, quality],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
+    pub fn record_transcoded_blob(
+        &self,
+        content_hash: &str,
+        quality: &str,
+        blob_hash: &str,
+        byte_count: u64,
+    ) -> Result<(), StoreError> {
+        let byte_count = byte_count.min(i64::MAX as u64);
+        self.connection.lock().execute(
+            r#"
+            INSERT INTO transcoded_blobs(content_hash, quality, blob_hash, byte_count, created_at)
+            VALUES (?1, ?2, ?3, ?4, unixepoch())
+            ON CONFLICT(content_hash, quality) DO UPDATE SET
+                blob_hash = excluded.blob_hash,
+                byte_count = excluded.byte_count,
+                created_at = excluded.created_at
+            "#,
+            params![content_hash, quality, blob_hash, byte_count],
+        )?;
+        Ok(())
+    }
+
     /// A previously-discovered artwork candidate list, if one was cached. Discovery costs
     /// dozens of rate-limited MusicBrainz and Cover Art Archive requests — well over a
     /// minute for a prolific artist — so reopening the picker must not repeat it.
@@ -3868,6 +3913,19 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
             refreshed_at INTEGER NOT NULL
         );
         INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (14, unixepoch());
+        "#,
+    )?;
+    connection.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS transcoded_blobs (
+            content_hash TEXT NOT NULL,
+            quality TEXT NOT NULL,
+            blob_hash TEXT NOT NULL,
+            byte_count INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY(content_hash, quality)
+        );
+        INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (16, unixepoch());
         "#,
     )?;
     // Votes cast before a track was re-identified were never withdrawn, so a track filed
