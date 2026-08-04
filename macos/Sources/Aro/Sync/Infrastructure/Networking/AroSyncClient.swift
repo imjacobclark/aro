@@ -45,6 +45,42 @@ enum HubPairingPollResult: Sendable {
     case expired
 }
 
+struct RemoteTopologySnapshot: Codable, Sendable {
+    let hubID: UUID
+    let displayName: String
+    let trackCount: UInt64?
+    let devices: [ControlledHubDevice]
+    let sources: [SourceHealthReport]
+    let activeTransfers: UInt64
+    let livePlayback: [RemoteTopologyPlayback]
+}
+
+struct RemoteTopologyPlayback: Codable, Sendable {
+    let deviceID: UUID
+    let deviceName: String
+    let deviceType: String
+    let state: PlaybackActivityState
+    let observedAt: Date
+    let playback: PlaybackActivitySnapshot
+}
+
+struct ManualMetadataUpload: Codable, Sendable {
+    let contentHashes: [String]
+    let fields: [String: JSONValue]
+    let reset: Bool
+}
+
+struct ServerImportSession: Codable, Sendable {
+    let importID: UUID
+    let sourceID: UUID
+}
+
+struct ServerImportFileStatus: Codable, Sendable {
+    let fileID: UUID
+    let uploadedSize: UInt64
+    let size: UInt64
+}
+
 struct HubPairingSession: Sendable {
     let requestID: UUID
     let deviceID: UUID
@@ -203,17 +239,31 @@ actor AroSyncClient {
         adminToken = nil
     }
 
-    init(localAdminBaseURL baseURL: URL, adminToken: String) {
+    init(
+        localAdminBaseURL baseURL: URL,
+        adminToken: String,
+        pinnedTLSFingerprint: String? = nil
+    ) {
         self.baseURL = baseURL
         let configuration = URLSessionConfiguration.ephemeral
         configuration.waitsForConnectivity = false
         configuration.timeoutIntervalForRequest = 30
         configuration.timeoutIntervalForResource = 120
-        session = URLSession(
-            configuration: configuration,
-            delegate: PairingTLSDelegate(),
-            delegateQueue: nil
-        )
+        if let pinnedTLSFingerprint {
+            session = URLSession(
+                configuration: configuration,
+                delegate: PinnedTLSDelegate(
+                    fingerprint: pinnedTLSFingerprint
+                ),
+                delegateQueue: nil
+            )
+        } else {
+            session = URLSession(
+                configuration: configuration,
+                delegate: PairingTLSDelegate(),
+                delegateQueue: nil
+            )
+        }
         encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
         encoder.dateEncodingStrategy = .iso8601
@@ -368,7 +418,7 @@ actor AroSyncClient {
 
     func exchange(
         _ exchange: SyncExchangeRequest,
-        credential: HubDeviceCredential
+        credential: HubDeviceCredential? = nil
     ) async throws -> SyncExchangeResponse {
         try await postAuthenticated(
             "v1/exchange",
@@ -401,6 +451,346 @@ actor AroSyncClient {
         )
     }
 
+    func adminFolders() async throws -> [ControlledSourceFolder] {
+        try await getAuthenticated("v1/admin/folders")
+    }
+
+    func adminDevices() async throws -> [ControlledHubDevice] {
+        try await getAuthenticated("v1/devices")
+    }
+
+    func openAdminPairing() async throws -> HubPairingWindow {
+        let response: AdminPairingWindowResponse = try await postAuthenticated(
+            "v1/pairing/open",
+            body: EmptyRequest(),
+            credential: nil
+        )
+        return HubPairingWindow(
+            code: response.code,
+            expiresAt: Date().addingTimeInterval(
+                TimeInterval(response.expiresInSeconds)
+            )
+        )
+    }
+
+    func pendingAdminPairingRequests() async throws -> [ControlledPairingRequest] {
+        try await getAuthenticated("v1/pairing/requests")
+    }
+
+    func approveAdminPairing(
+        requestID: UUID,
+        approve: Bool,
+        canContribute: Bool
+    ) async throws {
+        let _: HubDeviceCredential? = try await postAuthenticated(
+            "v1/pairing/approve",
+            body: AdminPairingApprovalRequest(
+                requestID: requestID,
+                approve: approve,
+                canContribute: canContribute
+            ),
+            credential: nil
+        )
+    }
+
+    func revokeAdminDevice(deviceID: UUID) async throws {
+        try await postAuthenticatedNoContent(
+            "v1/devices/revoke",
+            body: AdminDeviceIDRequest(deviceID: deviceID),
+            credential: nil
+        )
+    }
+
+    func setAdminContribution(deviceID: UUID, allowed: Bool) async throws {
+        try await postAuthenticatedNoContent(
+            "v1/devices/permissions",
+            body: AdminDevicePermissionRequest(
+                deviceID: deviceID,
+                canContribute: allowed
+            ),
+            credential: nil
+        )
+    }
+
+    func addAdminFolder(path: String) async throws -> ControlledSourceFolder {
+        try await postAuthenticated(
+            "v1/admin/folders",
+            body: AdminFolderPathRequest(path: path),
+            credential: nil
+        )
+    }
+
+    @discardableResult
+    func scanAdminFolder(sourceID: UUID? = nil) async throws -> Int {
+        let response: AdminFolderScanResponse = try await postAuthenticated(
+            "v1/admin/folders/scan",
+            body: AdminFolderScanRequest(sourceID: sourceID),
+            credential: nil
+        )
+        return response.changedSongs
+    }
+
+    func relocateAdminFolder(
+        sourceID: UUID,
+        path: String
+    ) async throws -> ControlledSourceFolder {
+        try await postAuthenticated(
+            "v1/admin/folders/relocate",
+            body: RelocateAdminFolderRequest(
+                sourceID: sourceID,
+                path: path
+            ),
+            credential: nil
+        )
+    }
+
+    func removeAdminFolder(sourceID: UUID) async throws {
+        try await postAuthenticatedNoContent(
+            "v1/admin/folders/remove",
+            body: AdminFolderIDRequest(sourceID: sourceID),
+            credential: nil
+        )
+    }
+
+    func removeTrack(
+        contentHash: String,
+        credential: HubDeviceCredential? = nil
+    ) async throws -> Bool {
+        let response: RemoveServerTrackResponse = try await postAuthenticated(
+            "v1/library/tracks/remove",
+            body: RemoveServerTrackRequest(contentHash: contentHash),
+            credential: credential
+        )
+        return response.removed
+    }
+
+    func createImport(
+        sourceName: String,
+        credential: HubDeviceCredential
+    ) async throws -> ServerImportSession {
+        try await postAuthenticated(
+            "v1/imports",
+            body: CreateServerImportRequest(sourceName: sourceName),
+            credential: credential
+        )
+    }
+
+    func uploadImportFile(
+        importID: UUID,
+        fileID: UUID,
+        fileURL: URL,
+        relativePath: String,
+        credential: HubDeviceCredential
+    ) async throws {
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: fileURL.path
+        )
+        guard let number = attributes[.size] as? NSNumber else {
+            throw AroSyncClientError.invalidResponse
+        }
+        let size = number.uint64Value
+        let registration = RegisterServerImportFileRequest(
+            fileID: fileID,
+            relativePath: relativePath,
+            size: size
+        )
+        var status: ServerImportFileStatus = try await postAuthenticated(
+            "v1/imports/\(importID.uuidString)/files",
+            body: registration,
+            credential: credential
+        )
+        let handle = try FileHandle(forReadingFrom: fileURL)
+        defer { try? handle.close() }
+        try handle.seek(toOffset: status.uploadedSize)
+        var consecutiveFailures = 0
+        while status.uploadedSize < size {
+            let offset = status.uploadedSize
+            let remaining = min(UInt64(1_048_576), size - status.uploadedSize)
+            guard let chunk = try handle.read(upToCount: Int(remaining)),
+                  !chunk.isEmpty else {
+                throw AroSyncClientError.invalidResponse
+            }
+            do {
+                status = try await logged(
+                    "PUT",
+                    "v1/imports/\(importID.uuidString)/files/\(fileID.uuidString)"
+                ) {
+                    var request = URLRequest(
+                        url: try url(
+                            for: "v1/imports/\(importID.uuidString)/files/\(fileID.uuidString)"
+                        )
+                    )
+                    request.httpMethod = "PUT"
+                    request.setValue(
+                        String(offset),
+                        forHTTPHeaderField: "X-Aro-Offset"
+                    )
+                    authenticate(&request, credential: credential)
+                    request.httpBody = chunk
+                    let (data, response) = try await session.data(for: request)
+                    try validate(response, data: data)
+                    return try decoder.decode(ServerImportFileStatus.self, from: data)
+                }
+                consecutiveFailures = 0
+            } catch {
+                // A response can be lost after the server persisted the chunk.
+                // Re-registering is idempotent and returns the authoritative
+                // offset, so the next loop resumes without duplicating bytes.
+                consecutiveFailures += 1
+                guard consecutiveFailures < 3 else { throw error }
+                status = try await postAuthenticated(
+                    "v1/imports/\(importID.uuidString)/files",
+                    body: registration,
+                    credential: credential
+                )
+                try handle.seek(toOffset: status.uploadedSize)
+            }
+        }
+    }
+
+    func commitImport(
+        importID: UUID,
+        credential: HubDeviceCredential
+    ) async throws -> RemoteSyncJob {
+        try await postAuthenticated(
+            "v1/imports/\(importID.uuidString)/commit",
+            body: EmptyRequest(),
+            credential: credential
+        )
+    }
+
+    func jobStatus(
+        jobID: UUID,
+        credential: HubDeviceCredential
+    ) async throws -> RemoteSyncJob {
+        try await getAuthenticated(
+            "v1/jobs/\(jobID.uuidString)",
+            credential: credential
+        )
+    }
+
+    /// Server-owned, paginated catalog read. Streaming clients should use this
+    /// instead of applying the complete CRDT replica merely to browse tracks.
+    func catalog(
+        cursor: UInt64 = 0,
+        limit: UInt32 = 50,
+        query: String? = nil,
+        sort: String = "title",
+        credential: HubDeviceCredential? = nil
+    ) async throws -> CatalogPage {
+        var path = "v1/library/catalog?cursor=\(cursor)&limit=\(limit)&sort=\(sort)"
+        if let query, let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+            path += "&q=\(encoded)"
+        }
+        return try await getAuthenticated(path, credential: credential)
+    }
+
+    /// Reads the complete lightweight catalog, following the server cursor until
+    /// no further page remains. The hub deliberately caps an individual response
+    /// at 200 tracks, so callers must not treat the first page as the library.
+    func completeCatalog(
+        pageSize: UInt32 = 200,
+        query: String? = nil,
+        sort: String = "title",
+        credential: HubDeviceCredential? = nil
+    ) async throws -> CatalogPage {
+        var cursor: UInt64 = 0
+        var tracks: [CatalogTrack] = []
+        var seenTrackIDs: Set<UUID> = []
+        var seenCursors: Set<UInt64> = [cursor]
+        var revision: UInt64 = 0
+
+        while true {
+            let page = try await catalog(
+                cursor: cursor,
+                limit: pageSize,
+                query: query,
+                sort: sort,
+                credential: credential
+            )
+            revision = page.revision
+            for track in page.tracks where seenTrackIDs.insert(track.trackID).inserted {
+                tracks.append(track)
+            }
+
+            guard let rawCursor = page.nextCursor,
+                  let nextCursor = UInt64(rawCursor),
+                  nextCursor > cursor,
+                  seenCursors.insert(nextCursor).inserted else {
+                return CatalogPage(
+                    tracks: tracks,
+                    nextCursor: nil,
+                    revision: revision
+                )
+            }
+            cursor = nextCursor
+        }
+    }
+
+    /// Checks the first lightweight page's server revision before walking the
+    /// remaining pages. A polling streaming client therefore pays one bounded
+    /// request while the catalogue is unchanged instead of redownloading the
+    /// complete library every thirty seconds.
+    func completeCatalogIfChanged(
+        from knownRevision: UInt64?,
+        pageSize: UInt32 = 200,
+        credential: HubDeviceCredential? = nil
+    ) async throws -> CatalogPage? {
+        let first = try await catalog(
+            cursor: 0,
+            limit: pageSize,
+            credential: credential
+        )
+        if knownRevision == first.revision {
+            return nil
+        }
+        var tracks = first.tracks
+        var seenTrackIDs = Set(first.tracks.map(\.trackID))
+        var cursor = first.nextCursor.flatMap(UInt64.init)
+        var seenCursors: Set<UInt64> = [0]
+        while let current = cursor,
+              current > 0,
+              seenCursors.insert(current).inserted {
+            let page = try await catalog(
+                cursor: current,
+                limit: pageSize,
+                credential: credential
+            )
+            for track in page.tracks where seenTrackIDs.insert(track.trackID).inserted {
+                tracks.append(track)
+            }
+            cursor = page.nextCursor.flatMap(UInt64.init)
+        }
+        return CatalogPage(
+            tracks: tracks,
+            nextCursor: nil,
+            revision: first.revision
+        )
+    }
+
+    func libraryStats(
+        credential: HubDeviceCredential? = nil
+    ) async throws -> StatsDashboard {
+        try await getAuthenticated("v1/library/stats", credential: credential)
+    }
+
+    func topology(
+        credential: HubDeviceCredential? = nil
+    ) async throws -> RemoteTopologySnapshot {
+        try await getAuthenticated("v1/topology", credential: credential)
+    }
+
+    func setManualMetadata(
+        _ request: ManualMetadataUpload,
+        credential: HubDeviceCredential? = nil
+    ) async throws {
+        let _: [String: UInt64] = try await postAuthenticated(
+            "v1/metadata-overrides",
+            body: request,
+            credential: credential
+        )
+    }
+
     /// Triggers (re-)identification on a *remote* hub for the given content hashes —
     /// the network equivalent of `HubControlClient.identifyTracks(_:)`, which only
     /// reaches a *local* `aro-server` over its Unix control socket. Deliberately takes
@@ -412,7 +802,7 @@ actor AroSyncClient {
     /// is silently skipped rather than failing the whole batch.
     func identifyTracks(
         contentHashes: [String],
-        credential: HubDeviceCredential
+        credential: HubDeviceCredential? = nil
     ) async throws -> Int {
         let response: AroIdentifyTracksResponse = try await postAuthenticated(
             "v1/identify",
@@ -425,7 +815,7 @@ actor AroSyncClient {
     /// Remote equivalent of `HubControlClient.identificationStatus()` — lets a pure
     /// remote client's Metadata page show live queue counts.
     func identificationStatus(
-        credential: HubDeviceCredential
+        credential: HubDeviceCredential? = nil
     ) async throws -> IdentificationStatus {
         try await getAuthenticated(
             "v1/identification/status",
@@ -445,7 +835,7 @@ actor AroSyncClient {
     /// advance to the last element's `identifiedAt`.
     func identificationResults(
         after: Int64,
-        credential: HubDeviceCredential
+        credential: HubDeviceCredential? = nil
     ) async throws -> [IdentificationResult] {
         try await getAuthenticated(
             "v1/identification/results?after=\(after)",
@@ -459,7 +849,7 @@ actor AroSyncClient {
     func smartShuffle(
         contentHashes: [String],
         start: String?,
-        credential: HubDeviceCredential
+        credential: HubDeviceCredential? = nil
     ) async throws -> [String] {
         try await postAuthenticated(
             "v1/shuffle",
@@ -472,7 +862,7 @@ actor AroSyncClient {
     /// playlists, keyed by content hash, for a pure remote client's Home screen.
     /// `utcOffsetMinutes` scopes Morning Rotation/Late Night to this device's timezone.
     func playlists(
-        credential: HubDeviceCredential,
+        credential: HubDeviceCredential? = nil,
         utcOffsetMinutes: Int = TimeZone.current.secondsFromGMT() / 60
     ) async throws -> [ServerGeneratedPlaylist] {
         try await getAuthenticated(
@@ -486,7 +876,7 @@ actor AroSyncClient {
     func radio(
         contentHash: String,
         limit: Int = 30,
-        credential: HubDeviceCredential
+        credential: HubDeviceCredential? = nil
     ) async throws -> ServerGeneratedPlaylist? {
         try await getAuthenticated(
             "v1/radio/\(contentHash)?limit=\(limit)",
@@ -634,20 +1024,13 @@ actor AroSyncClient {
     private func postAuthenticated<Body: Encodable, Response: Decodable>(
         _ path: String,
         body: Body,
-        credential: HubDeviceCredential
+        credential: HubDeviceCredential?
     ) async throws -> Response {
         try await logged("POST", path) {
             var request = URLRequest(url: try url(for: path))
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.setValue(
-                "Bearer \(credential.credential)",
-                forHTTPHeaderField: "Authorization"
-            )
-            request.setValue(
-                credential.deviceID.uuidString,
-                forHTTPHeaderField: "X-Aro-Device"
-            )
+            authenticate(&request, credential: credential)
             request.httpBody = try encoder.encode(body)
             let (data, response) = try await session.data(for: request)
             try validate(response, data: data)
@@ -666,6 +1049,22 @@ actor AroSyncClient {
             let (data, response) = try await session.data(for: request)
             try validate(response, data: data)
             return try decoder.decode(Response.self, from: data)
+        }
+    }
+
+    private func postAuthenticatedNoContent<Body: Encodable>(
+        _ path: String,
+        body: Body,
+        credential: HubDeviceCredential?
+    ) async throws {
+        try await logged("POST", path) {
+            var request = URLRequest(url: try url(for: path))
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            authenticate(&request, credential: credential)
+            request.httpBody = try encoder.encode(body)
+            let (data, response) = try await session.data(for: request)
+            try validate(response, data: data)
         }
     }
 
@@ -740,6 +1139,59 @@ actor AroSyncClient {
         }
         return url
     }
+}
+
+private struct AdminFolderPathRequest: Encodable {
+    let path: String
+}
+
+private struct EmptyRequest: Encodable {}
+
+private struct AdminPairingWindowResponse: Decodable {
+    let code: String
+    let expiresInSeconds: Int
+}
+
+private struct AdminPairingApprovalRequest: Encodable {
+    let requestID: UUID
+    let approve: Bool
+    let canContribute: Bool
+}
+
+private struct AdminDeviceIDRequest: Encodable {
+    let deviceID: UUID
+}
+
+private struct AdminDevicePermissionRequest: Encodable {
+    let deviceID: UUID
+    let canContribute: Bool
+}
+
+private struct AdminFolderIDRequest: Encodable {
+    let sourceID: UUID
+}
+
+private struct RelocateAdminFolderRequest: Encodable {
+    let sourceID: UUID
+    let path: String
+}
+
+private struct RemoveServerTrackRequest: Encodable {
+    let contentHash: String
+}
+
+private struct RemoveServerTrackResponse: Decodable {
+    let removed: Bool
+}
+
+private struct CreateServerImportRequest: Encodable {
+    let sourceName: String
+}
+
+private struct RegisterServerImportFileRequest: Encodable {
+    let fileID: UUID
+    let relativePath: String
+    let size: UInt64
 }
 
 private struct PairingRequest: Encodable {
@@ -844,6 +1296,14 @@ extension JSONDecoder {
 private struct SmartShuffleRequest: Encodable {
     let contentHashes: [String]
     let start: String?
+}
+
+private struct AdminFolderScanRequest: Encodable {
+    let sourceID: UUID?
+}
+
+private struct AdminFolderScanResponse: Decodable {
+    let changedSongs: Int
 }
 
 private struct HubErrorResponse: Decodable {

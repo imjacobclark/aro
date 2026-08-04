@@ -20,6 +20,7 @@ struct LibrarySettingsView: View {
 
     @State private var localServers = LocalAroServerMonitor()
     @State private var pairedDevices: [ControlledHubDevice] = []
+    @State private var sourceFolders: [ControlledSourceFolder] = []
     @State private var pairingSession: PairingSession?
     @State private var addDeviceError: String?
     @State private var showingConnect = false
@@ -32,6 +33,10 @@ struct LibrarySettingsView: View {
     @State private var isSyncing = false
     @State private var exportSession: LibraryExportSession?
     @State private var exportStartedService = false
+    @State private var settingsSection: SettingsSection = .overview
+    @State private var remoteTopology: RemoteTopologySnapshot?
+    @State private var remoteTopologyError: String?
+    @State private var topologyOnline = false
 
     var body: some View {
         Group {
@@ -49,7 +54,9 @@ struct LibrarySettingsView: View {
         }
         .sheet(item: $pairingSession) { session in
             AddDeviceSheet(
-                controlClient: session.client,
+                client: session.client,
+                hubID: session.hubID,
+                port: session.port,
                 onDevicesChanged: { pairedDevices = $0 }
             )
         }
@@ -57,7 +64,7 @@ struct LibrarySettingsView: View {
             ConnectLibrarySheet(
                 completeConnection: completeRemoteConnection,
                 willPauseSharing: registry.activeProfile?.kind == .local
-                    && sharingIsAvailable,
+                    && (registry.activeProfile?.sharingEnabled ?? false),
                 initialAddress: connectionInitialAddress,
                 excludedHubID: connectionInitialAddress.isEmpty
                     ? registry.activeProfile?.hubID
@@ -157,10 +164,10 @@ struct LibrarySettingsView: View {
         .task {
             while !Task.isCancelled {
                 localServers.refresh()
-                if registry.activeProfile?.kind == .local {
-                    await refreshDevices()
-                }
-                try? await Task.sleep(for: .seconds(30))
+                await refreshDevices()
+                await refreshSources()
+                let interval: Duration = settingsSection == .topology ? .seconds(5) : .seconds(30)
+                try? await Task.sleep(for: interval)
             }
         }
     }
@@ -169,7 +176,16 @@ struct LibrarySettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 header
-                if let profile = registry.activeProfile {
+                Picker("Settings section", selection: $settingsSection) {
+                    ForEach(SettingsSection.allCases) { section in
+                        Label(section.title, systemImage: section.icon).tag(section)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                if settingsSection == .topology, let profile = registry.activeProfile {
+                    topologyPage(profile)
+                } else if let profile = registry.activeProfile {
                     libraryCard(profile)
                     if profile.kind == .local {
                         connectedDevicesCard(profile)
@@ -183,6 +199,30 @@ struct LibrarySettingsView: View {
             .padding(28)
             .frame(maxWidth: 920, alignment: .leading)
             .frame(maxWidth: .infinity)
+        }
+    }
+
+    private func topologyPage(_ profile: LibraryProfile) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Library Topology")
+                .font(.title2.weight(.semibold))
+            Text("A live visual map of where your music lives and the devices connected to it.")
+                .foregroundStyle(.secondary)
+            LibraryTopologyView(
+                profile: profile,
+                songCount: topologySongCount(profile),
+                sources: sourceFolders,
+                devices: pairedDevices,
+                currentDeviceID: libraryDeviceID,
+                activeTransfers: remoteTopology?.activeTransfers ?? 0,
+                livePlayback: remoteTopology?.livePlayback ?? [],
+                localHubOnline: topologyOnline
+            )
+            if let remoteTopologyError {
+                Label(remoteTopologyError, systemImage: "exclamationmark.triangle")
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+            }
         }
     }
 
@@ -220,7 +260,7 @@ struct LibrarySettingsView: View {
                                 : "Remote library",
                             systemImage: profile.kind == .local ? nil : "network"
                         )
-                        if profile.kind == .local, sharingIsAvailable {
+                        if profile.kind == .local, profile.sharingEnabled {
                             roleBadge("Sharing enabled", systemImage: nil)
                         }
                     }
@@ -254,7 +294,7 @@ struct LibrarySettingsView: View {
                 Spacer()
                 VStack(alignment: .trailing, spacing: 10) {
                     if profile.kind == .local {
-                        if !sharingIsAvailable {
+                        if !profile.sharingEnabled {
                             Button("Enable Sharing") {
                                 enableSharing()
                             }
@@ -314,13 +354,13 @@ struct LibrarySettingsView: View {
                 beginExport(activeProfile)
             }
 
-            if activeProfile.kind == .local, sharingIsAvailable {
+            if activeProfile.kind == .local, activeProfile.sharingEnabled {
                 Button("Stop Sharing", role: .destructive) {
                     stopSharing(activeProfile)
                 }
             }
 
-            if activeProfile.kind == .remote, registry.profiles.count > 1 {
+            if activeProfile.kind == .remote {
                 Button("Forget This Library", role: .destructive) {
                     profileToForget = activeProfile
                 }
@@ -344,7 +384,7 @@ struct LibrarySettingsView: View {
                     )
                 } actions: {
                     Button("Add a Device") {
-                        if sharingIsAvailable {
+                        if profile.sharingEnabled && sharingIsAvailable {
                             beginAddingDevice()
                         } else {
                             enableSharing(openPairingAfterStart: true)
@@ -560,6 +600,16 @@ struct LibrarySettingsView: View {
         )
     }
 
+    private var activeServerConnection: LibraryServerConnection? {
+        guard let profile = registry.activeProfile else { return nil }
+        return LibraryServerConnection.resolve(
+            profile: profile,
+            operations: syncStore,
+            deviceID: libraryDeviceID,
+            localAdminToken: preferences.localAdminToken
+        )
+    }
+
     static func controlDataLocation(
         preferred: String,
         servers: [LocalAroServer]
@@ -571,12 +621,23 @@ struct LibrarySettingsView: View {
 
     private func beginAddingDevice() {
         localServers.refresh()
-        guard let controlClient else {
+        guard let profile = registry.activeProfile,
+              let hubID = profile.hubID,
+              let connection = LibraryServerConnection.resolve(
+                profile: profile,
+                operations: syncStore,
+                deviceID: libraryDeviceID,
+                localAdminToken: preferences.localAdminToken
+              ) else {
             addDeviceError = "Aro cannot find the connection for this library service. "
                 + "Restart sharing in Library Service & Storage below, then try again."
             return
         }
-        pairingSession = PairingSession(client: controlClient)
+        pairingSession = PairingSession(
+            client: connection.client,
+            hubID: hubID,
+            port: profile.baseURL?.port ?? 4848
+        )
     }
 
     private func refresh() async {
@@ -586,18 +647,55 @@ struct LibrarySettingsView: View {
            let syncStatus = syncStore.syncStatus(hubID: hubID) {
             statusMessage = syncStatus.lastError
         }
-        await refreshDevices()
+        await refreshRemoteTopology()
     }
 
     private func refreshDevices() async {
-        guard let controlClient, sharingIsAvailable else {
-            pairedDevices = []
+        await refreshRemoteTopology()
+    }
+
+    private func refreshSources() async {
+        await refreshRemoteTopology()
+    }
+
+    private func refreshRemoteTopology() async {
+        guard let profile = registry.activeProfile,
+              let connection = LibraryServerConnection.resolve(
+                profile: profile,
+                operations: syncStore,
+                deviceID: libraryDeviceID,
+                localAdminToken: preferences.localAdminToken
+              ) else {
             return
         }
         do {
-            pairedDevices = try await controlClient.devices()
+            let snapshot = try await connection.client.topology(
+                credential: connection.credential
+            )
+            remoteTopology = snapshot
+            topologyOnline = true
+            pairedDevices = snapshot.devices
+            sourceFolders = snapshot.sources.map {
+                ControlledSourceFolder(
+                    sourceID: $0.sourceID,
+                    name: $0.name,
+                    path: $0.name,
+                    available: $0.available,
+                    watching: true,
+                    lastScanAt: nil,
+                    lastError: $0.warning,
+                    songCount: $0.songCount ?? 0,
+                    missingCount: 0
+                )
+            }
+            statusMessage = nil
+            remoteTopologyError = nil
         } catch {
-            statusMessage = error.localizedDescription
+            // Topology is optional diagnostics. A server can still be healthy,
+            // stream music, and sync normally when this newer endpoint is absent
+            // or briefly unreachable; don't turn the whole library status red.
+            remoteTopologyError = error.localizedDescription
+            topologyOnline = false
         }
     }
 
@@ -612,37 +710,28 @@ struct LibrarySettingsView: View {
         service.setEnabled(true)
         statusMessage = "Preparing your library for sharing…"
         Task {
+            if let controlClient {
+                let port = registry.activeProfile?.baseURL?.port ?? 4848
+                try? await controlClient.setConfig(
+                    key: "bind",
+                    value: "[::]:\(port)"
+                )
+                try? await controlClient.setConfig(
+                    key: "advertise_mdns",
+                    value: "true"
+                )
+            }
             await service.ensureCompatibleHelper(
                 dataLocation: preferences.dataLocation
             )
-            let profile = registry.activeProfile
-            let mode: HubImportMode = profile?.managedMusicPath == nil
-                ? .referenced
-                : .managed
-            preferences.importMode = mode
-            var failedFolderCount = 0
-            for path in syncStore.activeWatchedFolderPaths {
-                do {
-                    _ = try await controlClient?.importFolder(
-                        path: path,
-                        mode: mode
-                    )
-                } catch {
-                    failedFolderCount += 1
-                }
-            }
             localServers.refresh()
             if let errorMessage = service.errorMessage {
                 statusMessage = errorMessage
-            } else if failedFolderCount > 0 {
-                statusMessage = failedFolderCount == 1
-                    ? "1 watched folder could not be shared."
-                    : "\(failedFolderCount) watched folders could not be shared."
             } else {
                 statusMessage = nil
             }
             if openPairingAfterStart, service.errorMessage == nil,
-               failedFolderCount == 0 {
+               sharingIsAvailable {
                 beginAddingDevice()
             }
         }
@@ -653,17 +742,28 @@ struct LibrarySettingsView: View {
         var updated = profile
         updated.sharingEnabled = false
         registry.update(updated)
-        service.setEnabled(false)
-        statusMessage = service.errorMessage ?? "Sharing is off"
         Task {
-            for _ in 0 ..< 10 {
-                localServers.refresh()
-                if !sharingIsAvailable {
-                    statusMessage = nil
-                    pairedDevices = []
-                    return
-                }
-                try? await Task.sleep(for: .milliseconds(200))
+            guard let controlClient else {
+                statusMessage = "The local server could not be configured."
+                return
+            }
+            let port = profile.baseURL?.port ?? 4848
+            do {
+                try await controlClient.setConfig(
+                    key: "bind",
+                    value: "127.0.0.1:\(port)"
+                )
+                try await controlClient.setConfig(
+                    key: "advertise_mdns",
+                    value: "false"
+                )
+                await service.restartForUpgrade()
+                await service.ensureCompatibleHelper(
+                    dataLocation: preferences.dataLocation
+                )
+                statusMessage = service.errorMessage ?? "Sharing is off; the local library server is still running."
+            } catch {
+                statusMessage = error.localizedDescription
             }
         }
     }
@@ -722,53 +822,27 @@ struct LibrarySettingsView: View {
     private func beginExport(_ profile: LibraryProfile) {
         Task {
             do {
-                let exporter: AroLibraryExporter
                 if profile.kind == .local {
-                    guard let adminToken = preferences.localAdminToken else {
-                        throw DevicesError.missingCredential
-                    }
                     if !sharingIsAvailable {
-                        exportStartedService = true
                         service.setEnabled(true)
-                        for _ in 0 ..< 30 {
-                            localServers.refresh()
-                            if sharingIsAvailable { break }
-                            try await Task.sleep(for: .milliseconds(200))
-                        }
+                        await service.ensureCompatibleHelper(
+                            dataLocation: preferences.dataLocation
+                        )
                     }
-                    exporter = AroLibraryExporter(
-                        client: AroSyncClient(
-                            localAdminBaseURL: URL(
-                                string: "https://127.0.0.1:4848"
-                            )!,
-                            adminToken: adminToken
-                        ),
-                        credential: nil
-                    )
-                } else {
-                    guard let hubID = profile.hubID,
-                          let baseURL = profile.baseURL,
-                          let membership = syncStore.membership(
-                            baseURL: baseURL
-                          ),
-                          let credential = try FileHubCredentialStore()
-                            .load(
-                                hubID: hubID,
-                                deviceID: libraryDeviceID
-                            ) else {
-                        throw DevicesError.missingCredential
-                    }
-                    exporter = AroLibraryExporter(
-                        client: AroSyncClient(
-                            baseURL: baseURL,
-                            pinnedTLSFingerprint:
-                                membership.tlsFingerprint
-                        ),
-                        credential: credential,
-                        localSongs: library.allSongs,
-                        localMediaCache: mediaCache.blobCache
-                    )
                 }
+                guard let connection = LibraryServerConnection.resolve(
+                    profile: profile,
+                    operations: syncStore,
+                    deviceID: libraryDeviceID,
+                    localAdminToken: preferences.localAdminToken
+                ) else { throw DevicesError.missingCredential }
+                let exporter = AroLibraryExporter(
+                    client: connection.client,
+                    credential: connection.credential,
+                    localSongs: library.allSongs,
+                    localMediaCache: mediaCache.blobCache,
+                    snapshotStore: syncStore
+                )
                 exportSession = LibraryExportSession(exporter: exporter)
             } catch {
                 statusMessage = error.localizedDescription
@@ -788,11 +862,11 @@ struct LibrarySettingsView: View {
     }
 
     private func revoke(_ device: ControlledHubDevice) {
-        guard let controlClient else { return }
+        guard let connection = activeServerConnection else { return }
         Task {
             do {
-                try await controlClient.revoke(deviceID: device.deviceID)
-                pairedDevices = try await controlClient.devices()
+                try await connection.client.revokeAdminDevice(deviceID: device.deviceID)
+                pairedDevices = try await connection.client.adminDevices()
             } catch {
                 statusMessage = error.localizedDescription
             }
@@ -801,7 +875,7 @@ struct LibrarySettingsView: View {
 
     private func primaryStatus(_ profile: LibraryProfile) -> String {
         if profile.kind == .local {
-            return sharingIsAvailable ? "Library available" : "Stored on this Mac"
+            return sharingIsAvailable ? "Library available" : "Local server unavailable"
         }
         return statusMessage == nil ? "Connected, up to date" : statusMessage!
     }
@@ -809,7 +883,7 @@ struct LibrarySettingsView: View {
     private func primaryStatusIcon(_ profile: LibraryProfile) -> String {
         if statusMessage != nil { return "exclamationmark.circle" }
         return profile.kind == .local && !sharingIsAvailable
-            ? "internaldrive"
+            ? "exclamationmark.circle"
             : "checkmark.circle.fill"
     }
 
@@ -818,7 +892,7 @@ struct LibrarySettingsView: View {
     }
 
     private func libraryDescription(_ profile: LibraryProfile) -> String {
-        sharingIsAvailable
+        profile.sharingEnabled
             ? "Approved devices can use this library while this Aro library is online."
             : "Turn on sharing when you want to use this library on another device."
     }
@@ -874,14 +948,14 @@ struct LibrarySettingsView: View {
         for device: ControlledHubDevice,
         allowed: Bool
     ) {
-        guard let controlClient else { return }
+        guard let connection = activeServerConnection else { return }
         Task {
             do {
-                try await controlClient.setContribution(
+                try await connection.client.setAdminContribution(
                     deviceID: device.deviceID,
                     allowed: allowed
                 )
-                pairedDevices = try await controlClient.devices()
+                pairedDevices = try await connection.client.adminDevices()
             } catch {
                 statusMessage = error.localizedDescription
             }
@@ -909,6 +983,19 @@ struct LibrarySettingsView: View {
     private var libraryDeviceID: UUID {
         UserDefaults.standard.string(forKey: "library.deviceID")
             .flatMap(UUID.init(uuidString:)) ?? UUID()
+    }
+
+    private func topologySongCount(_ profile: LibraryProfile) -> Int {
+        if let count = remoteTopology?.trackCount {
+            return Int(clamping: count)
+        }
+        if profile.kind == .local,
+           let count = localServers.servers.first(where: { server in
+               server.hubID == profile.hubID || server.kind == .bundledHelper
+           })?.trackCount {
+            return Int(clamping: count)
+        }
+        return library.allSongs.count
     }
 }
 
@@ -942,9 +1029,20 @@ struct SettingsCard<Content: View>: View {
     }
 }
 
+private enum SettingsSection: String, CaseIterable, Identifiable {
+    case overview
+    case topology
+
+    var id: Self { self }
+    var title: String { self == .overview ? "Overview" : "Topology" }
+    var icon: String { self == .overview ? "gearshape" : "point.3.connected.trianglepath.dotted" }
+}
+
 private struct PairingSession: Identifiable {
     let id = UUID()
-    let client: HubControlClient
+    let client: AroSyncClient
+    let hubID: UUID
+    let port: Int
 }
 
 private enum DevicesError: LocalizedError {

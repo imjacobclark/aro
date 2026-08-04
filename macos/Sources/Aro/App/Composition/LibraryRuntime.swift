@@ -43,34 +43,41 @@ final class LibraryRuntime {
             for: .cachesDirectory,
             in: .userDomainMask
         )[0].appendingPathComponent("Aro/Media", isDirectory: true)
-        let remoteCredential = profile?.hubID.flatMap { hubID in
+        let pairedCredential = profile?.hubID.flatMap { hubID in
             try? FileHubCredentialStore().load(
                 hubID: hubID,
                 deviceID: database.deviceID
             )
         }
-        let remoteTLSFingerprint = profile?.baseURL.flatMap {
+        let serverCredential: HubDeviceCredential? = if profile?.kind == .local,
+                                                        let localAdminToken,
+                                                        !localAdminToken.isEmpty {
+            HubDeviceCredential(
+                deviceID: database.deviceID,
+                credential: localAdminToken
+            )
+        } else {
+            pairedCredential
+        }
+        let serverTLSFingerprint = profile?.baseURL.flatMap {
             operationStore.membership(baseURL: $0)?.tlsFingerprint
         }
         let playbackActivity: any PlaybackActivityReporting
         if let baseURL = profile?.baseURL,
-           let remoteTLSFingerprint,
-           let remoteCredential {
+           let serverTLSFingerprint,
+           let serverCredential {
             playbackActivity = AroPlaybackActivityReporter(
-                client: AroSyncClient(
-                    baseURL: baseURL,
-                    pinnedTLSFingerprint: remoteTLSFingerprint
-                ),
-                credential: remoteCredential
-            )
-        } else if let localAdminToken,
-                  let loopback = URL(string: "https://127.0.0.1:4848") {
-            playbackActivity = AroPlaybackActivityReporter(
-                client: AroSyncClient(
-                    localAdminBaseURL: loopback,
-                    adminToken: localAdminToken
-                ),
-                credential: nil
+                client: profile?.kind == .local
+                    ? AroSyncClient(
+                        localAdminBaseURL: baseURL,
+                        adminToken: serverCredential.credential,
+                        pinnedTLSFingerprint: serverTLSFingerprint
+                    )
+                    : AroSyncClient(
+                        baseURL: baseURL,
+                        pinnedTLSFingerprint: serverTLSFingerprint
+                    ),
+                credential: profile?.kind == .local ? nil : serverCredential
             )
         } else {
             playbackActivity = NoOpPlaybackActivityReporter()
@@ -82,8 +89,8 @@ final class LibraryRuntime {
         let prepareSong = PrepareSongForPlayback(
             downloader: URLSessionMediaDownloader(
                 cacheDirectory: cacheDirectory,
-                credential: remoteCredential,
-                pinnedTLSFingerprint: remoteTLSFingerprint
+                credential: serverCredential,
+                pinnedTLSFingerprint: serverTLSFingerprint
             ),
             verifier: CachingSHA256MediaVerifier(
                 cache: mediaCache,
@@ -97,8 +104,8 @@ final class LibraryRuntime {
         )
         let streamingCoordinator = ProgressiveMediaCoordinator(
             cacheDirectory: cacheDirectory,
-            credential: remoteCredential,
-            pinnedTLSFingerprint: remoteTLSFingerprint,
+            credential: serverCredential,
+            pinnedTLSFingerprint: serverTLSFingerprint,
             shouldRetain: { media in
                 mediaCache.shouldRetainStreamedMedia(
                     hash: media.contentHash,
@@ -171,6 +178,16 @@ final class LibraryRuntime {
                     )
                 )
             },
+            localMediaAvailability: { song in
+                if song.url.isFileURL {
+                    return FileManager.default.fileExists(atPath: song.url.path)
+                }
+                guard let hash = song.contentHash,
+                      let url = mediaCache.localURL(hash: hash) else {
+                    return false
+                }
+                return FileManager.default.fileExists(atPath: url.path)
+            },
             progressivePlaybackEligibility: { song in
                 switch song.audioProperties?.codec.lowercased() {
                 case "flac", "ogg", "oga", "vorbis", "ogg vorbis",
@@ -205,7 +222,7 @@ final class LibraryRuntime {
             trackID: trackID,
             favourite: favourite
         )
-        libraryStore.reloadStoredLibrary()
+        libraryStore.reflectFavourite(trackID: trackID, favourite: favourite)
         playbackController.reconcileAvailableSongs(libraryStore.allSongs)
         await mediaCacheController.apply(
             offlinePolicy,

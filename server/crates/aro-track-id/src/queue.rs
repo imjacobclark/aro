@@ -105,6 +105,20 @@ const MIN_GROUP_MEMBERS_FOR_MATCHING: usize = 2;
 /// regardless of folder size (shortlisting itself, in `album::shortlist_candidates`,
 /// costs no requests at all).
 const MAX_TRACKLIST_FETCHES: usize = 3;
+/// A rejected folder gets at most this many additional candidates from its
+/// `Artist/Album` directory names. Each still needs to pass `album::accept`.
+const MAX_FOLDER_HINT_RELEASES: usize = 3;
+
+/// Group matching has authoritative release-medium positions.  Those positions must
+/// travel with the other resolved fields so consumers sort a multi-disc album by
+/// disc first and then track, rather than by stale tags from the source file.
+fn insert_assigned_position_fields(
+    fields: &mut serde_json::Map<String, Value>,
+    assignment: &album::TrackAssignment,
+) {
+    fields.insert("disc_number".into(), json!(assignment.medium_position));
+    fields.insert("track_number".into(), json!(assignment.track_position));
+}
 
 #[derive(Clone)]
 pub struct IdentificationConfig {
@@ -175,7 +189,12 @@ impl Inner {
     /// every file that reaches it as part of a [`WorkItem`] contributed exactly one
     /// `queued` slot, so releasing `member_count()` slots on dequeue balances.
     fn claim(&self, content_hash: &str) -> bool {
-        if !self.pending.lock().unwrap().insert(content_hash.to_string()) {
+        if !self
+            .pending
+            .lock()
+            .unwrap()
+            .insert(content_hash.to_string())
+        {
             return false;
         }
         self.queued.fetch_add(1, Ordering::Relaxed);
@@ -222,7 +241,12 @@ impl IdentificationQueue {
 
         if let Some(config) = config {
             let (job_sender, job_receiver) = mpsc::unbounded_channel::<WorkItem>();
-            tokio::spawn(coalesce(inner.clone(), store.clone(), staging_receiver, job_sender));
+            tokio::spawn(coalesce(
+                inner.clone(),
+                store.clone(),
+                staging_receiver,
+                job_sender,
+            ));
 
             let acoustid = acoustid::AcoustIdClient::new(config.acoustid_api_key);
             let musicbrainz_user_agent = config.musicbrainz_user_agent;
@@ -291,7 +315,11 @@ impl WorkItem {
     fn content_hashes(&self) -> Vec<String> {
         match self {
             WorkItem::Single(job) => vec![job.content_hash.clone()],
-            WorkItem::Group(group) => group.jobs.iter().map(|job| job.content_hash.clone()).collect(),
+            WorkItem::Group(group) => group
+                .jobs
+                .iter()
+                .map(|job| job.content_hash.clone())
+                .collect(),
         }
     }
 
@@ -306,6 +334,67 @@ impl WorkItem {
 struct GroupJob {
     folder: PathBuf,
     jobs: Vec<IdentificationJob>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FolderReleaseHint {
+    artist: String,
+    title: String,
+}
+
+/// A single folder named `Artist - Album` is an explicit library convention,
+/// not a loose search hint. Preserve that identity for presentation even when
+/// MusicBrainz's best fingerprint-backed release is a different compilation.
+fn explicit_folder_release_hint(folder: &Path) -> Option<FolderReleaseHint> {
+    let name = folder.file_name()?.to_str()?.trim();
+    [" - ", " – ", " — "].into_iter().find_map(|separator| {
+        let (artist, title) = name.split_once(separator)?;
+        let artist = artist.trim();
+        let title = title.trim();
+        (!artist.is_empty() && !title.is_empty()).then(|| FolderReleaseHint {
+            artist: artist.to_owned(),
+            title: title.to_owned(),
+        })
+    })
+}
+
+fn fields_match_explicit_folder_identity(
+    path: &Path,
+    fields: &serde_json::Map<String, Value>,
+) -> bool {
+    path.parent()
+        .and_then(explicit_folder_release_hint)
+        .is_some_and(|identity| {
+            fields
+                .get("artist")
+                .and_then(Value::as_str)
+                .is_some_and(|artist| {
+                    crate::matching::normalize_matching_key(artist)
+                        == crate::matching::normalize_matching_key(&identity.artist)
+                })
+                && fields
+                    .get("album")
+                    .and_then(Value::as_str)
+                    .is_some_and(|album| {
+                        crate::matching::normalize_matching_key(album)
+                            == crate::matching::normalize_matching_key(&identity.title)
+                    })
+        })
+}
+
+/// A source tree conventionally uses `Artist/Album/track`. Folder names are
+/// independent evidence, unlike the individual embedded tags that compilation
+/// rips commonly carry from each track's original release.
+fn folder_release_hint(folder: &Path) -> Option<FolderReleaseHint> {
+    if let Some(explicit) = explicit_folder_release_hint(folder) {
+        return Some(explicit);
+    }
+    let title = folder.file_name()?.to_str()?.trim();
+    let artist = folder.parent()?.file_name()?.to_str()?.trim();
+    (!artist.is_empty() && !title.is_empty()).then(|| FolderReleaseHint {
+        artist: artist.to_owned(),
+        title: title.to_owned(),
+    })
 }
 
 struct StagedGroup {
@@ -373,7 +462,8 @@ fn flush_ready(
         .iter()
         .filter(|(_, group)| {
             now.duration_since(group.last_staged) >= Duration::from_secs(GROUP_DEBOUNCE_SECS)
-                || now.duration_since(group.first_staged) >= Duration::from_secs(MAX_GROUP_STAGING_SECS)
+                || now.duration_since(group.first_staged)
+                    >= Duration::from_secs(MAX_GROUP_STAGING_SECS)
         })
         .map(|(folder, _)| folder.clone())
         .collect();
@@ -606,10 +696,17 @@ async fn run(
                     group,
                 )
                 .await;
-                inner.processed.fetch_add(outcome.processed as u64, Ordering::Relaxed);
-                inner.failed.fetch_add(outcome.failed as u64, Ordering::Relaxed);
+                inner
+                    .processed
+                    .fetch_add(outcome.processed as u64, Ordering::Relaxed);
+                inner
+                    .failed
+                    .fetch_add(outcome.failed as u64, Ordering::Relaxed);
                 *inner.last_error.lock().await = if outcome.failed > 0 {
-                    Some(format!("{} file(s) failed during group identification", outcome.failed))
+                    Some(format!(
+                        "{} file(s) failed during group identification",
+                        outcome.failed
+                    ))
                 } else {
                     None
                 };
@@ -905,7 +1002,14 @@ async fn identify_file(
     else {
         return Ok(false);
     };
-    finish_per_file(store, hub_id, artwork_http, musicbrainz_user_agent, &prepared).await
+    finish_per_file(
+        store,
+        hub_id,
+        artwork_http,
+        musicbrainz_user_agent,
+        &prepared,
+    )
+    .await
 }
 
 /// A file's fingerprint/AcoustID/MusicBrainz evidence, gathered once and reusable both
@@ -1204,15 +1308,14 @@ async fn per_file_fields(
             if let Some(album) = &release.title {
                 fields.insert("album".into(), json!(album));
             }
-            if let Some(artwork_url) =
-                cache_artwork(
-                    artwork_http,
-                    musicbrainz_user_agent,
-                    store,
-                    &release.id,
-                    release_group_id.as_deref(),
-                )
-                .await
+            if let Some(artwork_url) = cache_artwork(
+                artwork_http,
+                musicbrainz_user_agent,
+                store,
+                &release.id,
+                release_group_id.as_deref(),
+            )
+            .await
             {
                 fields.insert("artwork_url".into(), json!(artwork_url));
             }
@@ -1371,7 +1474,20 @@ async fn persist_result(
     };
 
     let existing = store.identification_result(content_hash)?;
-    if !should_revise(existing.as_ref(), meta.score) {
+    // A newer identifier can add non-confidence metadata (notably the matched
+    // release's disc/track position) without changing the release or its score.
+    // Permit that exact-release refresh, while keeping the normal revision gate
+    // for every competing release intact.
+    let refreshes_same_release = existing
+        .as_ref()
+        .and_then(|result| result.release_id.as_deref())
+        .zip(meta.release_id.as_deref())
+        .is_some_and(|(existing_release, new_release)| existing_release == new_release);
+    let matches_explicit_folder_identity = fields_match_explicit_folder_identity(path, &fields);
+    if !should_revise(existing.as_ref(), meta.score)
+        && !refreshes_same_release
+        && !matches_explicit_folder_identity
+    {
         tracing::debug!(
             content_hash = %content_hash,
             path = %path.display(),
@@ -1433,15 +1549,6 @@ async fn persist_result(
         }])?;
     }
 
-    if tags::should_persist_to_files(store)?
-        && let Err(error) = tags::write_back(path, &fields)
-    {
-        tracing::warn!(
-            content_hash = %content_hash, %error,
-            "tag write-back failed; database metadata is unaffected"
-        );
-    }
-
     Ok(true)
 }
 
@@ -1471,7 +1578,45 @@ async fn finish_per_file_with_hint(
     prepared: &PreparedFile,
     hint_album: Option<&str>,
 ) -> anyhow::Result<bool> {
-    let result = per_file_fields(prepared, store, artwork_http, musicbrainz_user_agent, hint_album).await?;
+    finish_per_file_with_group_identity(
+        store,
+        hub_id,
+        artwork_http,
+        musicbrainz_user_agent,
+        prepared,
+        hint_album,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Finishes the ordinary per-file lookup while retaining an already-accepted group's
+/// identity. A release-title *hint* only influences MusicBrainz ranking and can still
+/// choose a different compilation; once the folder has been accepted as a group its
+/// album is no longer a hint. Exact `Artist/Album` folder matches may also supply the
+/// artist identity, which keeps artist-spanning retrospectives such as
+/// `Eric Clapton/The Cream Of Clapton` together instead of presenting one album per
+/// historical performing act.
+async fn finish_per_file_with_group_identity(
+    store: &HubStore,
+    hub_id: Uuid,
+    artwork_http: &reqwest::Client,
+    musicbrainz_user_agent: &str,
+    prepared: &PreparedFile,
+    hint_album: Option<&str>,
+    group_album: Option<&str>,
+    group_artist: Option<&str>,
+) -> anyhow::Result<bool> {
+    let mut result = per_file_fields(
+        prepared,
+        store,
+        artwork_http,
+        musicbrainz_user_agent,
+        hint_album,
+    )
+    .await?;
+    apply_group_identity(&mut result.fields, group_album, group_artist);
     let meta = ResolutionMeta::per_file(result.release_id, result.release_group_id);
     persist_result(
         store,
@@ -1482,6 +1627,49 @@ async fn finish_per_file_with_hint(
         &meta,
     )
     .await
+}
+
+fn apply_group_identity(
+    fields: &mut serde_json::Map<String, Value>,
+    album: Option<&str>,
+    artist: Option<&str>,
+) {
+    if let Some(album) = album {
+        fields.insert("album".into(), json!(album));
+    }
+    if let Some(artist) = artist {
+        fields.insert("artist".into(), json!(artist));
+    }
+}
+
+/// A folder-wide, gap-free tag sequence is stronger evidence than any one file's
+/// number. This distinguishes a deliberately numbered rip from the isolated stale
+/// original-release numbers that compilation files sometimes carry.
+fn has_complete_tag_sequence<'a>(tags: impl IntoIterator<Item = &'a tags::ExistingTags>) -> bool {
+    let mut by_disc: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut count = 0usize;
+    for tags in tags {
+        let Some(track) = tags.track_number else {
+            return false;
+        };
+        by_disc
+            .entry(tags.disc_number.unwrap_or(1))
+            .or_default()
+            .push(track);
+        count += 1;
+    }
+    if count < MIN_GROUP_MEMBERS_FOR_MATCHING {
+        return false;
+    }
+    let mut discs: Vec<u32> = by_disc.keys().copied().collect();
+    discs.sort_unstable();
+    if discs.iter().copied().ne(1..=discs.len() as u32) {
+        return false;
+    }
+    by_disc.values_mut().all(|tracks| {
+        tracks.sort_unstable();
+        tracks.iter().copied().eq(1..=tracks.len() as u32)
+    })
 }
 
 struct GroupOutcome {
@@ -1608,7 +1796,9 @@ fn dominant_artist_affinity(
             .and_then(|credit| credit.name.clone())
             .or_else(|| file.acoustid_artist.clone());
         if let Some(artist) = artist {
-            *counts.entry(crate::matching::normalize_matching_key(artist)).or_insert(0) += 1;
+            *counts
+                .entry(crate::matching::normalize_matching_key(artist))
+                .or_insert(0) += 1;
         }
     }
     let (dominant, _) = counts.into_iter().max_by_key(|(_, count)| *count)?;
@@ -1633,6 +1823,7 @@ async fn identify_group(
 ) -> GroupOutcome {
     let mut processed = 0usize;
     let mut failed = 0usize;
+    let explicit_identity = explicit_folder_release_hint(&job.folder);
 
     let mut prepared: Vec<Option<PreparedFile>> = Vec::with_capacity(job.jobs.len());
     for file_job in job.jobs {
@@ -1662,8 +1853,20 @@ async fn identify_group(
         musicbrainz_user_agent: &str,
         file: &PreparedFile,
         hint_album: Option<&str>,
+        group_album: Option<&str>,
+        group_artist: Option<&str>,
     ) -> (usize, usize) {
-        match finish_per_file_with_hint(store, hub_id, artwork_http, musicbrainz_user_agent, file, hint_album).await
+        match finish_per_file_with_group_identity(
+            store,
+            hub_id,
+            artwork_http,
+            musicbrainz_user_agent,
+            file,
+            hint_album,
+            group_album,
+            group_artist,
+        )
+        .await
         {
             Ok(_) => (1, 0),
             Err(error) => {
@@ -1681,7 +1884,12 @@ async fn identify_group(
                 artwork_http,
                 musicbrainz_user_agent,
                 file,
-                file.tags.album.as_deref(),
+                explicit_identity
+                    .as_ref()
+                    .map(|hint| hint.title.as_str())
+                    .or(file.tags.album.as_deref()),
+                explicit_identity.as_ref().map(|hint| hint.title.as_str()),
+                explicit_identity.as_ref().map(|hint| hint.artist.as_str()),
             )
             .await;
             processed += file_processed;
@@ -1705,7 +1913,10 @@ async fn identify_group(
             candidate_recording_ids: &file.candidate_recording_ids,
         })
         .collect();
-    let mut releases_per_file: Vec<Vec<musicbrainz::Release>> = Vec::with_capacity(group_files.len());
+    let preserve_tag_positions =
+        has_complete_tag_sequence(group_files.iter().map(|file| &file.tags));
+    let mut releases_per_file: Vec<Vec<musicbrainz::Release>> =
+        Vec::with_capacity(group_files.len());
     for file in &group_files {
         let mut releases = file
             .musicbrainz_recording
@@ -1728,9 +1939,65 @@ async fn identify_group(
     }
     matches.sort_by(|a, b| b.score.total_cmp(&a.score));
 
-    let best = matches.first();
-    let runner_up = matches.get(1);
-    let accepted = best.is_some_and(|best| album::accept(best, runner_up, files.len()));
+    let mut accepted = matches
+        .first()
+        .is_some_and(|best| album::accept(best, matches.get(1), files.len()));
+
+    // The named `Artist/Album` folder is independent evidence. It is especially
+    // important for compilations, where fingerprints naturally point to original
+    // albums. An exact-title result which independently clears the group-quality
+    // bar wins even when a different fingerprint candidate was also acceptable.
+    // This is deliberately restricted to an exact folder-title match and requires
+    // the same placement/score checks, so it cannot rewrite loosely named folders.
+    let mut folder_match: Option<album::GroupMatch> = None;
+    if let Some(hint) = folder_release_hint(&job.folder) {
+        match musicbrainz
+            .search_releases(&hint.artist, &hint.title, MAX_FOLDER_HINT_RELEASES)
+            .await
+        {
+            Ok(releases) => {
+                for release in releases {
+                    if let Some(release) =
+                        fetch_release_cached(store, musicbrainz, &release.id).await
+                    {
+                        let candidate = album::match_group_against_release(&files, &release);
+                        let title_matches =
+                            candidate.release_title.as_deref().is_some_and(|title| {
+                                crate::matching::normalize_matching_key(title)
+                                    == crate::matching::normalize_matching_key(&hint.title)
+                            });
+                        if title_matches
+                            && album::accept(&candidate, None, files.len())
+                            && folder_match
+                                .as_ref()
+                                .is_none_or(|best| candidate.score > best.score)
+                        {
+                            folder_match = Some(candidate);
+                        }
+                    }
+                }
+                if folder_match.is_some() {
+                    accepted = true;
+                }
+            }
+            Err(error) => tracing::warn!(
+                folder = %job.folder.display(),
+                %error,
+                "folder-name release lookup failed"
+            ),
+        }
+    }
+
+    let folder_artist = explicit_identity
+        .as_ref()
+        .map(|hint| hint.artist.clone())
+        .or_else(|| {
+            folder_match
+                .as_ref()
+                .and_then(|_| folder_release_hint(&job.folder))
+                .map(|hint| hint.artist)
+        });
+    let best = folder_match.as_ref().or(matches.first());
 
     tracing::info!(
         folder = %job.folder.display(),
@@ -1744,7 +2011,10 @@ async fn identify_group(
         "group identification decision"
     );
 
-    let release_title = best.and_then(|best| best.release_title.clone());
+    let release_title = explicit_identity
+        .as_ref()
+        .map(|hint| hint.title.clone())
+        .or_else(|| best.and_then(|best| best.release_title.clone()));
 
     if accepted {
         let best = best.expect("accepted implies a best match exists");
@@ -1754,17 +2024,35 @@ async fn identify_group(
             let file = group_files[assignment.file_index];
             let mut fields = serde_json::Map::new();
             fields.insert("acoustid_id".into(), json!(file.acoustid_id));
-            fields.insert("musicbrainz_recording_id".into(), json!(assignment.recording_id));
+            fields.insert(
+                "musicbrainz_recording_id".into(),
+                json!(assignment.recording_id),
+            );
             fields.insert("title".into(), json!(assignment.title));
+            insert_assigned_position_fields(&mut fields, assignment);
+            if preserve_tag_positions {
+                if let Some(track_number) = file.tags.track_number {
+                    fields.insert("track_number".into(), json!(track_number));
+                }
+                fields.insert(
+                    "disc_number".into(),
+                    json!(file.tags.disc_number.unwrap_or(1)),
+                );
+            }
             insert_mood_and_genre_fields(&mut fields, file.musicbrainz_recording.as_ref());
-            if let Some(artist) = assignment
-                .track_artist
-                .clone()
-                .or_else(|| best.release_artist.clone())
-            {
+            if let Some(artist) = folder_artist.clone().or_else(|| {
+                assignment
+                    .track_artist
+                    .clone()
+                    .or_else(|| best.release_artist.clone())
+            }) {
                 fields.insert("artist".into(), json!(artist));
             }
-            if let Some(album_title) = &best.release_title {
+            if let Some(album_title) = explicit_identity
+                .as_ref()
+                .map(|hint| &hint.title)
+                .or(best.release_title.as_ref())
+            {
                 fields.insert("album".into(), json!(album_title));
             }
             if artwork_url.is_none() {
@@ -1800,7 +2088,16 @@ async fn identify_group(
                 best.release_id.clone(),
                 best.release_group_id.clone(),
             );
-            match persist_result(store, hub_id, &file.job.path, &file.job.content_hash, fields, &meta).await {
+            match persist_result(
+                store,
+                hub_id,
+                &file.job.path,
+                &file.job.content_hash,
+                fields,
+                &meta,
+            )
+            .await
+            {
                 Ok(_) => processed += 1,
                 Err(error) => {
                     tracing::warn!(
@@ -1822,7 +2119,15 @@ async fn identify_group(
                 artwork_http,
                 musicbrainz_user_agent,
                 group_files[file_index],
-                best.release_title.as_deref(),
+                explicit_identity
+                    .as_ref()
+                    .map(|hint| hint.title.as_str())
+                    .or(best.release_title.as_deref()),
+                explicit_identity
+                    .as_ref()
+                    .map(|hint| hint.title.as_str())
+                    .or(best.release_title.as_deref()),
+                folder_artist.as_deref(),
             )
             .await;
             processed += file_processed;
@@ -1836,7 +2141,12 @@ async fn identify_group(
                 artwork_http,
                 musicbrainz_user_agent,
                 file,
-                file.tags.album.as_deref(),
+                explicit_identity
+                    .as_ref()
+                    .map(|hint| hint.title.as_str())
+                    .or(file.tags.album.as_deref()),
+                explicit_identity.as_ref().map(|hint| hint.title.as_str()),
+                explicit_identity.as_ref().map(|hint| hint.artist.as_str()),
             )
             .await;
             processed += file_processed;
@@ -1870,7 +2180,9 @@ async fn identify_group(
 ///   bump ever fixes that, since the row's *shape* was never the problem.
 fn is_fresh(entry: &aro_sync_store::IdentificationCacheEntry, now: i64) -> bool {
     let within_ttl = now - entry.refreshed_at < CACHE_TTL_SECS;
-    within_ttl && entry.schema_version >= crate::CACHE_SCHEMA_VERSION && cached_response_has_title(entry)
+    within_ttl
+        && entry.schema_version >= crate::CACHE_SCHEMA_VERSION
+        && cached_response_has_title(entry)
 }
 
 /// Whether a cached AcoustID/MusicBrainz response pair actually resolved to a titled
@@ -1911,9 +2223,13 @@ async fn cache_artwork(
     release_mbid: &str,
     release_group_mbid: Option<&str>,
 ) -> Option<String> {
-    let bytes =
-        musicbrainz::fetch_cover_art_with_fallback(http, user_agent, release_mbid, release_group_mbid)
-            .await?;
+    let bytes = musicbrainz::fetch_cover_art_with_fallback(
+        http,
+        user_agent,
+        release_mbid,
+        release_group_mbid,
+    )
+    .await?;
     let temp = tempfile::NamedTempFile::new().ok()?;
     std::fs::write(temp.path(), &bytes).ok()?;
     let (hash, _size) = store.import_managed(temp.path()).ok()?;
@@ -2025,9 +2341,8 @@ mod tests {
     fn entry(schema_version: u32, refreshed_at: i64, titled: bool) -> IdentificationCacheEntry {
         IdentificationCacheEntry {
             acoustid_response: None,
-            musicbrainz_response: titled.then(|| {
-                serde_json::json!({"id": "rec-1", "title": "Some Song", "releases": []})
-            }),
+            musicbrainz_response: titled
+                .then(|| serde_json::json!({"id": "rec-1", "title": "Some Song", "releases": []})),
             schema_version,
             refreshed_at,
         }
@@ -2037,6 +2352,25 @@ mod tests {
     fn entry_below_current_schema_version_is_not_fresh() {
         let stale = entry(crate::CACHE_SCHEMA_VERSION - 1, 1_000, true);
         assert!(!is_fresh(&stale, 1_000));
+    }
+
+    #[test]
+    fn group_assignment_persists_the_authoritative_disc_and_track_position() {
+        let assignment = album::TrackAssignment {
+            file_index: 0,
+            medium_position: 2,
+            track_position: 8,
+            recording_id: "recording-id".into(),
+            title: "Everyday Life".into(),
+            track_artist: None,
+            pair_score: 1.0,
+        };
+        let mut fields = serde_json::Map::new();
+
+        insert_assigned_position_fields(&mut fields, &assignment);
+
+        assert_eq!(fields["disc_number"], json!(2));
+        assert_eq!(fields["track_number"], json!(8));
     }
 
     #[test]
@@ -2081,6 +2415,89 @@ mod tests {
     fn no_existing_result_always_allows_revision() {
         assert!(should_revise(None, None));
         assert!(should_revise(None, Some(0.9)));
+    }
+
+    #[test]
+    fn folder_release_hint_uses_artist_and_album_directories() {
+        assert_eq!(
+            folder_release_hint(Path::new("/music/Eric Clapton/The Cream Of Clapton")),
+            Some(FolderReleaseHint {
+                artist: "Eric Clapton".into(),
+                title: "The Cream Of Clapton".into(),
+            })
+        );
+        assert_eq!(folder_release_hint(Path::new("/")), None);
+    }
+
+    #[test]
+    fn folder_release_hint_understands_artist_dash_album_directories() {
+        assert_eq!(
+            explicit_folder_release_hint(Path::new("/music/The Shadows - Greatest Hits")),
+            Some(FolderReleaseHint {
+                artist: "The Shadows".into(),
+                title: "Greatest Hits".into(),
+            })
+        );
+        assert_eq!(
+            explicit_folder_release_hint(Path::new("/music/Eric Clapton – The Cream of Clapton")),
+            Some(FolderReleaseHint {
+                artist: "Eric Clapton".into(),
+                title: "The Cream of Clapton".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn explicit_folder_identity_can_replace_a_prior_compilation_choice() {
+        let fields = serde_json::Map::from_iter([
+            ("artist".into(), json!("The Shadows")),
+            ("album".into(), json!("Greatest Hits")),
+        ]);
+
+        assert!(fields_match_explicit_folder_identity(
+            Path::new("/music/The Shadows - Greatest Hits/Apache.flac"),
+            &fields,
+        ));
+    }
+
+    #[test]
+    fn complete_folder_tag_sequence_is_trusted_for_group_ordering() {
+        let tags = (1..=15)
+            .map(|track_number| tags::ExistingTags {
+                track_number: Some(track_number),
+                disc_number: Some(1),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        assert!(has_complete_tag_sequence(&tags));
+    }
+
+    #[test]
+    fn incomplete_or_duplicate_folder_tag_sequence_is_not_trusted() {
+        let tags = [1, 2, 2, 4]
+            .into_iter()
+            .map(|track_number| tags::ExistingTags {
+                track_number: Some(track_number),
+                disc_number: Some(1),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        assert!(!has_complete_tag_sequence(&tags));
+    }
+
+    #[test]
+    fn accepted_group_identity_overrides_per_file_compilation_choices() {
+        let mut fields = serde_json::Map::from_iter([
+            ("artist".into(), json!("Cream")),
+            ("album".into(), json!("Disraeli Gears")),
+        ]);
+        apply_group_identity(
+            &mut fields,
+            Some("The Cream of Clapton"),
+            Some("Eric Clapton"),
+        );
+        assert_eq!(fields["album"], json!("The Cream of Clapton"));
+        assert_eq!(fields["artist"], json!("Eric Clapton"));
     }
 
     #[test]
@@ -2193,13 +2610,22 @@ mod tests {
         let (job_tx, mut job_rx) = mpsc::unbounded_channel::<WorkItem>();
         tokio::spawn(coalesce(inner, store, staging_rx, job_tx));
 
-        staging_tx.send(job("hash-1", "Beatles/1", "01.m4a")).unwrap();
-        staging_tx.send(job("hash-2", "Beatles/1", "02.m4a")).unwrap();
-        staging_tx.send(job("hash-3", "Beatles/1", "03.m4a")).unwrap();
+        staging_tx
+            .send(job("hash-1", "Beatles/1", "01.m4a"))
+            .unwrap();
+        staging_tx
+            .send(job("hash-2", "Beatles/1", "02.m4a"))
+            .unwrap();
+        staging_tx
+            .send(job("hash-3", "Beatles/1", "03.m4a"))
+            .unwrap();
 
         tokio::time::advance(Duration::from_secs(GROUP_DEBOUNCE_SECS + 1)).await;
 
-        let item = job_rx.recv().await.expect("expected one coalesced work item");
+        let item = job_rx
+            .recv()
+            .await
+            .expect("expected one coalesced work item");
         match item {
             WorkItem::Group(group) => assert_eq!(group.jobs.len(), 3),
             WorkItem::Single(_) => panic!("expected a group, got a single-file work item"),
@@ -2229,7 +2655,9 @@ mod tests {
         let (job_tx, mut job_rx) = mpsc::unbounded_channel::<WorkItem>();
         tokio::spawn(coalesce(inner, store, staging_rx, job_tx));
 
-        staging_tx.send(job("hash-1", "Loose Tracks", "track.m4a")).unwrap();
+        staging_tx
+            .send(job("hash-1", "Loose Tracks", "track.m4a"))
+            .unwrap();
         tokio::time::advance(Duration::from_secs(GROUP_DEBOUNCE_SECS + 1)).await;
 
         match job_rx.recv().await.expect("expected one work item") {
@@ -2272,7 +2700,11 @@ mod tests {
         let WorkItem::Group(first_group) = first else {
             panic!("expected a group");
         };
-        assert_eq!(first_group.jobs.len(), 4, "largest folder should flush first");
+        assert_eq!(
+            first_group.jobs.len(),
+            4,
+            "largest folder should flush first"
+        );
 
         let second = job_rx.recv().await.expect("expected a second work item");
         let WorkItem::Group(second_group) = second else {
@@ -2310,7 +2742,10 @@ mod tests {
 
         tokio::time::advance(Duration::from_secs(MAX_GROUP_STAGING_SECS)).await;
 
-        let item = job_rx.recv().await.expect("expected the slow folder to eventually flush");
+        let item = job_rx
+            .recv()
+            .await
+            .expect("expected the slow folder to eventually flush");
         assert!(matches!(item, WorkItem::Group(_) | WorkItem::Single(_)));
     }
 
@@ -2321,7 +2756,9 @@ mod tests {
     #[test]
     fn folding_in_folder_members_takes_a_queued_slot_for_each() {
         let (directory, store) = open_store();
-        let files = ["01.m4a", "02.m4a", "03.m4a", "04.m4a", "05.m4a", "06.m4a", "07.m4a", "08.m4a"];
+        let files = [
+            "01.m4a", "02.m4a", "03.m4a", "04.m4a", "05.m4a", "06.m4a", "07.m4a", "08.m4a",
+        ];
         let folder = seed_folder(&directory, &store, "Grimes/Art Angels", &files);
         let inner = test_inner();
         let (job_tx, mut job_rx) = mpsc::unbounded_channel::<WorkItem>();
@@ -2354,7 +2791,12 @@ mod tests {
     #[test]
     fn folded_in_folder_members_are_claimed_as_pending() {
         let (directory, store) = open_store();
-        let folder = seed_folder(&directory, &store, "Grimes/Art Angels", &["01.m4a", "02.m4a", "03.m4a"]);
+        let folder = seed_folder(
+            &directory,
+            &store,
+            "Grimes/Art Angels",
+            &["01.m4a", "02.m4a", "03.m4a"],
+        );
         let inner = test_inner();
         let (job_tx, _job_rx) = mpsc::unbounded_channel::<WorkItem>();
 
@@ -2378,7 +2820,12 @@ mod tests {
     #[test]
     fn a_member_already_claimed_elsewhere_is_not_folded_in_twice() {
         let (directory, store) = open_store();
-        let folder = seed_folder(&directory, &store, "Grimes/Art Angels", &["01.m4a", "02.m4a", "03.m4a"]);
+        let folder = seed_folder(
+            &directory,
+            &store,
+            "Grimes/Art Angels",
+            &["01.m4a", "02.m4a", "03.m4a"],
+        );
         let inner = test_inner();
         let (job_tx, mut job_rx) = mpsc::unbounded_channel::<WorkItem>();
 
@@ -2395,7 +2842,11 @@ mod tests {
         );
 
         let item = job_rx.try_recv().expect("expected a work item");
-        assert_eq!(item.member_count(), 2, "the already-claimed member must be left out");
+        assert_eq!(
+            item.member_count(),
+            2,
+            "the already-claimed member must be left out"
+        );
         assert!(!item.content_hashes().contains(&"hash-03.m4a".to_string()));
         assert_eq!(
             inner.queued.load(Ordering::Relaxed),
@@ -2453,7 +2904,8 @@ mod tests {
         };
 
         {
-            let _guard = PendingGuard::new(&inner, vec!["hash-1".to_string(), "hash-2".to_string()]);
+            let _guard =
+                PendingGuard::new(&inner, vec!["hash-1".to_string(), "hash-2".to_string()]);
             assert_eq!(inner.pending.lock().unwrap().len(), 3);
         }
 

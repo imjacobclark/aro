@@ -51,4 +51,26 @@ impl JobRegistry {
         }
         Some(job.clone())
     }
+
+    pub fn advance(&self, id: Uuid, units: u64) -> Option<SyncJob> {
+        let mut jobs = self.0.write();
+        let job = jobs.get_mut(&id)?;
+        if job.state == JobState::Running {
+            job.completed_units = job
+                .completed_units
+                .saturating_add(units)
+                .min(job.total_units);
+        }
+        Some(job.clone())
+    }
+
+    pub fn fail(&self, id: Uuid, error: impl Into<String>) -> Option<SyncJob> {
+        let mut jobs = self.0.write();
+        let job = jobs.get_mut(&id)?;
+        if !matches!(job.state, JobState::Completed | JobState::Cancelled) {
+            job.state = JobState::Failed;
+            job.error = Some(error.into());
+        }
+        Some(job.clone())
+    }
 }

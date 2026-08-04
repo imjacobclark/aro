@@ -108,9 +108,15 @@ mod tests {
 
     #[test]
     fn title_similarity_ignores_remaster_and_live_qualifiers() {
-        assert_eq!(title_similarity("December", "December (2015 Remaster)"), 1.0);
+        assert_eq!(
+            title_similarity("December", "December (2015 Remaster)"),
+            1.0
+        );
         assert_eq!(title_similarity("December", "December [Live]"), 1.0);
-        assert_eq!(title_similarity("December", "December - 2015 Remaster"), 1.0);
+        assert_eq!(
+            title_similarity("December", "December - 2015 Remaster"),
+            1.0
+        );
         assert_eq!(title_similarity("December", "December - Remastered"), 1.0);
     }
 

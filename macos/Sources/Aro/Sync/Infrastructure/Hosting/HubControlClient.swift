@@ -34,6 +34,8 @@ struct HubPairingWindow: Sendable {
 struct HubControlStatus: Sendable {
     let hubID: UUID
     let displayName: String
+    let tlsFingerprint: String
+    let httpsPort: UInt16
     let pairingAvailable: Bool
     let sequence: UInt64
     let storageMode: String
@@ -158,7 +160,7 @@ struct ServerGeneratedPlaylist: Identifiable, Codable, Sendable, Equatable {
 }
 
 struct HubControlClient: Sendable {
-    static let controlProtocolVersion = 9
+    static let controlProtocolVersion = 13
 
     private static let logger = Logger(
         subsystem: "com.othyn.aro",
@@ -188,6 +190,9 @@ struct HubControlClient: Sendable {
         guard let hubIDText = result["hub_id"] as? String,
               let hubID = UUID(uuidString: hubIDText),
               let displayName = result["display_name"] as? String,
+              let tlsFingerprint = result["tls_fingerprint"] as? String,
+              let httpsPort = result["https_port"] as? Int,
+              (1 ... Int(UInt16.max)).contains(httpsPort),
               let pairingAvailable = result["pairing_available"] as? Bool,
               let sequence = result["sequence"] as? Int,
               let storageMode = result["storage_mode"] as? String else {
@@ -196,10 +201,26 @@ struct HubControlClient: Sendable {
         return HubControlStatus(
             hubID: hubID,
             displayName: displayName,
+            tlsFingerprint: tlsFingerprint,
+            httpsPort: UInt16(httpsPort),
             pairingAvailable: pairingAvailable,
             sequence: UInt64(sequence),
             storageMode: storageMode
         )
+    }
+
+    func setManualMetadata(_ request: ManualMetadataUpload) async throws {
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let data = try encoder.encode(request)
+        guard let object = try JSONSerialization.jsonObject(with: data)
+                as? [String: Any] else {
+            throw HubControlError.invalidResponse
+        }
+        _ = try await sendValue([
+            "command": "set_manual_metadata",
+            "request": object,
+        ])
     }
 
     func openPairing() async throws -> HubPairingWindow {
@@ -222,6 +243,29 @@ struct HubControlClient: Sendable {
         let decoder = JSONDecoder.aroSyncProtocol()
         decoder.dateDecodingStrategy = .iso8601
         return try decoder.decode([ControlledHubDevice].self, from: data)
+    }
+
+    /// Server-owned, paginated catalog read used by streaming profiles. The
+    /// control socket executes the same SQLite query as the remote HTTPS API.
+    func catalog(
+        cursor: UInt64 = 0,
+        limit: UInt32 = 50,
+        query: String? = nil,
+        sort: String = "title"
+    ) async throws -> CatalogPage {
+        var request: [String: Any] = [
+            "command": "catalog",
+            "cursor": cursor,
+            "limit": limit,
+            "sort": sort
+        ]
+        if let query, !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            request["q"] = query
+        }
+        let result = try await sendValue(request)
+        let data = try JSONSerialization.data(withJSONObject: result)
+        let decoder = JSONDecoder.aroSyncProtocol()
+        return try decoder.decode(CatalogPage.self, from: data)
     }
 
     func pendingPairingRequests() async throws -> [ControlledPairingRequest] {
@@ -495,6 +539,26 @@ struct HubControlClient: Sendable {
         ])
         let data = try JSONSerialization.data(withJSONObject: result)
         return try JSONDecoder.aroSyncProtocol().decode([SequencedSyncOperation].self, from: data)
+    }
+
+    /// Uploads mutations that were committed to the Mac's durable sync outbox
+    /// while its local hub was unavailable. The socket is only a transport; the
+    /// server remains the canonical CRDT/materialized-catalog owner.
+    func pushOperations(_ operations: [SyncOperation]) async throws -> [UUID] {
+        guard !operations.isEmpty else { return [] }
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        encoder.dateEncodingStrategy = .iso8601
+        let encoded = try encoder.encode(operations)
+        let object = try JSONSerialization.jsonObject(with: encoded)
+        let result = try await send([
+            "command": "push_operations",
+            "operations": object,
+        ])
+        guard let identifiers = result["accepted"] as? [String] else {
+            throw HubControlError.invalidResponse
+        }
+        return identifiers.compactMap(UUID.init(uuidString:))
     }
 
     /// Reads a blob's bytes off the local hub's own store over the control

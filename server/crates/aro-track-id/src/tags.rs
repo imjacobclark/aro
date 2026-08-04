@@ -68,9 +68,7 @@ pub fn read_existing_tags(path: &Path) -> ExistingTags {
         title: tag.title().map(|value| value.into_owned()),
         artist: tag.artist().map(|value| value.into_owned()),
         album: tag.album().map(|value| value.into_owned()),
-        album_artist: tag
-            .get_string(ItemKey::AlbumArtist)
-            .map(str::to_owned),
+        album_artist: tag.get_string(ItemKey::AlbumArtist).map(str::to_owned),
         track_number: tag.track(),
         disc_number: tag.disk(),
     }
@@ -121,7 +119,8 @@ mod tests {
         let data = vec![0u8; 200];
 
         file.write_all(b"RIFF").unwrap();
-        file.write_all(&(36 + data.len() as u32).to_le_bytes()).unwrap();
+        file.write_all(&(36 + data.len() as u32).to_le_bytes())
+            .unwrap();
         file.write_all(b"WAVE").unwrap();
         file.write_all(b"fmt ").unwrap();
         file.write_all(&16u32.to_le_bytes()).unwrap();

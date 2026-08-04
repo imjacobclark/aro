@@ -134,16 +134,15 @@ mod tests {
 
     #[test]
     fn escapes_every_xml_metacharacter() {
-        assert_eq!(
-            escape(r#"a&b<c>d"e'f"#),
-            "a&amp;b&lt;c&gt;d&quot;e&apos;f"
-        );
+        assert_eq!(escape(r#"a&b<c>d"e'f"#), "a&amp;b&lt;c&gt;d&quot;e&apos;f");
     }
 
     #[test]
     fn track_items_escape_metadata_everywhere() {
         let rendered = track_item(&track(), "music:tracks", "http://10.0.0.2:4850");
-        assert!(rendered.contains("<dc:title>Bed &amp; &lt;Breakfast&gt; &quot;Live&quot;</dc:title>"));
+        assert!(
+            rendered.contains("<dc:title>Bed &amp; &lt;Breakfast&gt; &quot;Live&quot;</dc:title>")
+        );
         assert!(rendered.contains("<upnp:artist>Simon &amp; Garfunkel</upnp:artist>"));
         assert!(rendered.contains("<upnp:album>Sounds &gt; Silence</upnp:album>"));
         assert!(rendered.contains("<upnp:originalTrackNumber>3</upnp:originalTrackNumber>"));

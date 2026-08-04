@@ -1,12 +1,13 @@
 import SwiftUI
 
 struct AddDeviceSheet: View {
-    let controlClient: HubControlClient
+    let client: AroSyncClient
+    let hubID: UUID
+    let port: Int
     let onDevicesChanged: ([ControlledHubDevice]) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var invitation: HubPairingWindow?
-    @State private var hubStatus: HubControlStatus?
     @State private var requests: [ControlledPairingRequest] = []
     @State private var errorMessage: String?
     @State private var allowContributions = false
@@ -22,9 +23,9 @@ struct AddDeviceSheet: View {
                     .keyboardShortcut(.cancelAction)
             }
 
-            if let invitation, let hubStatus {
+            if let invitation {
                 if requests.isEmpty {
-                    invitationContent(invitation, hubStatus: hubStatus)
+                    invitationContent(invitation)
                 } else {
                     approvalContent
                 }
@@ -58,14 +59,12 @@ struct AddDeviceSheet: View {
     @ViewBuilder
     private func invitationContent(
         _ invitation: HubPairingWindow,
-        hubStatus: HubControlStatus
     ) -> some View {
         Text("Open Aro on your other device and scan this code.")
             .font(.title3)
         PairingQRCodeView(
             payload: pairingURL(
-                invitation: invitation,
-                hubStatus: hubStatus
+                invitation: invitation
             ).absoluteString
         )
         .frame(width: 250, height: 250)
@@ -176,15 +175,11 @@ struct AddDeviceSheet: View {
 
     private func openInvitation() {
         invitation = nil
-        hubStatus = nil
         requests = []
         errorMessage = nil
         Task {
             do {
-                async let status = controlClient.status()
-                async let window = controlClient.openPairing()
-                hubStatus = try await status
-                invitation = try await window
+                invitation = try await client.openAdminPairing()
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -193,7 +188,7 @@ struct AddDeviceSheet: View {
 
     private func refreshRequests() async {
         do {
-            requests = try await controlClient.pendingPairingRequests()
+            requests = try await client.pendingAdminPairingRequests()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -205,13 +200,13 @@ struct AddDeviceSheet: View {
     ) {
         Task {
             do {
-                try await controlClient.approvePairing(
+                try await client.approveAdminPairing(
                     requestID: request.requestID,
                     approve: allowed,
                     canContribute: allowed && allowContributions
                 )
                 requests.removeAll { $0.id == request.id }
-                onDevicesChanged(try await controlClient.devices())
+                onDevicesChanged(try await client.adminDevices())
                 if allowed {
                     dismiss()
                 } else {
@@ -224,10 +219,9 @@ struct AddDeviceSheet: View {
     }
 
     private func pairingURL(
-        invitation: HubPairingWindow,
-        hubStatus: HubControlStatus
+        invitation: HubPairingWindow
     ) -> URL {
-        let label = hubStatus.hubID.uuidString
+        let label = hubID.uuidString
             .replacingOccurrences(of: "-", with: "")
             .prefix(8)
             .lowercased()
@@ -236,10 +230,10 @@ struct AddDeviceSheet: View {
         components.host = "pair"
         components.queryItems = [
             URLQueryItem(name: "v", value: "1"),
-            URLQueryItem(name: "hub", value: hubStatus.hubID.uuidString),
+            URLQueryItem(name: "hub", value: hubID.uuidString),
             URLQueryItem(
                 name: "address",
-                value: "https://aro-\(label).local:4848"
+                value: "https://aro-\(label).local:\(port)"
             ),
             URLQueryItem(name: "code", value: invitation.code),
             URLQueryItem(

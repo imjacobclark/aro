@@ -104,6 +104,25 @@ private struct PreviewLibraryCatalog: LibraryCatalogRepository {
     }
 
     func storeArtwork(trackID: String, data: Data) {}
+
+    func metadataSnapshot(song: Song, librarySongs: [Song]) -> TrackMetadataSnapshot {
+        TrackMetadataSnapshot(
+            song: song,
+            effectiveValues: [.title: song.title, .artist: song.artist],
+            manualFields: [],
+            candidates: [:]
+        )
+    }
+
+    func applyManualMetadata(_ edits: [ManualMetadataEdit], trackIDs: [UUID]) {}
+    func applyManualArtwork(_ edit: ManualArtworkEdit, trackIDs: [UUID]) {}
+    func resetManualMetadata(trackIDs: [UUID]) {}
+    func queueManualMetadata(
+        _ edits: [ManualMetadataEdit],
+        trackIDs: [UUID],
+        reset: Bool
+    ) {}
+    func queueManualArtwork(_ edit: ManualArtworkEdit, trackIDs: [UUID]) {}
 }
 
 private struct PreviewFolderAccess: FolderAccessing {

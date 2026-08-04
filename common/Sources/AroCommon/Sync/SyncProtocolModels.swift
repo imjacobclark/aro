@@ -153,19 +153,22 @@ public struct SourceHealthReport: Hashable, Codable, Sendable {
     public let mode: String
     public let available: Bool
     public let warning: String?
+    public let songCount: UInt64?
 
     public init(
         sourceID: UUID,
         name: String,
         mode: String,
         available: Bool,
-        warning: String? = nil
+        warning: String? = nil,
+        songCount: UInt64? = nil
     ) {
         self.sourceID = sourceID
         self.name = name
         self.mode = mode
         self.available = available
         self.warning = warning
+        self.songCount = songCount
     }
 }
 
@@ -386,6 +389,55 @@ public struct PlaybackOutputSnapshot: Codable, Sendable {
         bitDepth = status.bitDepth.map(UInt32.init)
         exclusive = status.isExclusive
         wireless = status.transport.isWireless
+    }
+}
+
+/// Lightweight server-owned catalog data used by streaming/on-demand clients.
+/// Artwork remains a content-addressed reference and is fetched lazily.
+public struct CatalogTrack: Identifiable, Codable, Sendable, Hashable {
+    public let trackID: UUID
+    public let sourceID: UUID?
+    public let sourceName: String?
+    public let contentHash: String?
+    public let title: String
+    public let artist: String?
+    public let album: String?
+    public let genre: String?
+    public let releaseYear: UInt32?
+    public let durationSeconds: Double?
+    public let byteCount: UInt64?
+    public let codec: String?
+    public let sampleRate: Double?
+    public let bitDepth: UInt32?
+    public let channelCount: UInt32?
+    public let bitrate: Double?
+    public let integratedLufs: Double?
+    public let peakAmplitude: Double?
+    public let loudnessAnalyzedAt: Double?
+    public let loudnessAlgorithmVersion: UInt32?
+    public let trackNumber: UInt32?
+    public let discNumber: UInt32?
+    public let artworkHash: String?
+    /// Optional for decoding catalogue snapshots written by pre-favourite builds.
+    public let favourite: Bool?
+    public let available: Bool
+
+    public var id: UUID { trackID }
+}
+
+public struct CatalogPage: Codable, Sendable, Hashable {
+    public let tracks: [CatalogTrack]
+    public let nextCursor: String?
+    public let revision: UInt64
+
+    public init(
+        tracks: [CatalogTrack],
+        nextCursor: String?,
+        revision: UInt64
+    ) {
+        self.tracks = tracks
+        self.nextCursor = nextCursor
+        self.revision = revision
     }
 }
 

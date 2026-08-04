@@ -224,6 +224,7 @@ dependencies = [
  "anyhow",
  "aro-sync-core",
  "aro-sync-protocol",
+ "base64",
  "chrono",
  "hex",
  "parking_lot",

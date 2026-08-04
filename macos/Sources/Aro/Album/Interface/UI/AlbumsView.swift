@@ -6,6 +6,7 @@ struct AlbumsView: View {
     let playback: PlaybackController
     let syncTrackData: (Song) async -> Void
     let syncAlbumData: ([Song]) async -> Void
+    let editMetadata: (MetadataEditorContext) -> Void
     var loadRadio: ((String) async -> ServerGeneratedPlaylist?)?
 
     @State private var selectedAlbumID: LibraryAlbum.ID?
@@ -142,6 +143,15 @@ struct AlbumsView: View {
                                     Button("Sync Album Data") {
                                         Task { await syncAlbumData(album.songs) }
                                     }
+                                    Divider()
+                                    Button("Metadata…") {
+                                        editMetadata(
+                                            MetadataEditorContext(
+                                                scope: .album,
+                                                songs: album.songs
+                                            )
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -188,6 +198,7 @@ struct AlbumsView: View {
                         songs: album.songs,
                         playback: playback,
                         syncTrackData: syncTrackData,
+                        editMetadata: editMetadata,
                         syncAlbumData: syncAlbumData
                     )
                     .padding(.horizontal, 28)

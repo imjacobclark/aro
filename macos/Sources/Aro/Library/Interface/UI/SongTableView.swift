@@ -12,6 +12,7 @@ struct SongTableView: View {
     let storesLibraryCopy: Bool
     let removeSong: (Song) async throws -> Void
     let syncTrackData: (Song) async -> Void
+    let editMetadata: (Song) -> Void
     /// Supplied only where a hub is reachable; when absent the "More Like This"
     /// shelf below simply doesn't render.
     var loadRadio: ((String) async -> ServerGeneratedPlaylist?)?
@@ -83,6 +84,7 @@ struct SongTableView: View {
                     onSyncTrackData: { song in
                         await syncTrackData(song)
                     },
+                    onEditMetadata: { song in editMetadata(song) },
                     onRequestRemoval: { song in
                         songPendingRemoval = song
                     },
@@ -145,17 +147,16 @@ struct SongTableView: View {
     }
 
     private var downloadedSongIDs: Set<Song.ID> {
-        Set(songs.lazy.filter(isDownloaded).map(\.id))
-    }
-
-    private func isDownloaded(_ song: Song) -> Bool {
-        guard !song.url.isFileURL else {
-            return true
-        }
-        guard let hash = song.fileFingerprint?.contentHash else {
-            return false
-        }
-        return mediaCache.isCached(hash: hash)
+        let cachedHashes = mediaCache.cachedContentHashes
+        return Set(songs.lazy.filter { song in
+            guard !song.url.isFileURL else {
+                return true
+            }
+            guard let hash = song.fileFingerprint?.contentHash else {
+                return false
+            }
+            return cachedHashes.contains(hash)
+        }.map(\.id))
     }
 
     @ViewBuilder

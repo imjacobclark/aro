@@ -29,6 +29,7 @@ struct HomeView: View {
     let loadRadio: (String) async -> ServerGeneratedPlaylist?
     let removeSong: (Song) async throws -> Void
     let syncTrackData: (Song) async -> Void
+    let editMetadata: (Song) -> Void
     /// Owned by `ContentView`, not this view: `HomeView` is torn down and rebuilt
     /// every time the sidebar selection leaves Home and comes back (see
     /// `ContentView`'s `if/else if` content switcher), which would otherwise reset
@@ -57,6 +58,7 @@ struct HomeView: View {
                     storesLibraryCopy: storesLibraryCopy,
                     removeSong: removeSong,
                     syncTrackData: syncTrackData,
+                    editMetadata: editMetadata,
                     loadRadio: loadRadio,
                     allSongs: allSongs(),
                     onBack: { self.selectedPlaylist = nil }

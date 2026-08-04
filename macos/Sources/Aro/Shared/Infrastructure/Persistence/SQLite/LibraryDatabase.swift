@@ -1,5 +1,6 @@
 import Foundation
 import AroCommon
+import CryptoKit
 import SQLite3
 
 struct DatabaseFolderRecord: Sendable {
@@ -219,17 +220,65 @@ final class LibraryDatabase: @unchecked Sendable {
             guard let statement = try? prepare(
                 """
                 SELECT t.id, l.path,
-                       COALESCE(ts.title_override, sm.title),
-                       COALESCE(ts.artist_override, sm.artist),
+                       CASE WHEN EXISTS (
+                           SELECT 1 FROM manual_metadata_overrides mo
+                           WHERE mo.track_id = t.id AND mo.field = 'title'
+                       ) THEN (
+                           SELECT value FROM manual_metadata_overrides mo
+                           WHERE mo.track_id = t.id AND mo.field = 'title'
+                       ) ELSE COALESCE(ts.title_override, sm.title) END,
+                       CASE WHEN EXISTS (
+                           SELECT 1 FROM manual_metadata_overrides mo
+                           WHERE mo.track_id = t.id AND mo.field = 'artist'
+                       ) THEN (
+                           SELECT value FROM manual_metadata_overrides mo
+                           WHERE mo.track_id = t.id AND mo.field = 'artist'
+                       ) ELSE COALESCE(ts.artist_override, sm.artist) END,
                        sm.duration,
                        l.file_size, sm.codec, sm.sample_rate, sm.bit_depth,
                        sm.channel_count, sm.bitrate, l.modification_date,
                        t.content_hash, la.integrated_lufs, la.peak_amplitude,
                        la.analyzed_at, la.algorithm_version,
-                       COALESCE(ts.album_override, sm.album),
-                       sm.genre, sm.release_year,
-                       sm.artwork, ts.favourite,
-                       ts.mb_genres_json, ts.mood_tags_json
+                       CASE WHEN EXISTS (
+                           SELECT 1 FROM manual_metadata_overrides mo
+                           WHERE mo.track_id = t.id AND mo.field = 'album'
+                       ) THEN (
+                           SELECT value FROM manual_metadata_overrides mo
+                           WHERE mo.track_id = t.id AND mo.field = 'album'
+                       ) ELSE COALESCE(ts.album_override, sm.album) END,
+                       CASE WHEN EXISTS (
+                           SELECT 1 FROM manual_metadata_overrides mo
+                           WHERE mo.track_id = t.id AND mo.field = 'genre'
+                       ) THEN (
+                           SELECT value FROM manual_metadata_overrides mo
+                           WHERE mo.track_id = t.id AND mo.field = 'genre'
+                       ) ELSE sm.genre END,
+                       CASE WHEN EXISTS (
+                           SELECT 1 FROM manual_metadata_overrides mo
+                           WHERE mo.track_id = t.id AND mo.field = 'release_year'
+                       ) THEN CAST((
+                           SELECT value FROM manual_metadata_overrides mo
+                           WHERE mo.track_id = t.id AND mo.field = 'release_year'
+                       ) AS INTEGER) ELSE sm.release_year END,
+                       CASE WHEN ts.manual_artwork_set = 1
+                           THEN ts.manual_artwork
+                           ELSE COALESCE(ts.identified_artwork, sm.artwork)
+                       END, ts.favourite,
+                       ts.mb_genres_json, ts.mood_tags_json,
+                       CASE WHEN EXISTS (
+                           SELECT 1 FROM manual_metadata_overrides mo
+                           WHERE mo.track_id = t.id AND mo.field = 'track_number'
+                       ) THEN CAST((
+                           SELECT value FROM manual_metadata_overrides mo
+                           WHERE mo.track_id = t.id AND mo.field = 'track_number'
+                       ) AS INTEGER) ELSE sm.track_number END,
+                       CASE WHEN EXISTS (
+                           SELECT 1 FROM manual_metadata_overrides mo
+                           WHERE mo.track_id = t.id AND mo.field = 'disc_number'
+                       ) THEN CAST((
+                           SELECT value FROM manual_metadata_overrides mo
+                           WHERE mo.track_id = t.id AND mo.field = 'disc_number'
+                       ) AS INTEGER) ELSE sm.disc_number END
                 FROM file_locations AS l
                 JOIN tracks AS t ON t.id = l.track_id
                 JOIN scan_metadata AS sm ON sm.track_id = t.id
@@ -271,6 +320,12 @@ final class LibraryDatabase: @unchecked Sendable {
             bind(deviceID.uuidString, to: statement, at: 4)
 
             var songs: [Song] = []
+            // Scan metadata stores the embedded picture per track. Keeping an
+            // independent `Data` allocation for every track of an album makes
+            // a large library consume gigabytes before any artwork is drawn.
+            // Reuse the first payload for an artist/album pair; this also
+            // matches the artwork selection policy used by AlbumLibrary.
+            var artworkByAlbum: [String: Data] = [:]
             while sqlite3_step(statement) == SQLITE_ROW {
                 guard let idString = text(statement, 0),
                       let id = UUID(uuidString: idString),
@@ -330,16 +385,30 @@ final class LibraryDatabase: @unchecked Sendable {
                         ? $0
                         : nil
                 } ?? URL(fileURLWithPath: path)
+                let artist = text(statement, 3) ?? "—"
+                let album = text(statement, 17)
+                let artworkKey = artist + "\u{1F}" + (album ?? "")
+                let artworkData: Data?
+                if let existing = artworkByAlbum[artworkKey] {
+                    artworkData = existing
+                } else if let artwork = blob(statement, 20) {
+                    artworkByAlbum[artworkKey] = artwork
+                    artworkData = artwork
+                } else {
+                    artworkData = nil
+                }
                 songs.append(
                     Song(
                         libraryID: id,
                         url: url,
                         title: text(statement, 2) ?? "Unknown",
-                        artist: text(statement, 3) ?? "—",
-                        album: text(statement, 17),
+                        artist: artist,
+                        album: album,
                         genre: text(statement, 18),
                         releaseYear: optionalInt(statement, 19),
-                        artworkData: blob(statement, 20),
+                        trackNumber: optionalInt(statement, 24),
+                        discNumber: optionalInt(statement, 25),
+                        artworkData: artworkData,
                         duration: optionalDouble(statement, 4),
                         fileSizeBytes: fileSize,
                         audioProperties: properties,
@@ -393,6 +462,8 @@ final class LibraryDatabase: @unchecked Sendable {
                                 album: song.album,
                                 genre: song.genre,
                                 releaseYear: song.releaseYear,
+                                trackNumber: song.trackNumber,
+                                discNumber: song.discNumber,
                                 artworkData: song.artworkData,
                                 duration: song.duration,
                                 fileSizeBytes: song.fileSizeBytes,
@@ -422,7 +493,10 @@ final class LibraryDatabase: @unchecked Sendable {
                         bind(scanToken, to: $0, at: 4)
                     }
                 }
-                return SongLibrary.deduplicated(reconciled)
+                // Re-read through the normal effective-metadata query so a
+                // filesystem rescan cannot briefly surface scanner values over
+                // an existing manual golden master.
+                return self.songs(folderID: folderID)
             } catch {
                 return songs
             }
@@ -433,8 +507,17 @@ final class LibraryDatabase: @unchecked Sendable {
         lock.withLock {
             guard let statement = try? prepare(
                 """
-                SELECT track_id, artwork_url FROM scan_metadata
-                WHERE artwork_url IS NOT NULL AND artwork IS NULL
+                SELECT sm.track_id,
+                       CASE WHEN ts.manual_artwork_set = 1
+                           THEN ts.manual_artwork_url
+                           ELSE COALESCE(ts.identified_artwork_url, sm.artwork_url) END
+                FROM scan_metadata sm
+                JOIN track_state ts ON ts.track_id = sm.track_id
+                WHERE CASE WHEN ts.manual_artwork_set = 1
+                    THEN ts.manual_artwork_url IS NOT NULL
+                         AND ts.manual_artwork IS NULL
+                    ELSE COALESCE(ts.identified_artwork_url, sm.artwork_url) IS NOT NULL
+                         AND ts.identified_artwork IS NULL END
                 LIMIT ?
                 """
             ) else {
@@ -460,7 +543,36 @@ final class LibraryDatabase: @unchecked Sendable {
     func storeArtwork(trackID: String, data: Data) {
         lock.withLock {
             try? run(
-                "UPDATE scan_metadata SET artwork = ? WHERE track_id = ?"
+                """
+                UPDATE track_state
+                SET manual_artwork = ?
+                WHERE track_id = ? AND manual_artwork_set = 1
+                    AND manual_artwork_url IS NOT NULL
+                """
+            ) {
+                bind(data, to: $0, at: 1)
+                bind(trackID, to: $0, at: 2)
+            }
+            try? run(
+                """
+                UPDATE track_state SET identified_artwork = ?
+                WHERE track_id = ? AND manual_artwork_set = 0
+                    AND identified_artwork_url IS NOT NULL
+                """
+            ) {
+                bind(data, to: $0, at: 1)
+                bind(trackID, to: $0, at: 2)
+            }
+            try? run(
+                """
+                UPDATE scan_metadata SET artwork = ?
+                WHERE track_id = ? AND NOT EXISTS (
+                    SELECT 1 FROM track_state ts
+                    WHERE ts.track_id = scan_metadata.track_id
+                      AND (ts.manual_artwork_set = 1
+                           OR ts.identified_artwork_url IS NOT NULL)
+                )
+                """
             ) {
                 bind(data, to: $0, at: 1)
                 bind(trackID, to: $0, at: 2)
@@ -508,8 +620,8 @@ final class LibraryDatabase: @unchecked Sendable {
                     INSERT INTO track_state
                         (track_id, updated_at, title_override, artist_override,
                          album_override, musicbrainz_recording_id, acoustid_id,
-                         mb_genres_json, mood_tags_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         mb_genres_json, mood_tags_json, identified_artwork)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(track_id) DO UPDATE SET
                         updated_at = excluded.updated_at,
                         title_override =
@@ -527,7 +639,11 @@ final class LibraryDatabase: @unchecked Sendable {
                         mb_genres_json =
                             COALESCE(excluded.mb_genres_json, track_state.mb_genres_json),
                         mood_tags_json =
-                            COALESCE(excluded.mood_tags_json, track_state.mood_tags_json)
+                            COALESCE(excluded.mood_tags_json, track_state.mood_tags_json),
+                        identified_artwork = COALESCE(
+                            excluded.identified_artwork,
+                            track_state.identified_artwork
+                        )
                     """
                 ) {
                     bind(trackID, to: $0, at: 1)
@@ -539,20 +655,413 @@ final class LibraryDatabase: @unchecked Sendable {
                     bind(acoustidID, to: $0, at: 7)
                     bind(musicbrainzGenresJSON, to: $0, at: 8)
                     bind(moodTagsJSON, to: $0, at: 9)
-                }
-                if let artworkData {
-                    try run(
-                        "UPDATE scan_metadata SET artwork = ? WHERE track_id = ?"
-                    ) {
-                        bind(artworkData, to: $0, at: 1)
-                        bind(trackID, to: $0, at: 2)
-                    }
+                    bind(artworkData, to: $0, at: 10)
                 }
                 return true
             } catch {
                 return false
             }
         }
+    }
+
+    func metadataSnapshot(song: Song, librarySongs: [Song]) -> TrackMetadataSnapshot {
+        lock.withLock {
+            var manualFields = Set<EditableMetadataField>()
+            var candidates: [EditableMetadataField: [MetadataCandidate]] = [:]
+            var artworkCandidates: [ArtworkCandidate] = []
+            var manualArtworkSet = false
+            var loadedStoredSources = false
+
+            func addArtwork(
+                _ data: Data?,
+                source: MetadataCandidate.Source,
+                artist: String?,
+                album: String?
+            ) {
+                guard let data,
+                      !data.isEmpty,
+                      data.count <= 10 * 1024 * 1024 else { return }
+                let candidate = ArtworkCandidate(
+                    data: data,
+                    source: source,
+                    relatedArtist: artist,
+                    relatedAlbum: album
+                )
+                if !artworkCandidates.contains(candidate) {
+                    artworkCandidates.append(candidate)
+                }
+            }
+
+            func add(
+                _ value: String?,
+                field: EditableMetadataField,
+                source: MetadataCandidate.Source,
+                relatedArtist: String? = nil
+            ) {
+                guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !value.isEmpty else { return }
+                let candidate = MetadataCandidate(
+                    value: value,
+                    source: source,
+                    relatedArtist: relatedArtist
+                )
+                let existing = candidates[field] ?? []
+                let sourceCount = existing.lazy.filter {
+                    $0.source == source
+                        && (field != .album || $0.relatedArtist == relatedArtist)
+                }.count
+                if !existing.contains(candidate),
+                   sourceCount < 20 {
+                    candidates[field, default: []].append(candidate)
+                }
+            }
+
+            if let statement = try? prepare(
+                """
+                SELECT sm.title, sm.artist, sm.album, sm.genre, sm.release_year,
+                       sm.track_number, sm.disc_number,
+                       ts.title_override, ts.artist_override, ts.album_override,
+                       sm.artwork, ts.identified_artwork,
+                       ts.manual_artwork_set, ts.manual_artwork
+                FROM tracks t
+                LEFT JOIN scan_metadata sm ON sm.track_id = t.id
+                LEFT JOIN track_state ts ON ts.track_id = t.id
+                WHERE t.id = ?
+                """
+            ) {
+                defer { sqlite3_finalize(statement) }
+                bind(song.libraryID.uuidString, to: statement, at: 1)
+                if sqlite3_step(statement) == SQLITE_ROW {
+                    loadedStoredSources = true
+                    let fileArtist = text(statement, 1)
+                    let identifiedArtist = text(statement, 8)
+                    let fileAlbum = text(statement, 2)
+                    let identifiedAlbum = text(statement, 9)
+                    add(text(statement, 0), field: .title, source: .file)
+                    add(fileArtist, field: .artist, source: .file)
+                    add(
+                        text(statement, 2),
+                        field: .album,
+                        source: .file,
+                        relatedArtist: fileArtist
+                    )
+                    add(text(statement, 3), field: .genre, source: .file)
+                    add(optionalInt(statement, 4).map(String.init), field: .releaseYear, source: .file)
+                    add(optionalInt(statement, 5).map(String.init), field: .trackNumber, source: .file)
+                    add(optionalInt(statement, 6).map(String.init), field: .discNumber, source: .file)
+                    add(text(statement, 7), field: .title, source: .identified)
+                    add(identifiedArtist, field: .artist, source: .identified)
+                    add(
+                        text(statement, 9),
+                        field: .album,
+                        source: .identified,
+                        relatedArtist: identifiedArtist
+                    )
+                    addArtwork(
+                        blob(statement, 10),
+                        source: .file,
+                        artist: fileArtist,
+                        album: fileAlbum
+                    )
+                    addArtwork(
+                        blob(statement, 11),
+                        source: .identified,
+                        artist: identifiedArtist,
+                        album: identifiedAlbum
+                    )
+                    manualArtworkSet = sqlite3_column_int(statement, 12) != 0
+                    addArtwork(
+                        blob(statement, 13),
+                        source: .library,
+                        artist: song.artist,
+                        album: song.album
+                    )
+                }
+            }
+
+            // Streaming-only catalog songs are not materialized in this SQLite
+            // database. Their current server-provided cover is the identified
+            // candidate, so keep it selectable even without local source rows.
+            if !loadedStoredSources {
+                add(song.title, field: .title, source: .identified)
+                add(song.artist, field: .artist, source: .identified)
+                add(
+                    song.album,
+                    field: .album,
+                    source: .identified,
+                    relatedArtist: song.artist
+                )
+                addArtwork(
+                    song.artworkData,
+                    source: .identified,
+                    artist: song.artist,
+                    album: song.album
+                )
+            }
+
+            if let statement = try? prepare(
+                "SELECT field FROM manual_metadata_overrides WHERE track_id = ?"
+            ) {
+                defer { sqlite3_finalize(statement) }
+                bind(song.libraryID.uuidString, to: statement, at: 1)
+                while sqlite3_step(statement) == SQLITE_ROW {
+                    if let raw = text(statement, 0),
+                       let field = EditableMetadataField(rawValue: raw) {
+                        manualFields.insert(field)
+                    }
+                }
+            }
+
+            for librarySong in librarySongs where librarySong.libraryID != song.libraryID {
+                add(librarySong.title, field: .title, source: .library)
+                add(librarySong.artist, field: .artist, source: .library)
+                add(
+                    librarySong.album,
+                    field: .album,
+                    source: .library,
+                    relatedArtist: librarySong.artist
+                )
+                add(librarySong.genre, field: .genre, source: .library)
+                add(librarySong.releaseYear.map(String.init), field: .releaseYear, source: .library)
+                addArtwork(
+                    librarySong.artworkData,
+                    source: .library,
+                    artist: librarySong.artist,
+                    album: librarySong.album
+                )
+            }
+            return TrackMetadataSnapshot(
+                song: song,
+                effectiveValues: Self.metadataValues(for: song),
+                manualFields: manualFields,
+                candidates: candidates,
+                artworkCandidates: artworkCandidates,
+                manualArtworkSet: manualArtworkSet
+            )
+        }
+    }
+
+    func applyManualMetadata(_ edits: [ManualMetadataEdit], trackIDs: [UUID]) {
+        guard !edits.isEmpty, !trackIDs.isEmpty else { return }
+        lock.withLock {
+            try? transaction {
+                let now = Date().timeIntervalSince1970
+                for trackID in trackIDs {
+                    var syncFields: [String: JSONValue] = [:]
+                    for edit in edits {
+                        try run(
+                            """
+                            INSERT INTO manual_metadata_overrides
+                                (track_id, field, value, updated_at)
+                            VALUES (?, ?, ?, ?)
+                            ON CONFLICT(track_id, field) DO UPDATE SET
+                                value = excluded.value,
+                                updated_at = excluded.updated_at
+                            """
+                        ) {
+                            bind(trackID.uuidString, to: $0, at: 1)
+                            bind(edit.field.rawValue, to: $0, at: 2)
+                            bind(edit.value, to: $0, at: 3)
+                            sqlite3_bind_double($0, 4, now)
+                        }
+                        let key = "manual_\(edit.field.rawValue)"
+                        if let value = edit.value {
+                            syncFields[key] = edit.field.isNumeric
+                                ? Double(value).map(JSONValue.number) ?? .null
+                                : .string(value)
+                        } else {
+                            syncFields[key] = .null
+                        }
+                        syncFields["\(key)_set"] = .bool(true)
+                    }
+                    try run("UPDATE track_state SET updated_at = ? WHERE track_id = ?") {
+                        sqlite3_bind_double($0, 1, now)
+                        bind(trackID.uuidString, to: $0, at: 2)
+                    }
+                    try appendOutboxOperation(
+                        entityType: "track_state",
+                        entityID: trackID.uuidString,
+                        operation: "set_metadata",
+                        payload: .object(syncFields),
+                        now: now
+                    )
+                }
+            }
+        }
+    }
+
+    func applyManualArtwork(_ edit: ManualArtworkEdit, trackIDs: [UUID]) {
+        guard !trackIDs.isEmpty else { return }
+        lock.withLock {
+            try? transaction {
+                let now = Date().timeIntervalSince1970
+                for (index, trackID) in trackIDs.enumerated() {
+                    try run(
+                        """
+                        UPDATE track_state
+                        SET manual_artwork = ?, manual_artwork_url = NULL,
+                            manual_artwork_set = 1, updated_at = ?
+                        WHERE track_id = ?
+                        """
+                    ) {
+                        bind(edit.data, to: $0, at: 1)
+                        sqlite3_bind_double($0, 2, now)
+                        bind(trackID.uuidString, to: $0, at: 3)
+                    }
+                    try appendOutboxOperation(
+                        entityType: "track_state",
+                        entityID: trackID.uuidString,
+                        operation: "set_metadata",
+                        payload: .object(
+                            Self.artworkSyncFields(edit, includeData: index == 0)
+                        ),
+                        now: now + Double(index) / 1_000
+                    )
+                }
+            }
+        }
+    }
+
+    func resetManualMetadata(trackIDs: [UUID]) {
+        guard !trackIDs.isEmpty else { return }
+        lock.withLock {
+            try? transaction {
+                let now = Date().timeIntervalSince1970
+                for trackID in trackIDs {
+                    try run("DELETE FROM manual_metadata_overrides WHERE track_id = ?") {
+                        bind(trackID.uuidString, to: $0, at: 1)
+                    }
+                    try run(
+                        """
+                        UPDATE track_state
+                        SET manual_artwork = NULL, manual_artwork_url = NULL,
+                            manual_artwork_set = 0, updated_at = ?
+                        WHERE track_id = ?
+                        """
+                    ) {
+                        sqlite3_bind_double($0, 1, now)
+                        bind(trackID.uuidString, to: $0, at: 2)
+                    }
+                    var fields = Dictionary(
+                        uniqueKeysWithValues: EditableMetadataField.allCases.map {
+                            ("manual_\($0.rawValue)_set", JSONValue.bool(false))
+                        }
+                    )
+                    fields["manual_artwork_set"] = .bool(false)
+                    try appendOutboxOperation(
+                        entityType: "track_state",
+                        entityID: trackID.uuidString,
+                        operation: "reset_metadata",
+                        payload: .object(fields),
+                        now: now
+                    )
+                }
+            }
+        }
+    }
+
+    /// Streaming-only catalogue rows are intentionally not materialized into the
+    /// replica tables, but user intent still needs a durable retry record. This
+    /// queues the same server-facing operation without requiring a local track row;
+    /// `LibraryStore` owns the optimistic in-memory presentation until the next
+    /// server catalogue revision confirms it.
+    func queueManualMetadata(
+        _ edits: [ManualMetadataEdit],
+        trackIDs: [UUID],
+        reset: Bool
+    ) {
+        guard !trackIDs.isEmpty, reset || !edits.isEmpty else { return }
+        lock.withLock {
+            try? transaction {
+                let now = Date().timeIntervalSince1970
+                let fields: [String: JSONValue]
+                if reset {
+                    fields = Dictionary(
+                        uniqueKeysWithValues: EditableMetadataField.allCases.map {
+                            ("manual_\($0.rawValue)_set", .bool(false))
+                        }
+                    )
+                } else {
+                    var values: [String: JSONValue] = [:]
+                    for edit in edits {
+                        let key = "manual_\(edit.field.rawValue)"
+                        if let value = edit.value {
+                            values[key] = edit.field.isNumeric
+                                ? Double(value).map(JSONValue.number) ?? .null
+                                : .string(value)
+                        } else {
+                            values[key] = .null
+                        }
+                        values["\(key)_set"] = .bool(true)
+                    }
+                    fields = values
+                }
+                for trackID in trackIDs {
+                    try appendOutboxOperation(
+                        entityType: "track_state",
+                        entityID: trackID.uuidString,
+                        operation: reset ? "reset_metadata" : "set_metadata",
+                        payload: .object(fields),
+                        now: now
+                    )
+                }
+            }
+        }
+    }
+
+    func queueManualArtwork(
+        _ edit: ManualArtworkEdit,
+        trackIDs: [UUID]
+    ) {
+        guard !trackIDs.isEmpty else { return }
+        lock.withLock {
+            try? transaction {
+                let now = Date().timeIntervalSince1970
+                for (index, trackID) in trackIDs.enumerated() {
+                    try appendOutboxOperation(
+                        entityType: "track_state",
+                        entityID: trackID.uuidString,
+                        operation: "set_metadata",
+                        payload: .object(
+                            Self.artworkSyncFields(edit, includeData: index == 0)
+                        ),
+                        now: now + Double(index) / 1_000
+                    )
+                }
+            }
+        }
+    }
+
+    private static func artworkSyncFields(
+        _ edit: ManualArtworkEdit,
+        includeData: Bool
+    ) -> [String: JSONValue] {
+        var fields: [String: JSONValue] = ["manual_artwork_set": .bool(true)]
+        if let data = edit.data {
+            let hash = SHA256.hash(data: data)
+                .map { String(format: "%02x", $0) }
+                .joined()
+            fields["manual_artwork_hash"] = .string(hash)
+            if includeData {
+                fields["manual_artwork_base64"] = .string(data.base64EncodedString())
+            }
+        } else {
+            fields["manual_artwork_hash"] = .null
+        }
+        return fields
+    }
+
+    private static func metadataValues(for song: Song) -> [EditableMetadataField: String] {
+        var values: [EditableMetadataField: String] = [
+            .title: song.title,
+            .artist: song.artist,
+        ]
+        values[.album] = song.album ?? ""
+        values[.genre] = song.genre ?? ""
+        values[.releaseYear] = song.releaseYear.map(String.init) ?? ""
+        values[.trackNumber] = song.trackNumber.map(String.init) ?? ""
+        values[.discNumber] = song.discNumber.map(String.init) ?? ""
+        return values
     }
 
     private func resolveTrackID(for song: Song) throws -> UUID {
@@ -615,8 +1124,8 @@ final class LibraryDatabase: @unchecked Sendable {
             INSERT INTO scan_metadata
                 (track_id, title, artist, duration, codec, sample_rate,
                  bit_depth, channel_count, bitrate, scanned_at, album, genre,
-                 release_year, artwork)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 release_year, artwork, track_number, disc_number)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(track_id) DO UPDATE SET
                 title = excluded.title,
                 artist = excluded.artist,
@@ -630,7 +1139,9 @@ final class LibraryDatabase: @unchecked Sendable {
                 album = excluded.album,
                 genre = excluded.genre,
                 release_year = excluded.release_year,
-                artwork = excluded.artwork
+                artwork = excluded.artwork,
+                track_number = COALESCE(excluded.track_number, scan_metadata.track_number),
+                disc_number = COALESCE(excluded.disc_number, scan_metadata.disc_number)
             """
         ) {
             bind(trackID.uuidString, to: $0, at: 1)
@@ -647,6 +1158,8 @@ final class LibraryDatabase: @unchecked Sendable {
             bind(song.genre, to: $0, at: 12)
             bind(song.releaseYear, to: $0, at: 13)
             bind(song.artworkData, to: $0, at: 14)
+            bind(song.trackNumber, to: $0, at: 15)
+            bind(song.discNumber, to: $0, at: 16)
         }
 
         try run(
@@ -800,6 +1313,36 @@ final class LibraryDatabase: @unchecked Sendable {
             bind(payload, to: $0, at: 6)
             sqlite3_bind_int64($0, 7, clock)
             sqlite3_bind_double($0, 8, Date().timeIntervalSince1970)
+        }
+    }
+
+    private func appendOutboxOperation(
+        entityType: String,
+        entityID: String,
+        operation: String,
+        payload: JSONValue,
+        now: TimeInterval
+    ) throws {
+        let payloadData = try JSONEncoder().encode(payload)
+        guard let payloadText = String(data: payloadData, encoding: .utf8) else {
+            throw LibraryDatabaseError.unavailable
+        }
+        try run(
+            """
+            INSERT INTO sync_outbox
+                (operation_id, device_id, entity_type, entity_id, operation,
+                 payload, physical_millis, logical_counter, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
+            """
+        ) {
+            bind(UUID().uuidString, to: $0, at: 1)
+            bind(deviceID.uuidString, to: $0, at: 2)
+            bind(entityType, to: $0, at: 3)
+            bind(entityID, to: $0, at: 4)
+            bind(operation, to: $0, at: 5)
+            bind(payloadText, to: $0, at: 6)
+            sqlite3_bind_int64($0, 7, Int64(now * 1_000))
+            sqlite3_bind_double($0, 8, now)
         }
     }
 

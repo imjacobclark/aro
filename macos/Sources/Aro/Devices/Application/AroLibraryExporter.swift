@@ -38,17 +38,20 @@ actor AroLibraryExporter {
     // only the manifest and any not-yet-cached bytes do.
     private let localSongs: [Song]
     private let localMediaCache: SQLiteMediaCache?
+    private let snapshotStore: SQLiteSyncOperationStore?
 
     init(
         client: AroSyncClient,
         credential: HubDeviceCredential?,
         localSongs: [Song] = [],
-        localMediaCache: SQLiteMediaCache? = nil
+        localMediaCache: SQLiteMediaCache? = nil,
+        snapshotStore: SQLiteSyncOperationStore? = nil
     ) {
         self.client = client
         self.credential = credential
         self.localSongs = localSongs
         self.localMediaCache = localMediaCache
+        self.snapshotStore = snapshotStore
     }
 
     func export(
@@ -123,13 +126,79 @@ actor AroLibraryExporter {
     /// copy of the songs to draw from.
     private func resolvedManifest() async throws -> AroExportManifest {
         do {
-            return try await client.exportManifest(credential: credential)
-        } catch {
-            guard !localSongs.isEmpty else {
-                throw error
+            let remote = try await client.exportManifest(credential: credential)
+            snapshotStore?.saveServerSnapshot(
+                remote,
+                key: "canonicalExportManifest"
+            )
+            // The hub may not have received a just-made manual override yet.
+            // Overlay this device's effective catalog so golden-master metadata
+            // always wins in the exported collection, even while sync catches up.
+            let localByHash = Dictionary(
+                uniqueKeysWithValues: localSongs.compactMap { song in
+                    song.contentHash.map { ($0, song) }
+                }
+            )
+            let tracks = remote.tracks.map { track in
+                guard let song = localByHash[track.contentHash] else { return track }
+                return AroExportTrack(
+                    trackID: track.trackID,
+                    contentHash: track.contentHash,
+                    byteCount: track.byteCount,
+                    title: song.title,
+                    artist: song.artist,
+                    album: song.album,
+                    trackNumber: song.trackNumber.map(UInt32.init),
+                    discNumber: song.discNumber.map(UInt32.init),
+                    originalFilename: track.originalFilename,
+                    originalExtension: track.originalExtension,
+                    removedAt: track.removedAt
+                )
             }
+            return AroExportManifest(
+                schemaVersion: remote.schemaVersion,
+                libraryName: remote.libraryName,
+                generatedAt: remote.generatedAt,
+                tracks: tracks
+            )
+        } catch {
+            if let cached: AroExportManifest = snapshotStore?.cachedServerSnapshot(
+                "canonicalExportManifest"
+            ) {
+                return overlayLocalMetadata(on: cached)
+            }
+            guard !localSongs.isEmpty else { throw error }
             return localManifest()
         }
+    }
+
+    private func overlayLocalMetadata(on manifest: AroExportManifest) -> AroExportManifest {
+        let localByHash = Dictionary(
+            uniqueKeysWithValues: localSongs.compactMap { song in
+                song.contentHash.map { ($0, song) }
+            }
+        )
+        return AroExportManifest(
+            schemaVersion: manifest.schemaVersion,
+            libraryName: manifest.libraryName,
+            generatedAt: manifest.generatedAt,
+            tracks: manifest.tracks.map { track in
+                guard let song = localByHash[track.contentHash] else { return track }
+                return AroExportTrack(
+                    trackID: track.trackID,
+                    contentHash: track.contentHash,
+                    byteCount: track.byteCount,
+                    title: song.title,
+                    artist: song.artist,
+                    album: song.album,
+                    trackNumber: song.trackNumber.map(UInt32.init),
+                    discNumber: song.discNumber.map(UInt32.init),
+                    originalFilename: track.originalFilename,
+                    originalExtension: track.originalExtension,
+                    removedAt: track.removedAt
+                )
+            }
+        )
     }
 
     private func localManifest() -> AroExportManifest {
@@ -145,8 +214,8 @@ actor AroLibraryExporter {
                 title: song.title,
                 artist: song.artist,
                 album: song.album,
-                trackNumber: nil,
-                discNumber: nil,
+                trackNumber: song.trackNumber.map(UInt32.init),
+                discNumber: song.discNumber.map(UInt32.init),
                 originalFilename: song.url.lastPathComponent,
                 originalExtension: song.url.pathExtension,
                 removedAt: nil

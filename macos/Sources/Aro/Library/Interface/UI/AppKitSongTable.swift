@@ -41,6 +41,7 @@ struct AppKitSongTable: NSViewRepresentable {
     let presentation: Presentation
     let onPlay: @MainActor (Song) -> Void
     let onSyncTrackData: @MainActor (Song) async -> Void
+    let onEditMetadata: @MainActor (Song) -> Void
     let onRequestRemoval: (@MainActor (Song) -> Void)?
     /// Names the collection on screen — a folder, a playlist. Each time it
     /// changes the table scrolls itself to whatever is playing; see
@@ -56,6 +57,7 @@ struct AppKitSongTable: NSViewRepresentable {
             presentation: presentation,
             onPlay: onPlay,
             onSyncTrackData: onSyncTrackData,
+            onEditMetadata: onEditMetadata,
             onRequestRemoval: onRequestRemoval
         )
     }
@@ -72,6 +74,7 @@ struct AppKitSongTable: NSViewRepresentable {
             usesStreamOnlyIcon: usesStreamOnlyIcon,
             onPlay: onPlay,
             onSyncTrackData: onSyncTrackData,
+            onEditMetadata: onEditMetadata,
             onRequestRemoval: onRequestRemoval,
             focusToken: focusToken
         )
@@ -97,6 +100,7 @@ struct AppKitSongTable: NSViewRepresentable {
         private let presentation: Presentation
         private var onPlay: @MainActor (Song) -> Void
         private var onSyncTrackData: @MainActor (Song) async -> Void
+        private var onEditMetadata: @MainActor (Song) -> Void
         private var onRequestRemoval: (@MainActor (Song) -> Void)?
         private var focusToken: String?
         /// The last token this table has already scrolled to the playing song
@@ -118,6 +122,7 @@ struct AppKitSongTable: NSViewRepresentable {
             onPlay: @escaping @MainActor (Song) -> Void,
             onSyncTrackData:
                 @escaping @MainActor (Song) async -> Void,
+            onEditMetadata: @escaping @MainActor (Song) -> Void = { _ in },
             onRequestRemoval: (@MainActor (Song) -> Void)?
         ) {
             self.songs = songs
@@ -127,6 +132,7 @@ struct AppKitSongTable: NSViewRepresentable {
             self.presentation = presentation
             self.onPlay = onPlay
             self.onSyncTrackData = onSyncTrackData
+            self.onEditMetadata = onEditMetadata
             self.onRequestRemoval = onRequestRemoval
         }
 
@@ -234,6 +240,13 @@ struct AppKitSongTable: NSViewRepresentable {
                     keyEquivalent: ""
                 )
             )
+            menu.addItem(
+                NSMenuItem(
+                    title: "Metadata…",
+                    action: #selector(editSelectedMetadata(_:)),
+                    keyEquivalent: ""
+                )
+            )
             if onRequestRemoval != nil {
                 menu.addItem(.separator())
                 menu.addItem(
@@ -271,11 +284,13 @@ struct AppKitSongTable: NSViewRepresentable {
             onPlay: @escaping @MainActor (Song) -> Void,
             onSyncTrackData:
                 @escaping @MainActor (Song) async -> Void,
+            onEditMetadata: @escaping @MainActor (Song) -> Void = { _ in },
             onRequestRemoval: (@MainActor (Song) -> Void)?,
             focusToken newFocusToken: String? = nil
         ) {
             self.onPlay = onPlay
             self.onSyncTrackData = onSyncTrackData
+            self.onEditMetadata = onEditMetadata
             self.onRequestRemoval = onRequestRemoval
             focusToken = newFocusToken
 
@@ -529,6 +544,11 @@ struct AppKitSongTable: NSViewRepresentable {
                 return
             }
             onRequestRemoval(song)
+        }
+
+        @objc private func editSelectedMetadata(_ sender: Any?) {
+            guard let song = selectedSong else { return }
+            onEditMetadata(song)
         }
 
         func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {

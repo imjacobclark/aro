@@ -205,7 +205,15 @@ pub fn generate(
     ] {
         let mut hashes = time_of_day(seeds, hours, utc_offset_minutes);
         shuffle(&mut hashes, seed.wrapping_add(id.len() as u64));
-        push(&mut playlists, seeds, PlaylistKind::ForYou, id, title, subtitle, hashes);
+        push(
+            &mut playlists,
+            seeds,
+            PlaylistKind::ForYou,
+            id,
+            title,
+            subtitle,
+            hashes,
+        );
     }
 
     let mut deep_cuts: Vec<String> = seeds
@@ -255,8 +263,13 @@ struct ArtistAggregate {
 }
 
 fn artist_aggregates(seeds: &PlaylistSeeds) -> Vec<ArtistAggregate> {
-    let mut by_artist: Vec<(String, Vec<String>, i64, f64, std::collections::HashSet<String>)> =
-        Vec::new();
+    let mut by_artist: Vec<(
+        String,
+        Vec<String>,
+        i64,
+        f64,
+        std::collections::HashSet<String>,
+    )> = Vec::new();
     let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for track in &seeds.tracks {
         let Some(artist) = track.artist.as_ref().filter(|a| !a.is_empty()) else {
@@ -282,15 +295,15 @@ fn artist_aggregates(seeds: &PlaylistSeeds) -> Vec<ArtistAggregate> {
     }
     by_artist
         .into_iter()
-        .map(|(artist, content_hashes, lifetime_plays, decayed_affinity, albums)| {
-            ArtistAggregate {
+        .map(
+            |(artist, content_hashes, lifetime_plays, decayed_affinity, albums)| ArtistAggregate {
                 artist,
                 content_hashes,
                 lifetime_plays,
                 decayed_affinity,
                 album_count: albums.len(),
-            }
-        })
+            },
+        )
         .collect()
 }
 
@@ -299,8 +312,10 @@ fn artist_aggregates(seeds: &PlaylistSeeds) -> Vec<ArtistAggregate> {
 fn push_artist_sections(playlists: &mut Vec<GeneratedPlaylist>, seeds: &PlaylistSeeds) {
     let aggregates = artist_aggregates(seeds);
 
-    let mut by_recent: Vec<&ArtistAggregate> =
-        aggregates.iter().filter(|a| a.decayed_affinity > 0.0).collect();
+    let mut by_recent: Vec<&ArtistAggregate> = aggregates
+        .iter()
+        .filter(|a| a.decayed_affinity > 0.0)
+        .collect();
     // Prefer artists with more than one known album first — an artist with a single
     // album (or none known) can't produce a visually varied "More From X" mosaic no
     // matter how the tracks are ordered, so this is a ranking preference (not a hard
@@ -372,7 +387,9 @@ fn push_recently_played_albums(playlists: &mut Vec<GeneratedPlaylist>, seeds: &P
             });
             by_album.len() - 1
         });
-        by_album[slot].content_hashes.push(track.content_hash.clone());
+        by_album[slot]
+            .content_hashes
+            .push(track.content_hash.clone());
         by_album[slot].last_played_at = by_album[slot].last_played_at.max(summary.last_played_at);
     }
     by_album.sort_by(|a, b| {
@@ -398,7 +415,11 @@ fn push_recently_played_albums(playlists: &mut Vec<GeneratedPlaylist>, seeds: &P
 /// album's membership regardless of whether it's ever been played — an album with
 /// zero plays at all is the most "lost" of all, not excluded the way an unplayed
 /// track is excluded from "Recently Played Albums".
-fn push_lost_albums(playlists: &mut Vec<GeneratedPlaylist>, seeds: &PlaylistSeeds, now: DateTime<Utc>) {
+fn push_lost_albums(
+    playlists: &mut Vec<GeneratedPlaylist>,
+    seeds: &PlaylistSeeds,
+    now: DateTime<Utc>,
+) {
     struct AlbumAggregate {
         album: String,
         content_hashes: Vec<String>,
@@ -418,12 +439,16 @@ fn push_lost_albums(playlists: &mut Vec<GeneratedPlaylist>, seeds: &PlaylistSeed
             });
             by_album.len() - 1
         });
-        by_album[slot].content_hashes.push(track.content_hash.clone());
+        by_album[slot]
+            .content_hashes
+            .push(track.content_hash.clone());
         if let Some(summary) = seeds.listening.get(&track.content_hash) {
             by_album[slot].last_played_at = Some(
                 by_album[slot]
                     .last_played_at
-                    .map_or(summary.last_played_at, |max: f64| max.max(summary.last_played_at)),
+                    .map_or(summary.last_played_at, |max: f64| {
+                        max.max(summary.last_played_at)
+                    }),
             );
         }
     }
@@ -463,7 +488,11 @@ fn push_lost_albums(playlists: &mut Vec<GeneratedPlaylist>, seeds: &PlaylistSeed
 /// was at least [`TIME_CAPSULE_MIN_YEARS_AGO`] years ago: genuinely loved once,
 /// dormant since. A single mixed-track nostalgia playlist rather than per-year,
 /// since there's rarely enough dormant-but-loved history to usefully split further.
-fn push_time_capsule(playlists: &mut Vec<GeneratedPlaylist>, seeds: &PlaylistSeeds, now: DateTime<Utc>) {
+fn push_time_capsule(
+    playlists: &mut Vec<GeneratedPlaylist>,
+    seeds: &PlaylistSeeds,
+    now: DateTime<Utc>,
+) {
     let current_year = now.year();
     let mut candidates: Vec<(&str, i64, i32)> = seeds
         .listening
@@ -471,13 +500,19 @@ fn push_time_capsule(playlists: &mut Vec<GeneratedPlaylist>, seeds: &PlaylistSee
         .filter(|(_, summary)| summary.play_count >= TIME_CAPSULE_MIN_PLAYS)
         .filter_map(|(hash, summary)| {
             let last_played_year = summary.last_played_year?;
-            (current_year - last_played_year >= TIME_CAPSULE_MIN_YEARS_AGO)
-                .then_some((hash.as_str(), summary.play_count, last_played_year))
+            (current_year - last_played_year >= TIME_CAPSULE_MIN_YEARS_AGO).then_some((
+                hash.as_str(),
+                summary.play_count,
+                last_played_year,
+            ))
         })
         .collect();
     // Most-played first (genuinely loved), then longest-dormant as a tie-break.
     candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.2.cmp(&b.2)));
-    let hashes = candidates.into_iter().map(|(hash, _, _)| hash.to_string()).collect();
+    let hashes = candidates
+        .into_iter()
+        .map(|(hash, _, _)| hash.to_string())
+        .collect();
     push(
         playlists,
         seeds,
@@ -497,7 +532,9 @@ fn push_hits_by_year(playlists: &mut Vec<GeneratedPlaylist>, seeds: &PlaylistSee
     let mut by_year: std::collections::HashMap<i64, Vec<(&String, i64, f64, Option<&String>)>> =
         std::collections::HashMap::new();
     for track in &seeds.tracks {
-        let Some(year) = track.release_year else { continue };
+        let Some(year) = track.release_year else {
+            continue;
+        };
         let Some(summary) = seeds.listening.get(&track.content_hash) else {
             continue;
         };
@@ -517,8 +554,10 @@ fn push_hits_by_year(playlists: &mut Vec<GeneratedPlaylist>, seeds: &PlaylistSee
         .iter()
         .map(|(year, tracks)| {
             let total_affinity = tracks.iter().map(|(_, _, affinity, _)| affinity).sum();
-            let distinct_artists: std::collections::HashSet<&String> =
-                tracks.iter().filter_map(|(_, _, _, artist)| *artist).collect();
+            let distinct_artists: std::collections::HashSet<&String> = tracks
+                .iter()
+                .filter_map(|(_, _, _, artist)| *artist)
+                .collect();
             (*year, total_affinity, distinct_artists.len() > 1)
         })
         .collect();
@@ -531,7 +570,10 @@ fn push_hits_by_year(playlists: &mut Vec<GeneratedPlaylist>, seeds: &PlaylistSee
     for (year, _, _) in years.into_iter().take(3) {
         let mut tracks = by_year.remove(&year).unwrap_or_default();
         tracks.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-        let hashes = tracks.into_iter().map(|(hash, _, _, _)| hash.clone()).collect();
+        let hashes = tracks
+            .into_iter()
+            .map(|(hash, _, _, _)| hash.clone())
+            .collect();
         push(
             playlists,
             seeds,
@@ -563,7 +605,10 @@ fn push_replay(playlists: &mut Vec<GeneratedPlaylist>, seeds: &PlaylistSeeds, no
         "replay-month",
         &format!("Your {} Replay", now.format("%B")),
         "This month's most-played tracks",
-        this_month.into_iter().map(|(hash, _)| hash.clone()).collect(),
+        this_month
+            .into_iter()
+            .map(|(hash, _)| hash.clone())
+            .collect(),
     );
 
     let mut all_time: Vec<(&String, i64)> = seeds
@@ -631,7 +676,8 @@ fn push_measured_mixes(playlists: &mut Vec<GeneratedPlaylist>, seeds: &PlaylistS
         "Workout Mix",
         "High tempo & energy, measured from the audio",
         measured_mix(seeds, |features| {
-            features.tempo_bpm >= WORKOUT_MIN_TEMPO_BPM && features.energy_mean >= WORKOUT_MIN_ENERGY
+            features.tempo_bpm >= WORKOUT_MIN_TEMPO_BPM
+                && features.energy_mean >= WORKOUT_MIN_ENERGY
         }),
     );
     push(
@@ -665,7 +711,10 @@ fn measured_mix(
         })
         .collect();
     candidates.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(b.0)));
-    candidates.into_iter().map(|(hash, _)| hash.to_string()).collect()
+    candidates
+        .into_iter()
+        .map(|(hash, _)| hash.to_string())
+        .collect()
 }
 
 /// Tier 3: k-means clustering over each analyzed track's full similarity vector (see
@@ -688,7 +737,10 @@ fn push_daily_mixes(playlists: &mut Vec<GeneratedPlaylist>, seeds: &PlaylistSeed
         return;
     }
 
-    let vectors: Vec<&[f64]> = entries.iter().map(|(_, vector)| vector.as_slice()).collect();
+    let vectors: Vec<&[f64]> = entries
+        .iter()
+        .map(|(_, vector)| vector.as_slice())
+        .collect();
     let assignments = kmeans(&vectors, DAILY_MIX_COUNT, seed);
 
     let mut clusters: Vec<Vec<&str>> = vec![Vec::new(); DAILY_MIX_COUNT];
@@ -701,7 +753,13 @@ fn push_daily_mixes(playlists: &mut Vec<GeneratedPlaylist>, seeds: &PlaylistSeed
         let affinity = |cluster: &Vec<&str>| -> f64 {
             cluster
                 .iter()
-                .map(|hash| seeds.listening.get(*hash).map(|s| s.decayed_affinity).unwrap_or(0.0))
+                .map(|hash| {
+                    seeds
+                        .listening
+                        .get(*hash)
+                        .map(|s| s.decayed_affinity)
+                        .unwrap_or(0.0)
+                })
                 .sum()
         };
         affinity(b).total_cmp(&affinity(a))
@@ -710,7 +768,10 @@ fn push_daily_mixes(playlists: &mut Vec<GeneratedPlaylist>, seeds: &PlaylistSeed
     for (index, cluster) in ranked_clusters.into_iter().enumerate() {
         let hashes = order_by_affinity(
             seeds,
-            &cluster.iter().map(|hash| hash.to_string()).collect::<Vec<_>>(),
+            &cluster
+                .iter()
+                .map(|hash| hash.to_string())
+                .collect::<Vec<_>>(),
         );
         push(
             playlists,
@@ -820,8 +881,7 @@ pub fn smart_shuffle(
     let requested: std::collections::HashSet<&str> =
         content_hashes.iter().map(String::as_str).collect();
 
-    let mut vectors: std::collections::HashMap<&str, Vec<f64>> =
-        std::collections::HashMap::new();
+    let mut vectors: std::collections::HashMap<&str, Vec<f64>> = std::collections::HashMap::new();
     for track in &seeds.tracks {
         if requested.contains(track.content_hash.as_str()) {
             if let Some(features) = decoded_features(track) {
@@ -881,7 +941,10 @@ pub fn smart_shuffle(
 /// listener has actively rejected it before. Returns `None` if the seed hasn't been
 /// analyzed yet, or no other analyzed tracks exist to recommend.
 pub fn radio(seeds: &PlaylistSeeds, seed_hash: &str, limit: usize) -> Option<GeneratedPlaylist> {
-    let seed_track = seeds.tracks.iter().find(|track| track.content_hash == seed_hash)?;
+    let seed_track = seeds
+        .tracks
+        .iter()
+        .find(|track| track.content_hash == seed_hash)?;
     let seed_features = decoded_features(seed_track)?;
     let seed_vector = seed_features.vector();
 
@@ -898,7 +961,10 @@ pub fn radio(seeds: &PlaylistSeeds, seed_hash: &str, limit: usize) -> Option<Gen
                 return None;
             }
             let features = decoded_features(track)?;
-            Some((track.content_hash.as_str(), squared_distance(&seed_vector, &features.vector())))
+            Some((
+                track.content_hash.as_str(),
+                squared_distance(&seed_vector, &features.vector()),
+            ))
         })
         .collect();
     if ranked.is_empty() {
@@ -928,7 +994,11 @@ fn order_by_affinity(seeds: &PlaylistSeeds, hashes: &[String]) -> Vec<String> {
         .map(|hash| {
             (
                 hash,
-                seeds.listening.get(hash).map(|s| s.decayed_affinity).unwrap_or(0.0),
+                seeds
+                    .listening
+                    .get(hash)
+                    .map(|s| s.decayed_affinity)
+                    .unwrap_or(0.0),
             )
         })
         .collect();
@@ -955,10 +1025,7 @@ fn slugify(text: &str) -> String {
 
 /// Content hashes with a listening summary, ordered by descending `metric`, ties broken
 /// by hash so equal-metric ordering is stable across calls.
-fn ranked_by(
-    seeds: &PlaylistSeeds,
-    metric: impl Fn(&ListeningEventSummary) -> f64,
-) -> Vec<String> {
+fn ranked_by(seeds: &PlaylistSeeds, metric: impl Fn(&ListeningEventSummary) -> f64) -> Vec<String> {
     let mut ranked: Vec<(&String, f64)> = seeds
         .listening
         .iter()
@@ -983,7 +1050,10 @@ fn forgotten_favourites(seeds: &PlaylistSeeds, now: DateTime<Utc>) -> Vec<String
         .map(|(hash, summary)| (hash, summary.play_count))
         .collect();
     candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-    candidates.into_iter().map(|(hash, _)| hash.clone()).collect()
+    candidates
+        .into_iter()
+        .map(|(hash, _)| hash.clone())
+        .collect()
 }
 
 /// Recently added tracks that haven't been given a fair listen yet — see
@@ -1021,11 +1091,7 @@ fn fresh_finds(seeds: &PlaylistSeeds, now: DateTime<Utc>) -> Vec<String> {
 /// for the *requesting device's* timezone — see [`TIME_OF_DAY_MIN_PLAYS`]/
 /// [`TIME_OF_DAY_MIN_FRACTION`]. `hour_histogram` is recorded in UTC; `utc_offset_minutes`
 /// shifts it to local hours before matching against `local_hours`.
-fn time_of_day(
-    seeds: &PlaylistSeeds,
-    local_hours: &[u32],
-    utc_offset_minutes: i32,
-) -> Vec<String> {
+fn time_of_day(seeds: &PlaylistSeeds, local_hours: &[u32], utc_offset_minutes: i32) -> Vec<String> {
     let offset_hours = utc_offset_minutes.div_euclid(60);
     let mut candidates: Vec<(&String, f64)> = Vec::new();
     for (hash, summary) in &seeds.listening {
@@ -1048,7 +1114,10 @@ fn time_of_day(
         }
     }
     candidates.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-    candidates.into_iter().map(|(hash, _)| hash.clone()).collect()
+    candidates
+        .into_iter()
+        .map(|(hash, _)| hash.clone())
+        .collect()
 }
 
 fn push(
@@ -1066,8 +1135,15 @@ fn push(
     content_hashes.truncate(MAXIMUM_TRACK_COUNT);
     let last_played_at = content_hashes
         .iter()
-        .filter_map(|hash| seeds.listening.get(hash).map(|summary| summary.last_played_at))
-        .fold(None, |max, value| Some(max.map_or(value, |max: f64| max.max(value))));
+        .filter_map(|hash| {
+            seeds
+                .listening
+                .get(hash)
+                .map(|summary| summary.last_played_at)
+        })
+        .fold(None, |max, value| {
+            Some(max.map_or(value, |max: f64| max.max(value)))
+        });
     playlists.push(GeneratedPlaylist {
         id: id.to_string(),
         title: title.to_string(),
@@ -1086,7 +1162,11 @@ fn mood_presentation(mood: &str, now: DateTime<Utc>) -> (&'static str, &'static 
         "relaxed" => {
             let weekend = matches!(now.weekday(), Weekday::Sat | Weekday::Sun);
             (
-                if weekend { "Sunday Slowdown" } else { "Chill Out" },
+                if weekend {
+                    "Sunday Slowdown"
+                } else {
+                    "Chill Out"
+                },
                 "Mellow & relaxed, tagged via MusicBrainz",
             )
         }
@@ -1154,7 +1234,11 @@ mod tests {
         generate(seeds, now, 0)
     }
 
-    fn summary(play_count: i64, last_played_at: f64, decayed_affinity: f64) -> ListeningEventSummary {
+    fn summary(
+        play_count: i64,
+        last_played_at: f64,
+        decayed_affinity: f64,
+    ) -> ListeningEventSummary {
         ListeningEventSummary {
             play_count,
             skip_count: 0,
@@ -1256,7 +1340,9 @@ mod tests {
             listening.insert(format!("hash-{i}"), summary(1, 1_000.0, 1.0));
         }
         let seeds = PlaylistSeeds {
-            tracks: (0..10).map(|i| track(&format!("hash-{i}"), false, &[])).collect(),
+            tracks: (0..10)
+                .map(|i| track(&format!("hash-{i}"), false, &[]))
+                .collect(),
             listening,
             ..Default::default()
         };
@@ -1296,7 +1382,10 @@ mod tests {
         // Well-played, but played yesterday — not forgotten.
         listening.insert("recent".into(), summary(10, now_secs - 86_400.0, 5.0));
         // Silent for 120 days, but only played once — not a "favourite" to forget.
-        listening.insert("one-hit".into(), summary(1, now_secs - 120.0 * 86_400.0, 0.01));
+        listening.insert(
+            "one-hit".into(),
+            summary(1, now_secs - 120.0 * 86_400.0, 0.01),
+        );
 
         let seeds = PlaylistSeeds {
             listening,
@@ -1314,7 +1403,12 @@ mod tests {
             "{:?}",
             forgotten.content_hashes
         );
-        assert!(forgotten.content_hashes.iter().all(|h| h.starts_with("forgotten-")));
+        assert!(
+            forgotten
+                .content_hashes
+                .iter()
+                .all(|h| h.starts_with("forgotten-"))
+        );
     }
 
     #[test]
@@ -1428,17 +1522,25 @@ mod tests {
             tracks.push(track_full(&format!("gamma-{i}"), Some("Gamma"), None, None));
         }
 
-        let seeds = PlaylistSeeds { tracks, listening, ..Default::default() };
+        let seeds = PlaylistSeeds {
+            tracks,
+            listening,
+            ..Default::default()
+        };
         let playlists = generate_utc(&seeds, wednesday());
 
-        let artist_mixes: Vec<&GeneratedPlaylist> =
-            playlists.iter().filter(|p| p.kind == PlaylistKind::ArtistMix).collect();
+        let artist_mixes: Vec<&GeneratedPlaylist> = playlists
+            .iter()
+            .filter(|p| p.kind == PlaylistKind::ArtistMix)
+            .collect();
         assert_eq!(artist_mixes.len(), 2);
         assert_eq!(artist_mixes[0].title, "More From Alpha");
         assert_eq!(artist_mixes[1].title, "More From Beta");
 
-        let favourite_artists: Vec<&GeneratedPlaylist> =
-            playlists.iter().filter(|p| p.kind == PlaylistKind::FavouriteArtist).collect();
+        let favourite_artists: Vec<&GeneratedPlaylist> = playlists
+            .iter()
+            .filter(|p| p.kind == PlaylistKind::FavouriteArtist)
+            .collect();
         assert_eq!(favourite_artists.len(), 2);
         assert_eq!(favourite_artists[0].title, "Beta");
         assert_eq!(favourite_artists[1].title, "Alpha");
@@ -1457,16 +1559,26 @@ mod tests {
         // Multi: two distinct albums, lower affinity.
         for i in 0..3 {
             let hash = format!("multi-{i}");
-            let album = if i == 0 { "Multi Album A" } else { "Multi Album B" };
+            let album = if i == 0 {
+                "Multi Album A"
+            } else {
+                "Multi Album B"
+            };
             tracks.push(track_full(&hash, Some("Multi"), Some(album), None));
             listening.insert(hash, summary(1, 100.0, 5.0));
         }
 
-        let seeds = PlaylistSeeds { tracks, listening, ..Default::default() };
+        let seeds = PlaylistSeeds {
+            tracks,
+            listening,
+            ..Default::default()
+        };
         let playlists = generate_utc(&seeds, wednesday());
 
-        let artist_mixes: Vec<&GeneratedPlaylist> =
-            playlists.iter().filter(|p| p.kind == PlaylistKind::ArtistMix).collect();
+        let artist_mixes: Vec<&GeneratedPlaylist> = playlists
+            .iter()
+            .filter(|p| p.kind == PlaylistKind::ArtistMix)
+            .collect();
         assert_eq!(artist_mixes.len(), 2);
         assert_eq!(artist_mixes[0].title, "More From Multi");
         assert_eq!(artist_mixes[1].title, "More From Solo");
@@ -1493,11 +1605,17 @@ mod tests {
             listening.insert(hash, summary(1, 3_000.0, 1.0));
         }
 
-        let seeds = PlaylistSeeds { tracks, listening, ..Default::default() };
+        let seeds = PlaylistSeeds {
+            tracks,
+            listening,
+            ..Default::default()
+        };
         let playlists = generate_utc(&seeds, wednesday());
 
-        let albums: Vec<&GeneratedPlaylist> =
-            playlists.iter().filter(|p| p.kind == PlaylistKind::RecentlyPlayedAlbum).collect();
+        let albums: Vec<&GeneratedPlaylist> = playlists
+            .iter()
+            .filter(|p| p.kind == PlaylistKind::RecentlyPlayedAlbum)
+            .collect();
         assert_eq!(albums.len(), 2);
         assert_eq!(albums[0].title, "Album One");
         assert_eq!(albums[1].title, "Album Two");
@@ -1513,12 +1631,22 @@ mod tests {
 
         for i in 0..3 {
             let hash = format!("recent-{i}");
-            tracks.push(track_full(&hash, Some("Artist"), Some("Recent Album"), None));
+            tracks.push(track_full(
+                &hash,
+                Some("Artist"),
+                Some("Recent Album"),
+                None,
+            ));
             listening.insert(hash, summary(5, now_secs - 5.0 * 86_400.0, 1.0));
         }
         for i in 0..3 {
             let hash = format!("dormant-{i}");
-            tracks.push(track_full(&hash, Some("Artist"), Some("Dormant Album"), None));
+            tracks.push(track_full(
+                &hash,
+                Some("Artist"),
+                Some("Dormant Album"),
+                None,
+            ));
             listening.insert(hash, summary(5, now_secs - 200.0 * 86_400.0, 0.01));
         }
         for i in 0..3 {
@@ -1531,18 +1659,26 @@ mod tests {
             ));
         }
 
-        let seeds = PlaylistSeeds { tracks, listening, ..Default::default() };
+        let seeds = PlaylistSeeds {
+            tracks,
+            listening,
+            ..Default::default()
+        };
         let playlists = generate(&seeds, now, 0);
 
-        let lost: Vec<&GeneratedPlaylist> =
-            playlists.iter().filter(|p| p.kind == PlaylistKind::LostAlbum).collect();
+        let lost: Vec<&GeneratedPlaylist> = playlists
+            .iter()
+            .filter(|p| p.kind == PlaylistKind::LostAlbum)
+            .collect();
         assert_eq!(lost.len(), 2);
         // Never-played ranks ahead of long-dormant — the most "lost" first.
         assert_eq!(lost[0].title, "Never Played Album");
         assert_eq!(lost[1].title, "Dormant Album");
-        assert!(!playlists.iter().any(|p| {
-            p.kind == PlaylistKind::LostAlbum && p.title == "Recent Album"
-        }));
+        assert!(
+            !playlists
+                .iter()
+                .any(|p| { p.kind == PlaylistKind::LostAlbum && p.title == "Recent Album" })
+        );
     }
 
     #[test]
@@ -1588,7 +1724,11 @@ mod tests {
             );
         }
 
-        let seeds = PlaylistSeeds { tracks, listening, ..Default::default() };
+        let seeds = PlaylistSeeds {
+            tracks,
+            listening,
+            ..Default::default()
+        };
         let playlists = generate(&seeds, now, 0);
 
         let capsule = playlists
@@ -1596,9 +1736,17 @@ mod tests {
             .find(|p| p.kind == PlaylistKind::TimeCapsule)
             .expect("time capsule should be generated");
         for i in 0..3 {
-            assert!(capsule.content_hashes.contains(&format!("loved-long-ago-{i}")));
+            assert!(
+                capsule
+                    .content_hashes
+                    .contains(&format!("loved-long-ago-{i}"))
+            );
             assert!(!capsule.content_hashes.contains(&format!("hot-now-{i}")));
-            assert!(!capsule.content_hashes.contains(&format!("barely-played-long-ago-{i}")));
+            assert!(
+                !capsule
+                    .content_hashes
+                    .contains(&format!("barely-played-long-ago-{i}"))
+            );
         }
     }
 
@@ -1616,11 +1764,17 @@ mod tests {
             }
         }
 
-        let seeds = PlaylistSeeds { tracks, listening, ..Default::default() };
+        let seeds = PlaylistSeeds {
+            tracks,
+            listening,
+            ..Default::default()
+        };
         let playlists = generate_utc(&seeds, wednesday());
 
-        let hits: Vec<&GeneratedPlaylist> =
-            playlists.iter().filter(|p| p.kind == PlaylistKind::HitsByYear).collect();
+        let hits: Vec<&GeneratedPlaylist> = playlists
+            .iter()
+            .filter(|p| p.kind == PlaylistKind::HitsByYear)
+            .collect();
         assert_eq!(hits.len(), 3);
         // 2019 (lowest aggregate affinity) is dropped; 2020, 2021, 2022 survive in that order.
         assert_eq!(hits[0].title, "Hits of 2020");
@@ -1647,11 +1801,17 @@ mod tests {
             listening.insert(hash, summary(1, 1.0, 5.0));
         }
 
-        let seeds = PlaylistSeeds { tracks, listening, ..Default::default() };
+        let seeds = PlaylistSeeds {
+            tracks,
+            listening,
+            ..Default::default()
+        };
         let playlists = generate_utc(&seeds, wednesday());
 
-        let hits: Vec<&GeneratedPlaylist> =
-            playlists.iter().filter(|p| p.kind == PlaylistKind::HitsByYear).collect();
+        let hits: Vec<&GeneratedPlaylist> = playlists
+            .iter()
+            .filter(|p| p.kind == PlaylistKind::HitsByYear)
+            .collect();
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].title, "Hits of 2021");
         assert_eq!(hits[1].title, "Hits of 2020");
@@ -1681,15 +1841,26 @@ mod tests {
             listening.insert(format!("old-favourite-{i}"), summary(10, 0.0, 0.5));
         }
 
-        let seeds = PlaylistSeeds { listening, ..Default::default() };
+        let seeds = PlaylistSeeds {
+            listening,
+            ..Default::default()
+        };
         let playlists = generate_utc(&seeds, wednesday());
 
         let month = playlists.iter().find(|p| p.id == "replay-month").unwrap();
         assert!(month.title.contains("Replay"));
         assert_eq!(month.content_hashes.len(), 3);
-        assert!(month.content_hashes.iter().all(|h| h.starts_with("this-month-")));
+        assert!(
+            month
+                .content_hashes
+                .iter()
+                .all(|h| h.starts_with("this-month-"))
+        );
 
-        let all_time = playlists.iter().find(|p| p.id == "replay-all-time").unwrap();
+        let all_time = playlists
+            .iter()
+            .find(|p| p.id == "replay-all-time")
+            .unwrap();
         assert_eq!(all_time.content_hashes.len(), 6);
         assert!(all_time.content_hashes[0].starts_with("old-favourite-"));
     }
@@ -1734,7 +1905,10 @@ mod tests {
             // Slow and quiet, but too bright to read as "chill".
             track_with_features("slow-but-bright", &features(75.0, 0.03, 0.9, 5.0)),
         ];
-        let seeds = PlaylistSeeds { tracks, ..Default::default() };
+        let seeds = PlaylistSeeds {
+            tracks,
+            ..Default::default()
+        };
 
         let playlists = generate_utc(&seeds, wednesday());
 
@@ -1747,20 +1921,43 @@ mod tests {
         // Add a third qualifying workout track so the minimum-count gate passes, and
         // verify ordering flows slowest-to-fastest.
         let mut tracks_with_third = seeds.tracks.clone();
-        tracks_with_third.push(track_with_features("workout-mid", &features(135.0, 0.1, 0.5, 6.0)));
-        let seeds = PlaylistSeeds { tracks: tracks_with_third, ..Default::default() };
+        tracks_with_third.push(track_with_features(
+            "workout-mid",
+            &features(135.0, 0.1, 0.5, 6.0),
+        ));
+        let seeds = PlaylistSeeds {
+            tracks: tracks_with_third,
+            ..Default::default()
+        };
         let playlists = generate_utc(&seeds, wednesday());
 
-        let workout = playlists.iter().find(|p| p.id == "workout-measured").unwrap();
+        let workout = playlists
+            .iter()
+            .find(|p| p.id == "workout-measured")
+            .unwrap();
         assert_eq!(
             workout.content_hashes,
             vec!["workout-slow", "workout-mid", "workout-fast"]
         );
-        assert!(!workout.content_hashes.contains(&"fast-but-quiet".to_string()));
+        assert!(
+            !workout
+                .content_hashes
+                .contains(&"fast-but-quiet".to_string())
+        );
 
-        let wind_down = playlists.iter().find(|p| p.id == "wind-down-measured").unwrap();
-        assert_eq!(wind_down.content_hashes, vec!["chill-b", "chill-a", "chill-c"]);
-        assert!(!wind_down.content_hashes.contains(&"slow-but-bright".to_string()));
+        let wind_down = playlists
+            .iter()
+            .find(|p| p.id == "wind-down-measured")
+            .unwrap();
+        assert_eq!(
+            wind_down.content_hashes,
+            vec!["chill-b", "chill-a", "chill-c"]
+        );
+        assert!(
+            !wind_down
+                .content_hashes
+                .contains(&"slow-but-bright".to_string())
+        );
     }
 
     #[test]
@@ -1778,17 +1975,29 @@ mod tests {
                 ));
             }
         }
-        let seeds = PlaylistSeeds { tracks: tracks.clone(), ..Default::default() };
+        let seeds = PlaylistSeeds {
+            tracks: tracks.clone(),
+            ..Default::default()
+        };
 
         let playlists = generate_utc(&seeds, wednesday());
-        let mixes: Vec<&GeneratedPlaylist> =
-            playlists.iter().filter(|p| p.id.starts_with("daily-mix-")).collect();
-        assert_eq!(mixes.len(), 4, "{:?}", mixes.iter().map(|m| &m.id).collect::<Vec<_>>());
+        let mixes: Vec<&GeneratedPlaylist> = playlists
+            .iter()
+            .filter(|p| p.id.starts_with("daily-mix-"))
+            .collect();
+        assert_eq!(
+            mixes.len(),
+            4,
+            "{:?}",
+            mixes.iter().map(|m| &m.id).collect::<Vec<_>>()
+        );
         for mix in &mixes {
             assert_eq!(mix.content_hashes.len(), 8, "{:?}", mix.content_hashes);
             let group_prefix = &mix.content_hashes[0][..6];
             assert!(
-                mix.content_hashes.iter().all(|hash| hash.starts_with(group_prefix)),
+                mix.content_hashes
+                    .iter()
+                    .all(|hash| hash.starts_with(group_prefix)),
                 "cluster mixed groups: {:?}",
                 mix.content_hashes
             );
@@ -1797,9 +2006,16 @@ mod tests {
         // One track short of the minimum — no Daily Mixes at all.
         let mut sparse_tracks = tracks;
         sparse_tracks.pop();
-        let sparse_seeds = PlaylistSeeds { tracks: sparse_tracks, ..Default::default() };
+        let sparse_seeds = PlaylistSeeds {
+            tracks: sparse_tracks,
+            ..Default::default()
+        };
         let sparse_playlists = generate_utc(&sparse_seeds, wednesday());
-        assert!(!sparse_playlists.iter().any(|p| p.id.starts_with("daily-mix-")));
+        assert!(
+            !sparse_playlists
+                .iter()
+                .any(|p| p.id.starts_with("daily-mix-"))
+        );
     }
 
     #[test]
@@ -1822,7 +2038,10 @@ mod tests {
         // No audio_features_json at all — can't be placed by similarity.
         tracks.push(track_full("unanalyzed", None, None, None));
 
-        let seeds = PlaylistSeeds { tracks, ..Default::default() };
+        let seeds = PlaylistSeeds {
+            tracks,
+            ..Default::default()
+        };
         let hashes: Vec<String> = ["calm-a", "loud-a", "mid", "loud-b", "calm-b", "unanalyzed"]
             .iter()
             .map(|hash| hash.to_string())
@@ -1839,13 +2058,21 @@ mod tests {
         // The walk should stay within a cluster before crossing to the next, so the
         // two calm tracks are adjacent and the two loud ones are adjacent.
         let position = |hash: &str| ordered.iter().position(|value| value == hash).unwrap();
-        assert_eq!(position("calm-b"), 1, "nearest neighbour of calm-a is calm-b");
+        assert_eq!(
+            position("calm-b"),
+            1,
+            "nearest neighbour of calm-a is calm-b"
+        );
         assert!(
             position("loud-a").abs_diff(position("loud-b")) == 1,
             "loud tracks should end up adjacent, got {ordered:?}"
         );
         // ...and the midpoint should bridge the two clusters rather than sit inside one.
-        assert_eq!(position("mid"), 2, "mid should bridge calm -> loud, got {ordered:?}");
+        assert_eq!(
+            position("mid"),
+            2,
+            "mid should bridge calm -> loud, got {ordered:?}"
+        );
     }
 
     #[test]
@@ -1876,17 +2103,33 @@ mod tests {
                 last_played_year: None,
             },
         );
-        let seeds = PlaylistSeeds { tracks, listening, ..Default::default() };
+        let seeds = PlaylistSeeds {
+            tracks,
+            listening,
+            ..Default::default()
+        };
 
         let result = radio(&seeds, "seed", 10).unwrap();
 
         assert_eq!(result.content_hashes[0], "seed");
         assert!(result.content_hashes.contains(&"close".to_string()));
         assert!(result.content_hashes.contains(&"far".to_string()));
-        assert!(!result.content_hashes.contains(&"skipped-but-close".to_string()));
+        assert!(
+            !result
+                .content_hashes
+                .contains(&"skipped-but-close".to_string())
+        );
         // "close" should rank ahead of "far" (nearer in vector space).
-        let close_index = result.content_hashes.iter().position(|h| h == "close").unwrap();
-        let far_index = result.content_hashes.iter().position(|h| h == "far").unwrap();
+        let close_index = result
+            .content_hashes
+            .iter()
+            .position(|h| h == "close")
+            .unwrap();
+        let far_index = result
+            .content_hashes
+            .iter()
+            .position(|h| h == "far")
+            .unwrap();
         assert!(close_index < far_index);
 
         assert!(radio(&seeds, "unknown-hash", 10).is_none());

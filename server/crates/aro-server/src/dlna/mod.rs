@@ -285,10 +285,34 @@ impl DlnaState {
             "0" => {
                 let playlists = self.generated_playlists().await?;
                 vec![
-                    didl::container("music:artists", "0", "Artists", "object.container", snapshot.artists.len()),
-                    didl::container("music:albums", "0", "Albums", "object.container", snapshot.albums.len()),
-                    didl::container("music:tracks", "0", "All Tracks", "object.container", snapshot.tracks.len()),
-                    didl::container("music:playlists", "0", "Playlists", "object.container", playlists.len()),
+                    didl::container(
+                        "music:artists",
+                        "0",
+                        "Artists",
+                        "object.container",
+                        snapshot.artists.len(),
+                    ),
+                    didl::container(
+                        "music:albums",
+                        "0",
+                        "Albums",
+                        "object.container",
+                        snapshot.albums.len(),
+                    ),
+                    didl::container(
+                        "music:tracks",
+                        "0",
+                        "All Tracks",
+                        "object.container",
+                        snapshot.tracks.len(),
+                    ),
+                    didl::container(
+                        "music:playlists",
+                        "0",
+                        "Playlists",
+                        "object.container",
+                        playlists.len(),
+                    ),
                 ]
             }
             "music:artists" => snapshot
@@ -509,7 +533,10 @@ impl DlnaState {
                 let track_id: Uuid = id["track:".len()..]
                     .parse()
                     .map_err(|_| BrowseError::NoSuchObject)?;
-                let track = snapshot.by_id.get(&track_id).ok_or(BrowseError::NoSuchObject)?;
+                let track = snapshot
+                    .by_id
+                    .get(&track_id)
+                    .ok_or(BrowseError::NoSuchObject)?;
                 didl::track_item(track, "music:tracks", media_base)
             }
             _ => return Err(BrowseError::NoSuchObject),
@@ -533,8 +560,14 @@ pub fn router(state: Arc<DlnaState>) -> Router {
             "/scpd/ConnectionManager.xml",
             get(|| async { xml_document(description::CONNECTION_MANAGER_SCPD.to_string()) }),
         )
-        .route("/control/ContentDirectory", post(content_directory::control))
-        .route("/control/ConnectionManager", post(connection_manager::control))
+        .route(
+            "/control/ContentDirectory",
+            post(content_directory::control),
+        )
+        .route(
+            "/control/ConnectionManager",
+            post(connection_manager::control),
+        )
         .route("/events/{service}", any(gena))
         .route("/media/{content_hash}", get(media::media))
         .layer(middleware::from_fn(lan_only))
@@ -571,8 +604,14 @@ async fn gena(
             (
                 StatusCode::OK,
                 [
-                    (header::HeaderName::from_static("sid"), HeaderValue::from_str(&sid).expect("uuid is ascii")),
-                    (header::HeaderName::from_static("timeout"), HeaderValue::from_static("Second-1800")),
+                    (
+                        header::HeaderName::from_static("sid"),
+                        HeaderValue::from_str(&sid).expect("uuid is ascii"),
+                    ),
+                    (
+                        header::HeaderName::from_static("timeout"),
+                        HeaderValue::from_static("Second-1800"),
+                    ),
                 ],
             )
                 .into_response()
@@ -622,7 +661,8 @@ pub async fn start(config: &Config, app: AppState) -> Result<Vec<tokio::task::Jo
             tracing::error!(%error, "DLNA listener stopped");
         }
     });
-    let advertiser = ssdp::Advertiser::new(config.hub_id, config.dlna.bind, config.dlna.bind.port());
+    let advertiser =
+        ssdp::Advertiser::new(config.hub_id, config.dlna.bind, config.dlna.bind.port());
     let discovery = tokio::spawn(async move {
         if let Err(error) = ssdp::run(advertiser).await {
             tracing::error!(%error, "SSDP advertisement unavailable; DLNA reachable by URL only");
@@ -667,6 +707,8 @@ mod integration_tests {
             config_path: root.path().join("aro.toml"),
             hub_id,
             display_name: config.display_name.clone(),
+            tls_fingerprint: "test-fingerprint".into(),
+            https_port: 4848,
             admin_token: config.admin_token.clone(),
             admin_allow: config.admin_allow.clone(),
             pairing: aro_sync_core::PairingManager::new("test-fingerprint".into()),
@@ -856,7 +898,12 @@ mod integration_tests {
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
-        assert!(response.headers()["sid"].to_str().unwrap().starts_with("uuid:"));
+        assert!(
+            response.headers()["sid"]
+                .to_str()
+                .unwrap()
+                .starts_with("uuid:")
+        );
         assert_eq!(response.headers()["timeout"], "Second-1800");
     }
 }

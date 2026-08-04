@@ -6,6 +6,22 @@ import XCTest
 
 @MainActor
 final class PlaybackControllerTests: XCTestCase {
+    func testLocalServerOutageBlocksOriginalAndCachedPlayback() {
+        let engine = FakeAudioPlaybackEngine()
+        let controller = PlaybackController(engine: engine)
+        let song = makeSongs(["Local file"])[0]
+
+        controller.setServerUnavailable("The local library server is unavailable.")
+        controller.play(song: song, queue: [song])
+
+        XCTAssertFalse(controller.canTogglePlayback)
+        XCTAssertNil(engine.loadedURL)
+        XCTAssertEqual(
+            controller.errorMessage,
+            "The local library server is unavailable."
+        )
+    }
+
     func testBuildsQueueAndAutomaticallyAdvances() throws {
         let engine = FakeAudioPlaybackEngine()
         let controller = PlaybackController(engine: engine)

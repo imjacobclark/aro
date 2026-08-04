@@ -1,25 +1,26 @@
-use crate::sources::SourceManager;
+use crate::{audio_metadata, sources::SourceManager};
 use aro_sync_core::{JobRegistry, PairingError, PairingManager};
 use aro_sync_protocol::*;
 use aro_sync_store::{HubStore, StoreError};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{ConnectInfo, Path, Query, Request, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use chrono::Duration;
 use futures_util::Stream;
 use ipnet::IpNet;
-use serde::Deserialize;
-use serde_json::json;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     net::{IpAddr, SocketAddr},
-    path::PathBuf,
+    path::{Component, Path as FilePath, PathBuf},
     pin::Pin,
     sync::{
         Arc,
@@ -45,6 +46,10 @@ pub struct AppState {
     pub config_path: PathBuf,
     pub hub_id: Uuid,
     pub display_name: String,
+    /// Trust bootstrap exposed only through the filesystem-protected local
+    /// control socket. Normal client traffic still uses pinned HTTPS.
+    pub tls_fingerprint: String,
+    pub https_port: u16,
     pub admin_token: String,
     /// Networks permitted to reach admin-only endpoints; enforced by
     /// [`admin_network_guard`] ahead of the per-request token check.
@@ -133,7 +138,16 @@ impl<S> Drop for TrackedStream<S> {
 }
 
 fn is_peer_allowed(allow: &[IpNet], peer: IpAddr) -> bool {
-    allow.iter().any(|net| net.contains(&peer))
+    let normalized = match peer {
+        IpAddr::V6(address) => address
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(address)),
+        address => address,
+    };
+    allow
+        .iter()
+        .any(|net| net.contains(&peer) || net.contains(&normalized))
 }
 
 /// Rejects requests to admin-only routes whose peer address isn't covered by
@@ -172,6 +186,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/folders", get(folders).post(add_folder))
         .route("/v1/admin/folders/scan", post(scan_folders))
         .route("/v1/admin/folders/remove", post(remove_folder))
+        .route("/v1/admin/folders/relocate", post(relocate_folder))
         .route("/v1/devices", get(devices))
         .route("/v1/devices/revoke", post(revoke))
         .route("/v1/devices/permissions", post(update_device_permissions))
@@ -192,15 +207,27 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/join/preview", post(join_preview))
         .route("/v1/join/commit", post(join_commit))
         .route("/v1/snapshot", get(snapshot))
-        .route("/v1/exchange", post(exchange))
+        .route("/v1/library/catalog", get(catalog))
+        .route("/v1/library/stats", get(library_stats))
+        .route(
+            "/v1/exchange",
+            post(exchange).layer(DefaultBodyLimit::max(15 * 1024 * 1024)),
+        )
         .route("/v1/blobs/{hash}", get(download_blob).put(upload_blob))
         .route("/v1/blobs/{hash}/status", get(blob_status))
         .route("/v1/blobs/commit", post(commit_blob))
         .route("/v1/library/export-manifest", get(export_manifest))
         .route("/v1/library/sources", get(source_health))
+        .route("/v1/topology", get(topology))
         .route("/v1/identify", post(identify_tracks))
         .route("/v1/identification/status", get(identification_status))
         .route("/v1/identification/results", get(identification_results))
+        .route("/v1/metadata-overrides", post(set_manual_metadata))
+        .route("/v1/library/tracks/remove", post(remove_track))
+        .route("/v1/imports", post(create_import))
+        .route("/v1/imports/{id}/files", post(register_import_file))
+        .route("/v1/imports/{id}/files/{file_id}", put(upload_import_file))
+        .route("/v1/imports/{id}/commit", post(commit_import))
         .route("/v1/loudness/status", get(loudness_status))
         .route("/v1/audio-features/status", get(audio_features_status))
         .route("/v1/playback/activity", post(playback_activity))
@@ -373,6 +400,374 @@ async fn remove_folder(
     } else {
         Err(ApiError::not_found("folder_not_found"))
     }
+}
+
+#[derive(Deserialize)]
+struct RelocateFolderRequest {
+    source_id: Uuid,
+    path: PathBuf,
+}
+
+async fn relocate_folder(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<RelocateFolderRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_admin(&state, &headers)?;
+    let manager = state.sources.clone();
+    let folder =
+        tokio::task::spawn_blocking(move || manager.relocate(request.source_id, &request.path))
+            .await
+            .map_err(ApiError::internal)?
+            .map_err(ApiError::internal)?;
+    Ok(Json(json!(folder)))
+}
+
+#[derive(Deserialize)]
+struct RemoveTrackRequest {
+    content_hash: String,
+}
+
+async fn remove_track(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<RemoveTrackRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !bearer(&headers).is_some_and(|token| admin_token_matches(&state, token)) {
+        let device_id = require_device(&state, &headers)?;
+        require_contributor(&state, device_id)?;
+    }
+    let removed = state
+        .store
+        .tombstone_by_hash(&request.content_hash, state.hub_id)?;
+    Ok(Json(json!({"removed": removed})))
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ImportSessionRecord {
+    import_id: Uuid,
+    source_id: Uuid,
+    owner_device_id: Uuid,
+    source_name: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ImportFileRecord {
+    file_id: Uuid,
+    relative_path: String,
+    size: u64,
+}
+
+#[derive(Deserialize)]
+struct CreateImportRequest {
+    source_name: String,
+}
+
+#[derive(Serialize)]
+struct CreateImportResponse {
+    import_id: Uuid,
+    source_id: Uuid,
+}
+
+#[derive(Deserialize)]
+struct RegisterImportFileRequest {
+    file_id: Uuid,
+    relative_path: String,
+    size: u64,
+}
+
+#[derive(Serialize)]
+struct ImportFileStatus {
+    file_id: Uuid,
+    uploaded_size: u64,
+    size: u64,
+}
+
+fn import_root(state: &AppState) -> PathBuf {
+    state.store.root().join("ingest")
+}
+
+fn import_session_path(state: &AppState, id: Uuid) -> PathBuf {
+    import_root(state).join(id.to_string())
+}
+
+async fn load_import_session(
+    state: &AppState,
+    id: Uuid,
+    device_id: Uuid,
+) -> Result<(PathBuf, ImportSessionRecord), ApiError> {
+    let path = import_session_path(state, id);
+    let bytes = fs::read(path.join("session.json"))
+        .await
+        .map_err(|_| ApiError::not_found("import_not_found"))?;
+    let session: ImportSessionRecord =
+        serde_json::from_slice(&bytes).map_err(ApiError::internal)?;
+    if session.owner_device_id != device_id {
+        return Err(ApiError::forbidden(
+            "import_owner_mismatch",
+            "This import belongs to another device.",
+        ));
+    }
+    Ok((path, session))
+}
+
+async fn create_import(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<CreateImportRequest>,
+) -> Result<Json<CreateImportResponse>, ApiError> {
+    let device_id = require_device(&state, &headers)?;
+    require_contributor(&state, device_id)?;
+    let source_name = request.source_name.trim();
+    if source_name.is_empty() || source_name.len() > 255 {
+        return Err(ApiError::bad_request("invalid_source_name"));
+    }
+    let record = ImportSessionRecord {
+        import_id: Uuid::new_v4(),
+        source_id: Uuid::new_v4(),
+        owner_device_id: device_id,
+        source_name: source_name.to_owned(),
+    };
+    let path = import_session_path(&state, record.import_id);
+    fs::create_dir_all(path.join("files"))
+        .await
+        .map_err(ApiError::internal)?;
+    fs::write(
+        path.join("session.json"),
+        serde_json::to_vec(&record).map_err(ApiError::internal)?,
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(Json(CreateImportResponse {
+        import_id: record.import_id,
+        source_id: record.source_id,
+    }))
+}
+
+async fn register_import_file(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(request): Json<RegisterImportFileRequest>,
+) -> Result<Json<ImportFileStatus>, ApiError> {
+    let device_id = require_device(&state, &headers)?;
+    require_contributor(&state, device_id)?;
+    let (path, _) = load_import_session(&state, id, device_id).await?;
+    let relative = FilePath::new(&request.relative_path);
+    if request.size == 0
+        || relative.is_absolute()
+        || relative.components().any(|part| {
+            matches!(
+                part,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(ApiError::bad_request("invalid_import_file"));
+    }
+    let record = ImportFileRecord {
+        file_id: request.file_id,
+        relative_path: request.relative_path,
+        size: request.size,
+    };
+    let metadata = path.join("files").join(format!("{}.json", request.file_id));
+    if metadata.exists() {
+        let existing: ImportFileRecord =
+            serde_json::from_slice(&fs::read(&metadata).await.map_err(ApiError::internal)?)
+                .map_err(ApiError::internal)?;
+        if existing.relative_path != record.relative_path || existing.size != record.size {
+            return Err(ApiError::conflict("import_file_mismatch"));
+        }
+    } else {
+        fs::write(
+            &metadata,
+            serde_json::to_vec(&record).map_err(ApiError::internal)?,
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    }
+    let uploaded_size = fs::metadata(path.join("files").join(format!("{}.part", request.file_id)))
+        .await
+        .map(|value| value.len())
+        .unwrap_or(0);
+    Ok(Json(ImportFileStatus {
+        file_id: request.file_id,
+        uploaded_size,
+        size: request.size,
+    }))
+}
+
+async fn upload_import_file(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((id, file_id)): Path<(Uuid, Uuid)>,
+    bytes: Bytes,
+) -> Result<Json<ImportFileStatus>, ApiError> {
+    let device_id = require_device(&state, &headers)?;
+    require_contributor(&state, device_id)?;
+    let (path, _) = load_import_session(&state, id, device_id).await?;
+    let record: ImportFileRecord = serde_json::from_slice(
+        &fs::read(path.join("files").join(format!("{file_id}.json")))
+            .await
+            .map_err(|_| ApiError::not_found("import_file_not_found"))?,
+    )
+    .map_err(ApiError::internal)?;
+    let offset = headers
+        .get("x-aro-offset")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| ApiError::bad_request("missing_upload_offset"))?;
+    let target = path.join("files").join(format!("{file_id}.part"));
+    let uploaded = fs::metadata(&target)
+        .await
+        .map(|value| value.len())
+        .unwrap_or(0);
+    if uploaded != offset || offset.saturating_add(bytes.len() as u64) > record.size {
+        return Err(ApiError::conflict("import_offset_mismatch"));
+    }
+    let mut output = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&target)
+        .await
+        .map_err(ApiError::internal)?;
+    use tokio::io::AsyncWriteExt;
+    output.write_all(&bytes).await.map_err(ApiError::internal)?;
+    output.flush().await.map_err(ApiError::internal)?;
+    Ok(Json(ImportFileStatus {
+        file_id,
+        uploaded_size: offset + bytes.len() as u64,
+        size: record.size,
+    }))
+}
+
+async fn commit_import(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<SyncJob>, ApiError> {
+    let device_id = require_device(&state, &headers)?;
+    require_contributor(&state, device_id)?;
+    let (path, session) = load_import_session(&state, id, device_id).await?;
+    let mut files = Vec::new();
+    let mut entries = fs::read_dir(path.join("files"))
+        .await
+        .map_err(ApiError::internal)?;
+    while let Some(entry) = entries.next_entry().await.map_err(ApiError::internal)? {
+        if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let record: ImportFileRecord =
+            serde_json::from_slice(&fs::read(entry.path()).await.map_err(ApiError::internal)?)
+                .map_err(ApiError::internal)?;
+        let part = path.join("files").join(format!("{}.part", record.file_id));
+        if fs::metadata(&part)
+            .await
+            .map(|value| value.len())
+            .unwrap_or(0)
+            != record.size
+        {
+            return Err(ApiError::conflict("import_incomplete"));
+        }
+        files.push((record, part));
+    }
+    if files.is_empty() {
+        return Err(ApiError::bad_request("empty_import"));
+    }
+    let job = state.jobs.create("library_import", files.len() as u64);
+    state.jobs.start(job.job_id);
+    let task_state = state.clone();
+    let job_id = job.job_id;
+    tokio::task::spawn_blocking(move || {
+        if let Err(error) = commit_import_files(&task_state, &session, &files, job_id) {
+            task_state.jobs.fail(job_id, error.to_string());
+            return;
+        }
+        task_state.jobs.complete(job_id);
+        let _ = std::fs::remove_dir_all(path);
+    });
+    Ok(Json(job))
+}
+
+fn commit_import_files(
+    state: &AppState,
+    session: &ImportSessionRecord,
+    files: &[(ImportFileRecord, PathBuf)],
+    job_id: Uuid,
+) -> anyhow::Result<()> {
+    let mut known_hashes = state.store.content_hashes()?;
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut operations = Vec::new();
+    for (record, file) in files {
+        let (hash, size) = state.store.import_managed(file)?;
+        if !known_hashes.insert(hash.clone()) {
+            state.jobs.advance(job_id, 1);
+            continue;
+        }
+        let track_id = Uuid::new_v4();
+        let timestamp = HybridTimestamp {
+            physical_millis: now,
+            logical: operations.len() as u32,
+            device_id: state.hub_id,
+        };
+        let mut payload = audio_metadata::song_payload(file, &hash, size, session.source_id);
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("source_name".into(), json!(session.source_name));
+            let relative = FilePath::new(&record.relative_path);
+            let filename = relative
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("Unknown");
+            object.insert("original_filename".into(), json!(filename));
+            object.insert(
+                "original_extension".into(),
+                json!(
+                    relative
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("audio")
+                ),
+            );
+            if object.get("title").and_then(Value::as_str)
+                == Some(
+                    file.file_stem()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("Unknown"),
+                )
+            {
+                object.insert(
+                    "title".into(),
+                    json!(
+                        relative
+                            .file_stem()
+                            .and_then(|value| value.to_str())
+                            .unwrap_or("Unknown")
+                    ),
+                );
+            }
+        }
+        let field_versions = payload
+            .as_object()
+            .expect("song payload is an object")
+            .keys()
+            .map(|field| (field.clone(), timestamp.clone()))
+            .collect::<BTreeMap<_, _>>();
+        operations.push(Operation {
+            operation_id: Uuid::new_v4(),
+            device_id: state.hub_id,
+            entity_type: "track".into(),
+            entity_id: track_id.to_string(),
+            kind: "upsert".into(),
+            payload,
+            field_versions,
+        });
+        if let Some(managed_path) = state.store.blob_path_for_download(&hash)? {
+            state.sources.enqueue_processing(&hash, &managed_path)?;
+        }
+        state.jobs.advance(job_id, 1);
+    }
+    state.store.append_operations(&operations)?;
+    Ok(())
 }
 
 async fn hub_info(State(state): State<Arc<AppState>>) -> Json<HubInfo> {
@@ -575,6 +970,48 @@ struct SnapshotQuery {
     limit: Option<u32>,
 }
 
+#[derive(Deserialize)]
+struct CatalogQuery {
+    cursor: Option<u64>,
+    limit: Option<u32>,
+    q: Option<String>,
+    sort: Option<String>,
+}
+
+async fn catalog(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<CatalogQuery>,
+) -> Result<Json<CatalogPage>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    let store = state.store.clone();
+    let page = tokio::task::spawn_blocking(move || {
+        store.catalog_page(
+            query.cursor.unwrap_or(0),
+            query.limit.unwrap_or(50),
+            query.q.as_deref(),
+            query.sort.as_deref(),
+        )
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
+    Ok(Json(page))
+}
+
+async fn library_stats(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    let store = state.store.clone();
+    let stats = tokio::task::spawn_blocking(move || store.dashboard_stats())
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::internal)?;
+    Ok(Json(stats))
+}
+
 async fn snapshot(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -692,10 +1129,7 @@ async fn commit_blob(
     let committed_size = state.store.commit_blob(&request.hash, request.size)?;
     if state
         .store
-        .needs_loudness_analysis(
-            &request.hash,
-            aro_track_id::loudness::ALGORITHM_VERSION,
-        )?
+        .needs_loudness_analysis(&request.hash, aro_track_id::loudness::ALGORITHM_VERSION)?
         && let Some(path) = state.store.blob_path_for_download(&request.hash)?
     {
         state.sources.loudness().enqueue(request.hash.clone(), path);
@@ -828,6 +1262,39 @@ async fn source_health(
     require_device_or_admin(&state, &headers)?;
     state.store.refresh_host_source_health()?;
     Ok(Json(state.store.source_health()?))
+}
+
+async fn topology(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<TopologySnapshot>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    state.store.refresh_host_source_health()?;
+    Ok(Json(TopologySnapshot {
+        hub_id: state.hub_id,
+        display_name: state.display_name.clone(),
+        track_count: state.store.active_track_count()?,
+        devices: state.store.devices()?,
+        sources: state.store.source_health()?,
+        active_transfers: state.telemetry.active_transfers(),
+        live_playback: state.store.topology_live_activity()?,
+    }))
+}
+
+async fn set_manual_metadata(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<crate::control::ManualMetadataRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let device_id = if bearer(&headers).is_some_and(|token| admin_token_matches(&state, token)) {
+        state.hub_id
+    } else {
+        require_device(&state, &headers)?
+    };
+    Ok(Json(json!({
+        "updated": crate::control::apply_manual_metadata(&state, request, device_id)
+            .map_err(|error| ApiError::internal(error.to_string()))?
+    })))
 }
 
 #[derive(Deserialize)]
@@ -1231,6 +1698,10 @@ impl ApiError {
         Self::new(StatusCode::NOT_FOUND, code, code)
     }
 
+    fn conflict(code: &str) -> Self {
+        Self::new(StatusCode::CONFLICT, code, code)
+    }
+
     fn internal(error: impl std::fmt::Display) -> Self {
         tracing::error!(%error, "request failed");
         Self::new(
@@ -1292,6 +1763,10 @@ mod admin_access_tests {
         assert!(is_peer_allowed(
             &loopback_only,
             "127.0.0.1".parse::<IpAddr>().unwrap()
+        ));
+        assert!(is_peer_allowed(
+            &loopback_only,
+            "::ffff:127.0.0.1".parse::<IpAddr>().unwrap()
         ));
         assert!(!is_peer_allowed(
             &loopback_only,

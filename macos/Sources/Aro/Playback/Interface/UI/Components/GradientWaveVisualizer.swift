@@ -20,7 +20,7 @@ struct GradientWaveVisualizer: View {
     var body: some View {
         TimelineView(
             .animation(
-                minimumInterval: 1 / 60,
+                minimumInterval: 1 / 30,
                 paused: !isPlaying
             )
         ) { timeline in
@@ -85,21 +85,21 @@ struct GradientWaveVisualizer: View {
         )
 
         context.drawLayer { layer in
-            layer.opacity = 0.22
-            layer.stroke(
-                reflectionPath,
-                with: waveGradient,
-                style: StrokeStyle(lineWidth: barWidth, lineCap: .round)
-            )
-            layer.addFilter(.blur(radius: 1.2))
-        }
-
-        context.drawLayer { layer in
+            layer.opacity = 0.88
             layer.addFilter(
-                .shadow(color: AroTheme.coral.opacity(0.32), radius: 6)
+                .shadow(color: AroTheme.coral.opacity(0.24), radius: 3)
             )
             layer.stroke(
                 wavePath,
+                with: waveGradient,
+                style: StrokeStyle(lineWidth: barWidth, lineCap: .round)
+            )
+        }
+
+        context.drawLayer { layer in
+            layer.opacity = 0.16
+            layer.stroke(
+                reflectionPath,
                 with: waveGradient,
                 style: StrokeStyle(lineWidth: barWidth, lineCap: .round)
             )

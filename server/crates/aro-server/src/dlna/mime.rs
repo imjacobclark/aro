@@ -28,9 +28,12 @@ pub fn mime_for_extension(extension: &str) -> &'static str {
 /// strict renderers reject tracks they could have played. `OP=01` declares Range
 /// seek support, which the media endpoint genuinely implements.
 pub fn content_features(extension: &str) -> &'static str {
-    const FLAGS: &str = "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000";
+    const FLAGS: &str =
+        "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000";
     match extension {
-        "mp3" => "DLNA.ORG_PN=MP3;DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000",
+        "mp3" => {
+            "DLNA.ORG_PN=MP3;DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+        }
         _ => FLAGS,
     }
 }

@@ -1,13 +1,18 @@
 use crate::http::AppState;
 use axum::{
     Json, Router,
-    extract::State,
-    http::{HeaderValue, StatusCode, header},
+    extract::{ConnectInfo, Request, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    middleware::{self, Next},
     response::{Html, IntoResponse, Response},
-    routing::get,
+    routing::{get, post, put},
 };
+use chrono::Duration;
+use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Instant};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
+use subtle::ConstantTimeEq;
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct DashboardState {
@@ -27,6 +32,30 @@ impl DashboardState {
 }
 
 pub fn router(state: DashboardState) -> Router {
+    let admin = Router::new()
+        .route("/api/v1/admin/session", get(admin_session))
+        .route("/api/v1/admin/config", get(admin_config))
+        .route("/api/v1/admin/config/{*key}", put(admin_set_config))
+        .route("/api/v1/admin/devices", get(admin_devices))
+        .route(
+            "/api/v1/admin/devices/permission",
+            put(admin_device_permission),
+        )
+        .route("/api/v1/admin/devices/revoke", post(admin_revoke_device))
+        .route(
+            "/api/v1/admin/folders",
+            get(admin_folders).post(admin_add_folder),
+        )
+        .route("/api/v1/admin/folders/scan", post(admin_scan_folder))
+        .route("/api/v1/admin/folders/remove", post(admin_remove_folder))
+        .route(
+            "/api/v1/admin/pairing",
+            get(admin_pairing).post(admin_open_pairing),
+        )
+        .route("/api/v1/admin/pairing/approve", post(admin_approve_pairing))
+        .route("/api/v1/admin/verify", post(admin_verify))
+        .route_layer(middleware::from_fn_with_state(state.clone(), admin_guard));
+
     Router::new()
         .route("/", get(index))
         .route("/api/v1/stats", get(stats))
@@ -41,9 +70,309 @@ pub fn router(state: DashboardState) -> Router {
         .route("/api/v1/host", get(host))
         .route("/api/v1/traffic", get(traffic))
         .route("/metrics", get(metrics))
+        .merge(admin)
         .fallback(not_found)
         .with_state(state)
         .layer(axum::middleware::from_fn(security_headers))
+}
+
+async fn admin_guard(
+    State(state): State<DashboardState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !state
+        .app
+        .admin_allow
+        .iter()
+        .any(|network| network.contains(&peer.ip()))
+    {
+        return admin_error(
+            StatusCode::FORBIDDEN,
+            "admin_network_denied",
+            "This network is not permitted to administer Aro.",
+        );
+    }
+    let authorized = bearer(request.headers()).is_some_and(|token| {
+        token
+            .as_bytes()
+            .ct_eq(state.app.admin_token.as_bytes())
+            .into()
+    });
+    if !authorized {
+        return admin_error(
+            StatusCode::UNAUTHORIZED,
+            "admin_auth_required",
+            "Enter the admin token from aro.toml to continue.",
+        );
+    }
+    next.run(request).await
+}
+
+fn bearer(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+}
+
+fn admin_error(status: StatusCode, code: &str, message: impl std::fmt::Display) -> Response {
+    (
+        status,
+        Json(json!({"error": code, "message": message.to_string()})),
+    )
+        .into_response()
+}
+
+fn admin_internal(error: impl std::fmt::Display) -> Response {
+    admin_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "admin_operation_failed",
+        error,
+    )
+}
+
+async fn admin_session(State(state): State<DashboardState>) -> Json<Value> {
+    Json(json!({
+        "authenticated": true,
+        "display_name": state.app.display_name,
+        "pairing_available": state.app.pairing.is_open(),
+    }))
+}
+
+async fn admin_config(State(state): State<DashboardState>) -> Response {
+    match crate::config::Config::load(&state.app.config_path) {
+        Ok(config) => Json(json!({
+            "display_name": config.display_name,
+            "bind": config.bind,
+            "advertise_mdns": config.advertise_mdns,
+            "storage_mode": config.storage_mode,
+            "source_rescan_seconds": config.source_rescan_seconds,
+            "admin_allow": config.admin_allow,
+            "dashboard": config.dashboard,
+            "dlna": config.dlna,
+            "acoustid_api_key_configured": !config.acoustid_api_key.is_empty(),
+            "musicbrainz_user_agent": config.musicbrainz_user_agent,
+            "config_path": state.app.config_path,
+            "restart_required": false,
+        }))
+        .into_response(),
+        Err(error) => admin_internal(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct ConfigValue {
+    value: String,
+}
+
+async fn admin_set_config(
+    State(state): State<DashboardState>,
+    axum::extract::Path(key): axum::extract::Path<String>,
+    Json(request): Json<ConfigValue>,
+) -> Response {
+    let result = (|| -> anyhow::Result<()> {
+        let mut config = crate::config::Config::load(&state.app.config_path)?;
+        config.set_field(&key, &request.value)?;
+        config.save(&state.app.config_path)?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => Json(json!({"updated": key, "restart_required": true})).into_response(),
+        Err(error) => admin_error(StatusCode::BAD_REQUEST, "invalid_config", error),
+    }
+}
+
+async fn admin_devices(State(state): State<DashboardState>) -> Response {
+    match state.app.store.devices() {
+        Ok(devices) => Json(json!({"devices": devices})).into_response(),
+        Err(error) => admin_internal(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct DevicePermission {
+    device_id: Uuid,
+    can_contribute: bool,
+}
+
+async fn admin_device_permission(
+    State(state): State<DashboardState>,
+    Json(request): Json<DevicePermission>,
+) -> Response {
+    match state
+        .app
+        .store
+        .set_device_contribution(request.device_id, request.can_contribute)
+    {
+        Ok(true) => Json(json!({"updated": true})).into_response(),
+        Ok(false) => admin_error(
+            StatusCode::NOT_FOUND,
+            "device_not_found",
+            "Device not found.",
+        ),
+        Err(error) => admin_internal(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct DeviceTarget {
+    device_id: Uuid,
+}
+
+async fn admin_revoke_device(
+    State(state): State<DashboardState>,
+    Json(request): Json<DeviceTarget>,
+) -> Response {
+    match state.app.store.revoke_device(request.device_id) {
+        Ok(true) => {
+            state.app.pairing.revoke(request.device_id);
+            Json(json!({"revoked": true})).into_response()
+        }
+        Ok(false) => admin_error(
+            StatusCode::NOT_FOUND,
+            "device_not_found",
+            "Device not found.",
+        ),
+        Err(error) => admin_internal(error),
+    }
+}
+
+async fn admin_folders(State(state): State<DashboardState>) -> Response {
+    match state.app.sources.list() {
+        Ok(folders) => Json(json!({"folders": folders})).into_response(),
+        Err(error) => admin_internal(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct FolderPath {
+    path: PathBuf,
+}
+
+async fn admin_add_folder(
+    State(state): State<DashboardState>,
+    Json(request): Json<FolderPath>,
+) -> Response {
+    let sources = state.app.sources.clone();
+    match tokio::task::spawn_blocking(move || sources.add(&request.path)).await {
+        Ok(Ok(folder)) => (StatusCode::CREATED, Json(json!({"folder": folder}))).into_response(),
+        Ok(Err(error)) => admin_error(StatusCode::BAD_REQUEST, "folder_add_failed", error),
+        Err(error) => admin_internal(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct FolderTarget {
+    source_id: Option<Uuid>,
+}
+
+async fn admin_scan_folder(
+    State(state): State<DashboardState>,
+    Json(request): Json<FolderTarget>,
+) -> Response {
+    let sources = state.app.sources.clone();
+    let result = tokio::task::spawn_blocking(move || match request.source_id {
+        Some(source_id) => sources.scan(source_id).map(Some),
+        None => sources.scan_all().map(|()| None),
+    })
+    .await;
+    match result {
+        Ok(Ok(changed)) => Json(json!({"scanned": true, "changed_songs": changed})).into_response(),
+        Ok(Err(error)) => admin_error(StatusCode::BAD_REQUEST, "folder_scan_failed", error),
+        Err(error) => admin_internal(error),
+    }
+}
+
+async fn admin_remove_folder(
+    State(state): State<DashboardState>,
+    Json(request): Json<FolderTarget>,
+) -> Response {
+    let Some(source_id) = request.source_id else {
+        return admin_error(
+            StatusCode::BAD_REQUEST,
+            "source_id_required",
+            "Choose a folder.",
+        );
+    };
+    match state.app.sources.remove(source_id) {
+        Ok(true) => Json(json!({"removed": true})).into_response(),
+        Ok(false) => admin_error(
+            StatusCode::NOT_FOUND,
+            "folder_not_found",
+            "Folder not found.",
+        ),
+        Err(error) => admin_internal(error),
+    }
+}
+
+async fn admin_pairing(State(state): State<DashboardState>) -> Json<Value> {
+    Json(json!({
+        "open": state.app.pairing.is_open(),
+        "requests": state.app.pairing.pending_requests(),
+    }))
+}
+
+async fn admin_open_pairing(State(state): State<DashboardState>) -> Json<Value> {
+    Json(json!({
+        "code": state.app.pairing.open(Duration::minutes(5)),
+        "expires_in_seconds": 300,
+    }))
+}
+
+#[derive(Deserialize)]
+struct PairingDecision {
+    request_id: Uuid,
+    approve: bool,
+    #[serde(default)]
+    can_contribute: bool,
+}
+
+async fn admin_approve_pairing(
+    State(state): State<DashboardState>,
+    Json(request): Json<PairingDecision>,
+) -> Response {
+    match state
+        .app
+        .pairing
+        .approve(request.request_id, request.approve, request.can_contribute)
+    {
+        Ok(credential) => {
+            if let Some(credential) = &credential {
+                let Some(summary) = state
+                    .app
+                    .pairing
+                    .devices()
+                    .into_iter()
+                    .find(|device| device.device_id == credential.device_id)
+                else {
+                    return admin_internal("approved device was not available");
+                };
+                if let Err(error) = state
+                    .app
+                    .store
+                    .save_device(&summary, &credential.credential)
+                {
+                    return admin_internal(error);
+                }
+            }
+            Json(json!({"approved": request.approve})).into_response()
+        }
+        Err(error) => admin_error(StatusCode::BAD_REQUEST, "pairing_failed", error),
+    }
+}
+
+async fn admin_verify(State(state): State<DashboardState>) -> Response {
+    let store = state.app.store.clone();
+    match tokio::task::spawn_blocking(move || store.verify_all()).await {
+        Ok(Ok((verified, failures))) => {
+            Json(json!({"verified": verified, "failures": failures})).into_response()
+        }
+        Ok(Err(error)) => admin_internal(error),
+        Err(error) => admin_internal(error),
+    }
 }
 
 async fn security_headers(
@@ -260,71 +589,7 @@ async fn index() -> Html<&'static str> {
     Html(INDEX)
 }
 
-const INDEX: &str = r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Aro Library Intelligence</title>
-<style>
-:root{color-scheme:dark;--bg:#090913;--surface:#141425;--line:#292946;--text:#f4f2ff;--muted:#9d99b8;--violet:#9d73ff;--cyan:#5be0d0;--warn:#ffb45c}
-*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 20% 0,#231848 0,transparent 34%),var(--bg);color:var(--text);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif}
-main{max-width:1240px;margin:auto;padding:38px 24px 80px}header{display:flex;align-items:end;justify-content:space-between;margin-bottom:28px}h1{font-size:34px;margin:0;letter-spacing:-1px}h2{font-size:17px;margin:0 0 14px}.eyebrow,.muted{color:var(--muted)}.eyebrow{text-transform:uppercase;letter-spacing:.16em;font-size:11px}
-.pulse{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--cyan);box-shadow:0 0 12px var(--cyan);margin-right:7px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.card,.panel{background:color-mix(in srgb,var(--surface) 90%,transparent);border:1px solid var(--line);border-radius:15px;box-shadow:0 16px 50px #0003}.card{padding:17px}.label{color:var(--muted);font-size:12px}.value{font-size:27px;font-weight:650;margin-top:5px;font-variant-numeric:tabular-nums}.panel{padding:20px;margin-top:18px}.split{display:grid;grid-template-columns:1.5fr 1fr;gap:18px}.session{display:grid;grid-template-columns:1fr auto;gap:8px;padding:14px 0;border-top:1px solid var(--line)}.session:first-of-type{border:0}.track{font-weight:650;font-size:16px}.bar{height:6px;border-radius:5px;background:#2b2945;overflow:hidden;margin-top:8px}.fill{height:100%;background:linear-gradient(90deg,var(--violet),var(--cyan))}
-table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:9px;border-bottom:1px solid var(--line)}th{color:var(--muted);font-weight:500}.empty{padding:24px 0;color:var(--muted)}
-@media(max-width:850px){.grid{grid-template-columns:repeat(2,1fr)}.split{grid-template-columns:1fr}}@media(max-width:480px){main{padding:24px 14px}.grid{grid-template-columns:1fr}header{align-items:start;gap:12px;flex-direction:column}}
-</style>
-</head>
-<body><main>
-<header><div><div class="eyebrow">Aro server intelligence</div><h1 id="name">Library dashboard</h1></div><div class="muted"><span class="pulse"></span>Live · refreshes every 5 seconds</div></header>
-<section class="grid">
-<div class="card"><div class="label">Listening now</div><div class="value" id="active">—</div></div>
-<div class="card"><div class="label">Connected devices</div><div class="value" id="connected">—</div></div>
-<div class="card"><div class="label">Active transfers</div><div class="value" id="transfers">—</div></div>
-<div class="card"><div class="label">Library tracks</div><div class="value" id="tracks">—</div></div>
-<div class="card"><div class="label">Library size</div><div class="value" id="bytes">—</div></div>
-<div class="card"><div class="label">Lifetime listening</div><div class="value" id="hours">—</div></div>
-<div class="card"><div class="label">Logged plays</div><div class="value" id="plays">—</div></div>
-<div class="card"><div class="label">Artists</div><div class="value" id="artists">—</div></div>
-<div class="card"><div class="label">Albums</div><div class="value" id="albums">—</div></div>
-</section>
-<section class="panel"><h2>Now playing</h2><div id="live" class="empty">Waiting for playback activity…</div></section>
-<section class="panel"><h2>Identification queue</h2>
-<div class="grid" style="grid-template-columns:repeat(5,minmax(0,1fr));margin-bottom:14px">
-<div class="card"><div class="label">Queued</div><div class="value" id="q-queued">—</div></div>
-<div class="card"><div class="label">Groups queued</div><div class="value" id="q-groups">—</div></div>
-<div class="card"><div class="label">Processed</div><div class="value" id="q-processed">—</div></div>
-<div class="card"><div class="label">Failed</div><div class="value" id="q-failed">—</div></div>
-<div class="card"><div class="label">Status</div><div class="value" id="q-status">—</div></div>
-</div>
-<div id="q-last" class="muted"></div>
-<div id="q-error" class="muted"></div>
-</section>
-<section class="split">
-<div class="panel"><h2>Format breakdown</h2><table><thead><tr><th>Format</th><th>Tracks</th><th>Storage</th></tr></thead><tbody id="formats"></tbody></table></div>
-<div class="panel"><h2>Metadata coverage</h2><div id="metadata"></div></div>
-</section>
-<section class="panel"><h2>Host</h2><table><tbody id="host"></tbody></table></section>
-</main>
-<script>
-const $=id=>document.getElementById(id),num=n=>new Intl.NumberFormat().format(n||0),bytes=n=>{let value=Number(n)||0;if(value<1000)return num(value)+" B";const units=["KB","MB","GB","TB","PB"];let unit=units[0];for(let i=0;i<units.length;i++){unit=units[i];value/=1000;if(value<1000||i===units.length-1)break}const digits=value>=100?0:value>=10?1:2;return new Intl.NumberFormat(undefined,{minimumFractionDigits:0,maximumFractionDigits:digits}).format(value)+" "+unit},pct=n=>Math.round((n||0)*100)+"%";
-async function json(path){let r=await fetch(path,{cache:"no-store"});if(!r.ok)throw Error(r.status);return r.json()}
-function set(id,v){$(id).textContent=v}
-async function refresh(){
- try{
-  const [s,l,h,q]=await Promise.all([json("/api/v1/stats"),json("/api/v1/live"),json("/api/v1/host"),json("/api/v1/queue")]);
-  set("name",h.display_name);set("active",num(s.live.active_listeners));set("connected",num(s.live.connected_devices));set("transfers",num(s.transport.active_transfers));set("tracks",num(s.library.track_count));set("bytes",bytes(s.library.file_size_bytes));set("hours",num(Math.round(s.listening.total_seconds/3600))+" h");set("plays",num(s.listening.logged_plays));set("artists",num(s.library.artist_count));set("albums",num(s.library.album_count));
-  const qu=q.queue;set("q-queued",num(qu.queued));set("q-groups",num(qu.groups_queued));set("q-processed",num(qu.processed));set("q-failed",num(qu.failed));set("q-status",qu.in_flight?"Identifying…":"Idle");
-  $("q-last").textContent=qu.last_group?`Last group: ${qu.last_group.folder} · ${qu.last_group.member_count} file(s) · ${qu.last_group.accepted?"accepted":"not accepted"}${qu.last_group.release_title?" · "+qu.last_group.release_title:""}`:"";
-  $("q-error").textContent=qu.last_error?`Last error: ${qu.last_error}`:"";
-  $("formats").innerHTML=s.library.formats.map(x=>`<tr><td>${escapeHtml(x.name)}</td><td>${num(x.track_count)}</td><td>${bytes(x.file_size_bytes)}</td></tr>`).join("");
-  $("metadata").innerHTML=["title","artist","album"].map(k=>`<div style="margin:14px 0"><div class="label">${k[0].toUpperCase()+k.slice(1)} · ${pct(s.metadata[k+"_coverage"])}</div><div class="bar"><div class="fill" style="width:${pct(s.metadata[k+"_coverage"])}"></div></div></div>`).join("");
-  $("live").className=l.sessions.length?"":"empty";$("live").innerHTML=l.sessions.length?l.sessions.map(x=>{let p=x.playback,t=x.track,d=p.duration_seconds||0,pos=p.position_seconds||0;return `<div class="session"><div><div class="track">${escapeHtml(t.title||"Unknown track")}</div><div class="muted">${escapeHtml(t.artist||"Unknown artist")} · ${escapeHtml(x.device_name)} · ${escapeHtml(p.state)}</div><div class="bar"><div class="fill" style="width:${d?Math.min(100,pos/d*100):0}%"></div></div></div><div class="muted">${Math.floor(pos/60)}:${String(Math.floor(pos%60)).padStart(2,"0")}</div></div>`}).join(""):"No active listeners.";
-  $("host").innerHTML=[["Version",h.server_version],["Protocol",h.protocol_version],["Host",h.hostname||"Unknown"],["Platform",h.operating_system+" / "+h.architecture],["Storage mode",h.storage_mode],["Data path",h.data_path],["Disk free",bytes(h.disk_free_bytes)],["Process uptime",num(Math.floor(h.process_uptime_seconds/3600))+" h"]].map(x=>`<tr><th>${x[0]}</th><td>${escapeHtml(String(x[1]))}</td></tr>`).join("");
- }catch(e){console.error(e)}
-}
-function escapeHtml(v){return v.replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
-refresh();setInterval(refresh,5000);
-</script></body></html>"#;
+const INDEX: &str = include_str!("dashboard.html");
 
 #[cfg(test)]
 mod tests {
@@ -350,5 +615,32 @@ mod tests {
         assert!(INDEX.contains("q-groups"));
         assert!(INDEX.contains("q-processed"));
         assert!(INDEX.contains("q-failed"));
+    }
+
+    #[test]
+    fn dashboard_surfaces_server_administration() {
+        for path in [
+            "/api/v1/admin/config",
+            "/api/v1/admin/devices",
+            "/api/v1/admin/folders",
+            "/api/v1/admin/pairing",
+            "/api/v1/admin/verify",
+        ] {
+            assert!(INDEX.contains(path), "dashboard does not use {path}");
+        }
+        assert!(INDEX.contains("sessionStorage"));
+        assert!(!INDEX.contains("localStorage"));
+    }
+
+    #[test]
+    fn bearer_requires_the_authorization_scheme() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("token"));
+        assert_eq!(bearer(&headers), None);
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer secret"),
+        );
+        assert_eq!(bearer(&headers), Some("secret"));
     }
 }

@@ -25,10 +25,7 @@ pub async fn control(
         Some("Browse") => browse(&state, &headers, &body).await,
         Some("GetSystemUpdateID") => {
             let id = state.system_update_id().await;
-            action_response(
-                "GetSystemUpdateID",
-                &format!("<Id>{id}</Id>"),
-            )
+            action_response("GetSystemUpdateID", &format!("<Id>{id}</Id>"))
         }
         Some("GetSearchCapabilities") => {
             action_response("GetSearchCapabilities", "<SearchCaps></SearchCaps>")
@@ -103,7 +100,10 @@ fn media_base(headers: &HeaderMap) -> Option<String> {
 /// (`"urn:...:ContentDirectory:1#Browse"`), falling back to sniffing the body for
 /// renderers that omit the header.
 fn soap_action(headers: &HeaderMap, body: &str) -> Option<String> {
-    if let Some(value) = headers.get("soapaction").and_then(|value| value.to_str().ok()) {
+    if let Some(value) = headers
+        .get("soapaction")
+        .and_then(|value| value.to_str().ok())
+    {
         let trimmed = value.trim().trim_matches('"');
         if let Some((_, action)) = trimmed.rsplit_once('#') {
             return Some(action.to_string());
@@ -192,7 +192,10 @@ mod tests {
             let body = format!(
                 r#"<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><{prefix}:Browse xmlns:{prefix}="urn:schemas-upnp-org:service:ContentDirectory:1"><ObjectID>music:artists</ObjectID><BrowseFlag>BrowseDirectChildren</BrowseFlag><StartingIndex>5</StartingIndex><RequestedCount>10</RequestedCount></{prefix}:Browse></s:Body></s:Envelope>"#
             );
-            let fields = soap_fields(&body, &["ObjectID", "BrowseFlag", "StartingIndex", "RequestedCount"]);
+            let fields = soap_fields(
+                &body,
+                &["ObjectID", "BrowseFlag", "StartingIndex", "RequestedCount"],
+            );
             assert_eq!(fields.get("ObjectID").unwrap(), "music:artists");
             assert_eq!(fields.get("BrowseFlag").unwrap(), "BrowseDirectChildren");
             assert_eq!(fields.get("StartingIndex").unwrap(), "5");
@@ -212,7 +215,9 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             "soapaction",
-            r#""urn:schemas-upnp-org:service:ContentDirectory:1#Browse""#.parse().unwrap(),
+            r#""urn:schemas-upnp-org:service:ContentDirectory:1#Browse""#
+                .parse()
+                .unwrap(),
         );
         assert_eq!(soap_action(&headers, "").as_deref(), Some("Browse"));
     }
@@ -221,16 +226,16 @@ mod tests {
     fn action_falls_back_to_body_sniffing() {
         let headers = HeaderMap::new();
         let body = r#"<s:Body><u:GetSystemUpdateID xmlns:u="x"/></s:Body>"#;
-        assert_eq!(soap_action(&headers, body).as_deref(), Some("GetSystemUpdateID"));
+        assert_eq!(
+            soap_action(&headers, body).as_deref(),
+            Some("GetSystemUpdateID")
+        );
     }
 
     #[test]
     fn media_base_uses_the_host_header() {
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, "192.168.1.5:4850".parse().unwrap());
-        assert_eq!(
-            media_base(&headers).unwrap(),
-            "http://192.168.1.5:4850"
-        );
+        assert_eq!(media_base(&headers).unwrap(), "http://192.168.1.5:4850");
     }
 }

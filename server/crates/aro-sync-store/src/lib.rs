@@ -1,10 +1,11 @@
 use aro_sync_core::{BlobError, hash_file, validate_hash, verify_file};
 use aro_sync_protocol::{
-    ConflictChoice, DeviceSummary, ExportManifest, ExportTrack, FieldConflict, HybridTimestamp,
-    JoinCommitRequest, JoinPreview, JoinPreviewRequest, ManifestEntry, Operation,
-    PlaybackActivitySnapshot, PlaybackActivityState, SequencedOperation, SourceHealthReport,
-    VersionedValue,
+    CatalogPage, CatalogTrack, ConflictChoice, DeviceSummary, ExportManifest, ExportTrack,
+    FieldConflict, HybridTimestamp, JoinCommitRequest, JoinPreview, JoinPreviewRequest,
+    ManifestEntry, Operation, PlaybackActivitySnapshot, PlaybackActivityState, SequencedOperation,
+    SourceHealthReport, TopologyPlaybackActivity, VersionedValue,
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
@@ -256,6 +257,8 @@ pub enum StoreError {
     BlobReferenced,
     #[error("join preview not found or already committed")]
     JoinPreviewNotFound,
+    #[error("manual artwork is invalid or exceeds 10 MiB")]
+    InvalidManualArtwork,
 }
 
 #[derive(Clone)]
@@ -287,10 +290,11 @@ impl HubStore {
         &self,
         operations: &[Operation],
     ) -> Result<Vec<SequencedOperation>, StoreError> {
+        let operations = self.prepare_manual_artwork(operations)?;
         let mut connection = self.connection.lock();
         let transaction = connection.transaction()?;
         let mut accepted = Vec::new();
-        for operation in operations {
+        for operation in &operations {
             let payload = serde_json::to_string(operation).expect("operation serialization");
             let inserted = transaction.execute(
                 r#"
@@ -322,6 +326,55 @@ impl HubStore {
         }
         transaction.commit()?;
         Ok(accepted)
+    }
+
+    /// Replaces transport-only base64 artwork with a content-addressed blob
+    /// reference before the operation enters the durable CRDT log. This keeps
+    /// replicated metadata small while allowing any metadata editor path (local
+    /// control socket or remote exchange) to use the same operation shape.
+    fn prepare_manual_artwork(
+        &self,
+        operations: &[Operation],
+    ) -> Result<Vec<Operation>, StoreError> {
+        const MAX_ARTWORK_BYTES: usize = 10 * 1024 * 1024;
+        let mut prepared = operations.to_vec();
+        for operation in &mut prepared {
+            if operation.entity_type != "track_state" {
+                continue;
+            }
+            let Value::Object(payload) = &mut operation.payload else {
+                continue;
+            };
+            let Some(Value::String(encoded)) = payload.remove("manual_artwork_base64") else {
+                continue;
+            };
+            let bytes = BASE64
+                .decode(encoded)
+                .map_err(|_| StoreError::InvalidManualArtwork)?;
+            if bytes.is_empty() || bytes.len() > MAX_ARTWORK_BYTES {
+                return Err(StoreError::InvalidManualArtwork);
+            }
+            let hash = hex::encode(Sha256::digest(&bytes));
+            if !self.blob_path(&hash).is_file() {
+                let upload = self.upload_path(&hash);
+                if upload.exists() {
+                    fs::remove_file(&upload)?;
+                }
+                fs::write(&upload, &bytes)?;
+                self.commit_blob(&hash, bytes.len() as u64)?;
+            }
+            payload.insert("manual_artwork_hash".into(), Value::String(hash));
+            let version = operation
+                .field_versions
+                .remove("manual_artwork_base64")
+                .or_else(|| operation.field_versions.get("manual_artwork_set").cloned());
+            if let Some(version) = version {
+                operation
+                    .field_versions
+                    .insert("manual_artwork_hash".into(), version);
+            }
+        }
+        Ok(prepared)
     }
 
     pub fn changes_after(
@@ -436,6 +489,154 @@ impl HubStore {
         rows.collect::<Result<_, _>>().map_err(Into::into)
     }
 
+    /// Presentation-ready catalog page. The query is deliberately executed in
+    /// SQLite so a streaming client never needs to download or group the whole
+    /// library just to render one screen.
+    pub fn catalog_page(
+        &self,
+        cursor: u64,
+        limit: u32,
+        query: Option<&str>,
+        sort: Option<&str>,
+    ) -> Result<CatalogPage, StoreError> {
+        let connection = self.connection.lock();
+        let limit = limit.clamp(1, 200);
+        let search = query
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("%{}%", value));
+        let order = match sort.unwrap_or("title") {
+            "artist" => "LOWER(COALESCE(CASE WHEN json_extract(t.metadata, '$.manual_artist_set') = 1 THEN json_extract(t.metadata, '$.manual_artist') ELSE json_extract(t.metadata, '$.artist') END, '')),
+                LOWER(COALESCE(CASE WHEN json_extract(t.metadata, '$.manual_album_set') = 1 THEN json_extract(t.metadata, '$.manual_album') ELSE json_extract(t.metadata, '$.album') END, '')),
+                COALESCE(CAST(CASE WHEN json_extract(t.metadata, '$.manual_disc_number_set') = 1 THEN json_extract(t.metadata, '$.manual_disc_number') ELSE json_extract(t.metadata, '$.disc_number') END AS INTEGER), 0),
+                COALESCE(CAST(CASE WHEN json_extract(t.metadata, '$.manual_track_number_set') = 1 THEN json_extract(t.metadata, '$.manual_track_number') ELSE json_extract(t.metadata, '$.track_number') END AS INTEGER), 0),
+                t.hub_track_id",
+            "album" => "LOWER(COALESCE(CASE WHEN json_extract(t.metadata, '$.manual_album_set') = 1 THEN json_extract(t.metadata, '$.manual_album') ELSE json_extract(t.metadata, '$.album') END, '')),
+                LOWER(COALESCE(CASE WHEN json_extract(t.metadata, '$.manual_artist_set') = 1 THEN json_extract(t.metadata, '$.manual_artist') ELSE json_extract(t.metadata, '$.artist') END, '')),
+                COALESCE(CAST(CASE WHEN json_extract(t.metadata, '$.manual_disc_number_set') = 1 THEN json_extract(t.metadata, '$.manual_disc_number') ELSE json_extract(t.metadata, '$.disc_number') END AS INTEGER), 0),
+                COALESCE(CAST(CASE WHEN json_extract(t.metadata, '$.manual_track_number_set') = 1 THEN json_extract(t.metadata, '$.manual_track_number') ELSE json_extract(t.metadata, '$.track_number') END AS INTEGER), 0),
+                t.hub_track_id",
+            _ => "LOWER(COALESCE(CASE WHEN json_extract(t.metadata, '$.manual_title_set') = 1 THEN json_extract(t.metadata, '$.manual_title') ELSE json_extract(t.metadata, '$.title') END, '')),
+                LOWER(COALESCE(CASE WHEN json_extract(t.metadata, '$.manual_artist_set') = 1 THEN json_extract(t.metadata, '$.manual_artist') ELSE json_extract(t.metadata, '$.artist') END, '')),
+                t.hub_track_id",
+        };
+        let sql = format!(
+            "SELECT t.hub_track_id, t.content_hash, t.metadata,\
+             COALESCE((SELECT b.size FROM blobs b WHERE b.hash = t.content_hash),\
+                      (SELECT rb.size FROM referenced_blobs rb WHERE rb.hash = t.content_hash AND rb.available = 1)),\
+             EXISTS(SELECT 1 FROM blobs b WHERE b.hash = t.content_hash)\
+             OR EXISTS(SELECT 1 FROM referenced_blobs rb WHERE rb.hash = t.content_hash AND rb.available = 1),\
+             (SELECT l.payload FROM loudness l WHERE l.content_hash = t.content_hash \
+              ORDER BY l.algorithm_version DESC LIMIT 1) \
+             FROM tracks t WHERE t.purged_at IS NULL AND t.tombstoned_at IS NULL \
+             {search} ORDER BY {order} LIMIT ?1 OFFSET ?2",
+            search = if search.is_some() {
+                "AND (t.metadata LIKE ?3 OR t.content_hash LIKE ?3)"
+            } else {
+                ""
+            }
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let mut rows = if let Some(search) = search {
+            statement.query(params![limit, cursor, search])?
+        } else {
+            statement.query(params![limit, cursor])?
+        };
+        let mut tracks = Vec::new();
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let metadata: Value = serde_json::from_str::<Value>(&row.get::<_, String>(2)?)
+                .unwrap_or(Value::Object(Default::default()));
+            let effective = |key: &str| {
+                if metadata
+                    .get(&format!("manual_{key}_set"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                {
+                    metadata.get(&format!("manual_{key}"))
+                } else {
+                    metadata.get(key)
+                }
+            };
+            let number = |key: &str| effective(key).and_then(Value::as_u64).map(|v| v as u32);
+            let decimal = |key: &str| metadata.get(key).and_then(Value::as_f64);
+            let text = |key: &str| effective(key).and_then(Value::as_str).map(str::to_owned);
+            let original_artwork_hash = || {
+                metadata
+                    .get("artwork_hash")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        metadata
+                            .get("artwork_url")
+                            .and_then(Value::as_str)
+                            .and_then(|url| {
+                                url.strip_prefix("/v1/blobs/")
+                                    .filter(|hash| !hash.is_empty())
+                                    .map(str::to_owned)
+                            })
+                    })
+            };
+            let artwork_hash =
+                if metadata.get("manual_artwork_set").and_then(Value::as_bool) == Some(true) {
+                    metadata
+                        .get("manual_artwork_hash")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                } else {
+                    original_artwork_hash()
+                };
+            let loudness: Value = row
+                .get::<_, Option<String>>(5)?
+                .and_then(|payload| serde_json::from_str(&payload).ok())
+                .unwrap_or_default();
+            tracks.push(CatalogTrack {
+                track_id: Uuid::parse_str(&id).unwrap_or_else(|_| Uuid::nil()),
+                source_id: text("source_id").and_then(|value| Uuid::parse_str(&value).ok()),
+                source_name: text("source_name"),
+                content_hash: row.get(1)?,
+                title: text("title").unwrap_or_else(|| "Unknown Track".to_owned()),
+                artist: text("artist"),
+                album: text("album"),
+                genre: text("genre"),
+                release_year: number("release_year"),
+                duration_seconds: metadata.get("duration").and_then(Value::as_f64),
+                byte_count: row.get(3)?,
+                codec: text("codec"),
+                sample_rate: decimal("sample_rate"),
+                bit_depth: number("bit_depth"),
+                channel_count: number("channel_count"),
+                bitrate: decimal("bitrate"),
+                integrated_lufs: loudness.get("integrated_lufs").and_then(Value::as_f64),
+                peak_amplitude: loudness.get("peak_amplitude").and_then(Value::as_f64),
+                loudness_analyzed_at: loudness.get("analyzed_at").and_then(Value::as_f64),
+                loudness_algorithm_version: loudness
+                    .get("algorithm_version")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as u32),
+                track_number: number("track_number"),
+                disc_number: number("disc_number"),
+                artwork_hash,
+                favourite: metadata
+                    .get("favourite")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                available: row.get(4)?,
+            });
+        }
+        drop(rows);
+        drop(statement);
+        drop(connection);
+        let next_cursor =
+            (tracks.len() == limit as usize).then(|| (cursor + tracks.len() as u64).to_string());
+        let revision = self.latest_sequence()?;
+        Ok(CatalogPage {
+            tracks,
+            next_cursor,
+            revision,
+        })
+    }
+
     pub fn export_manifest(&self, library_name: &str) -> Result<ExportManifest, StoreError> {
         let connection = self.connection.lock();
         let recovery_cutoff = chrono::Utc::now().timestamp() - 30 * 24 * 60 * 60;
@@ -458,10 +659,20 @@ impl HubStore {
             let metadata_json: String = row.get(2)?;
             let metadata: serde_json::Map<String, Value> =
                 serde_json::from_str(&metadata_json).unwrap_or_default();
-            let text = |key: &str| metadata.get(key).and_then(Value::as_str).map(str::to_owned);
+            let effective = |key: &str| {
+                if metadata
+                    .get(&format!("manual_{key}_set"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                {
+                    metadata.get(&format!("manual_{key}"))
+                } else {
+                    metadata.get(key)
+                }
+            };
+            let text = |key: &str| effective(key).and_then(Value::as_str).map(str::to_owned);
             let integer = |key: &str| {
-                metadata
-                    .get(key)
+                effective(key)
                     .and_then(Value::as_u64)
                     .and_then(|value| u32::try_from(value).ok())
             };
@@ -1022,9 +1233,12 @@ impl HubStore {
         let connection = self.connection.lock();
         let mut statement = connection.prepare(
             r#"
-            SELECT source_id, name, mode, available, warning
-            FROM sources
-            ORDER BY name, source_id
+            SELECT s.source_id, s.name, s.mode, s.available, s.warning,
+                   COUNT(sf.relative_path)
+            FROM sources s
+            LEFT JOIN source_files sf ON sf.source_id = s.source_id AND sf.available = 1
+            GROUP BY s.source_id
+            ORDER BY s.name, s.source_id
             "#,
         )?;
         Ok(statement
@@ -1036,9 +1250,18 @@ impl HubStore {
                     mode: row.get(2)?,
                     available: row.get(3)?,
                     warning: row.get(4)?,
+                    song_count: Some(row.get(5)?),
                 })
             })?
             .collect::<Result<_, _>>()?)
+    }
+
+    pub fn active_track_count(&self) -> Result<u64, StoreError> {
+        Ok(self.connection.lock().query_row(
+            "SELECT COUNT(*) FROM tracks WHERE tombstoned_at IS NULL AND purged_at IS NULL",
+            [],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn record_playback_activity(
@@ -1113,35 +1336,10 @@ impl HubStore {
                 payload,
             ],
         )?;
-        if snapshot.state == PlaybackActivityState::Stopped {
-            let listened_seconds = snapshot.position_seconds.max(0.0);
-            let event_payload = serde_json::json!({
-                "track_id": track_id,
-                "started_at": snapshot.started_at.timestamp_millis() as f64 / 1_000.0,
-                "ended_at": snapshot.observed_at.timestamp_millis() as f64 / 1_000.0,
-                "listened_seconds": listened_seconds,
-                "completed": snapshot.completed,
-            });
-            transaction.execute(
-                r#"
-                INSERT INTO listening_events
-                    (event_id, track_id, device_id, payload, started_at,
-                     ended_at, listened_seconds, completed)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                ON CONFLICT(event_id) DO NOTHING
-                "#,
-                params![
-                    snapshot.session_id.to_string(),
-                    track_id.to_string(),
-                    device_id.to_string(),
-                    event_payload.to_string(),
-                    snapshot.started_at.timestamp_millis() as f64 / 1_000.0,
-                    snapshot.observed_at.timestamp_millis() as f64 / 1_000.0,
-                    listened_seconds,
-                    snapshot.completed,
-                ],
-            )?;
-        }
+        // Activity snapshots power live "now playing" telemetry only. Canonical
+        // listening history arrives through the client's durable
+        // `listening_session` operation after playback ends; deriving another event
+        // here would double-count every online play and lose offline sessions.
         transaction.commit()?;
         Ok(true)
     }
@@ -1162,8 +1360,9 @@ impl HubStore {
         {
             let mut audio_feature_rows =
                 connection.prepare("SELECT content_hash, payload FROM audio_features")?;
-            let rows = audio_feature_rows
-                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+            let rows = audio_feature_rows.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
             for row in rows {
                 let (hash, payload) = row?;
                 audio_features_by_hash.insert(hash, payload);
@@ -1278,10 +1477,16 @@ impl HubStore {
                     summary.current_month_play_count += 1;
                 }
                 let year = played_at.year();
-                summary.first_played_year =
-                    Some(summary.first_played_year.map_or(year, |existing| existing.min(year)));
-                summary.last_played_year =
-                    Some(summary.last_played_year.map_or(year, |existing| existing.max(year)));
+                summary.first_played_year = Some(
+                    summary
+                        .first_played_year
+                        .map_or(year, |existing| existing.min(year)),
+                );
+                summary.last_played_year = Some(
+                    summary
+                        .last_played_year
+                        .map_or(year, |existing| existing.max(year)),
+                );
             }
         }
         drop(listening);
@@ -1434,9 +1639,9 @@ impl HubStore {
                     }
                 }
             }
-            let entry = top_tracks.entry(track_id.clone()).or_insert_with(|| {
-                (title.to_owned(), format!("{artist} — {album}"), 0)
-            });
+            let entry = top_tracks
+                .entry(track_id.clone())
+                .or_insert_with(|| (title.to_owned(), format!("{artist} — {album}"), 0));
             entry.2 += 1;
             let entry = top_artists
                 .entry(artist.to_owned())
@@ -1483,7 +1688,10 @@ impl HubStore {
             today - chrono::Days::new(1)
         };
         let mut streak = 0_u64;
-        while seconds_by_day.get(&cursor).is_some_and(|seconds| *seconds > 0.0) {
+        while seconds_by_day
+            .get(&cursor)
+            .is_some_and(|seconds| *seconds > 0.0)
+        {
             streak += 1;
             cursor = cursor - chrono::Days::new(1);
         }
@@ -1506,10 +1714,11 @@ impl HubStore {
             [connected_cutoff],
             |row| row.get(0),
         )?;
-        let source_count: u64 =
-            connection.query_row("SELECT COUNT(*) FROM sources WHERE detached_at IS NULL", [], |r| {
-                r.get(0)
-            })?;
+        let source_count: u64 = connection.query_row(
+            "SELECT COUNT(*) FROM sources WHERE detached_at IS NULL",
+            [],
+            |r| r.get(0),
+        )?;
         let unavailable_sources: u64 = connection.query_row(
             "SELECT COUNT(*) FROM sources
              WHERE detached_at IS NULL AND available = 0",
@@ -1595,6 +1804,51 @@ impl HubStore {
         rows.collect::<Result<_, _>>().map_err(Into::into)
     }
 
+    /// Active reports for the authenticated topology map. These are deliberately
+    /// short-lived: a client that stops heartbeating is no longer presented as
+    /// playing after 15 seconds.
+    pub fn topology_live_activity(&self) -> Result<Vec<TopologyPlaybackActivity>, StoreError> {
+        let connection = self.connection.lock();
+        let cutoff = chrono::Utc::now().timestamp_millis() - 15_000;
+        let mut statement = connection.prepare(
+            r#"
+            SELECT p.device_id, COALESCE(d.name, 'Local Host'),
+                   COALESCE(d.device_type, 'Mac'), p.observed_at, p.payload
+            FROM playback_activity_latest p
+            LEFT JOIN device_credentials d ON d.device_id = p.device_id
+            WHERE p.state IN ('playing', 'buffering') AND p.observed_at >= ?1
+            ORDER BY p.observed_at DESC
+            "#,
+        )?;
+        let rows = statement.query_map([cutoff], |row| {
+            let payload: String = row.get(4)?;
+            let playback =
+                serde_json::from_str::<PlaybackActivitySnapshot>(&payload).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+            Ok(TopologyPlaybackActivity {
+                device_id: Uuid::parse_str(&row.get::<_, String>(0)?).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
+                device_name: row.get(1)?,
+                device_type: row.get(2)?,
+                state: playback.state,
+                observed_at: chrono::DateTime::from_timestamp_millis(row.get(3)?)
+                    .unwrap_or_else(chrono::Utc::now),
+                playback,
+            })
+        })?;
+        rows.collect::<Result<_, _>>().map_err(Into::into)
+    }
+
     pub fn record_http_request(
         &self,
         method: &str,
@@ -1623,8 +1877,8 @@ impl HubStore {
 
     pub fn dashboard_traffic(&self) -> Result<Value, StoreError> {
         let connection = self.connection.lock();
-        let (total, errors, last_day, average_latency): (u64, u64, u64, f64) =
-            connection.query_row(
+        let (total, errors, last_day, average_latency): (u64, u64, u64, f64) = connection
+            .query_row(
                 r#"
                 SELECT COUNT(*),
                        COALESCE(SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END), 0),
@@ -2470,9 +2724,8 @@ impl HubStore {
             }
         }
 
-        let mut attempts_statement = connection.prepare(
-            "SELECT attempts FROM group_reconcile_attempts WHERE folder = ?1",
-        )?;
+        let mut attempts_statement = connection
+            .prepare("SELECT attempts FROM group_reconcile_attempts WHERE folder = ?1")?;
         let mut folders: Vec<(PathBuf, i64)> = counts
             .into_iter()
             .filter(|(_, member_count)| *member_count >= min_group_members)
@@ -2626,11 +2879,7 @@ impl HubStore {
     /// never see this backfill happen no matter how long it keeps polling unless this row
     /// looks "new" again. `identified_at` is never shown to users as a real timestamp (it's
     /// purely this sync cursor), so bumping it here is safe.
-    pub fn set_artwork_url(
-        &self,
-        content_hash: &str,
-        artwork_url: &str,
-    ) -> Result<(), StoreError> {
+    pub fn set_artwork_url(&self, content_hash: &str, artwork_url: &str) -> Result<(), StoreError> {
         self.connection.lock().execute(
             "UPDATE identification_results SET artwork_url = ?1, identified_at = ?2 \
              WHERE content_hash = ?3 AND artwork_url IS NULL",
@@ -2960,9 +3209,23 @@ impl HubStore {
         validate_hash(hash)?;
         let mut connection = self.connection.lock();
         let transaction = connection.transaction()?;
+        let blob_url = format!("/v1/blobs/{hash}");
         let references: u64 = transaction.query_row(
-            "SELECT COUNT(*) FROM tracks WHERE content_hash = ?1 AND purged_at IS NULL",
-            [hash],
+            r#"
+            SELECT
+                (SELECT COUNT(*) FROM tracks
+                 WHERE content_hash = ?1 AND purged_at IS NULL)
+              + (SELECT COUNT(*) FROM tracks
+                 WHERE purged_at IS NULL AND (
+                    json_extract(metadata, '$.artwork_hash') = ?1
+                    OR json_extract(metadata, '$.artwork_url') = ?2
+                    OR (json_extract(metadata, '$.manual_artwork_set') = 1
+                        AND json_extract(metadata, '$.manual_artwork_hash') = ?1)
+                 ))
+              + (SELECT COUNT(*) FROM identification_results
+                 WHERE artwork_url = ?2)
+            "#,
+            params![hash, blob_url],
             |row| row.get(0),
         )?;
         if references > 0 {
@@ -3247,7 +3510,10 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
         "ALTER TABLE identification_cache ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 0",
         [],
     );
-    let _ = connection.execute("ALTER TABLE listening_events ADD COLUMN started_at REAL", []);
+    let _ = connection.execute(
+        "ALTER TABLE listening_events ADD COLUMN started_at REAL",
+        [],
+    );
     let _ = connection.execute("ALTER TABLE listening_events ADD COLUMN ended_at REAL", []);
     let _ = connection.execute(
         "ALTER TABLE listening_events ADD COLUMN listened_seconds REAL NOT NULL DEFAULT 0",
@@ -3655,6 +3921,83 @@ mod tests {
     }
 
     #[test]
+    fn catalog_page_reads_lightweight_track_metadata_without_blobs() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let track_id = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+        let timestamp = aro_sync_protocol::HybridTimestamp {
+            physical_millis: 1,
+            logical: 0,
+            device_id,
+        };
+        let mut field_versions = BTreeMap::new();
+        for field in [
+            "content_hash",
+            "title",
+            "artist",
+            "album",
+            "track_number",
+            "codec",
+            "sample_rate",
+            "bit_depth",
+            "channel_count",
+            "bitrate",
+            "artwork_url",
+        ] {
+            field_versions.insert(field.to_owned(), timestamp.clone());
+        }
+        store
+            .append_operations(&[Operation {
+                operation_id: Uuid::new_v4(),
+                device_id,
+                entity_type: "track".into(),
+                entity_id: track_id.to_string(),
+                kind: "upsert".into(),
+                payload: serde_json::json!({
+                    "content_hash": "a".repeat(64),
+                    "title": "Test Song",
+                    "artist": "Test Artist",
+                    "album": "Test Album",
+                    "track_number": 1,
+                    "codec": "flac",
+                    "sample_rate": 96_000,
+                    "bit_depth": 24,
+                    "channel_count": 2,
+                    "bitrate": 2_304_000.0,
+                    "artwork_url": format!("/v1/blobs/{}", "b".repeat(64)),
+                }),
+                field_versions,
+            }])
+            .unwrap();
+        store
+            .put_loudness_analysis(&"a".repeat(64), 2, -14.25, 0.91, device_id)
+            .unwrap();
+
+        let page = store
+            .catalog_page(0, 10, Some("test song"), Some("artist"))
+            .unwrap();
+        assert_eq!(page.tracks.len(), 1);
+        assert_eq!(page.tracks[0].track_id, track_id);
+        assert_eq!(page.tracks[0].title, "Test Song");
+        assert_eq!(page.tracks[0].codec.as_deref(), Some("flac"));
+        assert_eq!(page.tracks[0].sample_rate, Some(96_000.0));
+        assert_eq!(page.tracks[0].bit_depth, Some(24));
+        assert_eq!(page.tracks[0].channel_count, Some(2));
+        assert_eq!(page.tracks[0].bitrate, Some(2_304_000.0));
+        assert_eq!(
+            page.tracks[0].artwork_hash.as_deref(),
+            Some("b".repeat(64).as_str())
+        );
+        assert_eq!(page.tracks[0].integrated_lufs, Some(-14.25));
+        assert_eq!(page.tracks[0].peak_amplitude, Some(0.91));
+        assert_eq!(page.tracks[0].loudness_algorithm_version, Some(2));
+        assert!(page.tracks[0].loudness_analyzed_at.is_some());
+        assert!(!page.tracks[0].available);
+        assert!(page.tracks[0].byte_count.is_none());
+    }
+
+    #[test]
     fn interrupted_upload_resumes_and_corruption_never_publishes() {
         let directory = tempfile::tempdir().unwrap();
         let store = HubStore::open(directory.path()).unwrap();
@@ -3682,16 +4025,27 @@ mod tests {
 
         assert!(store.release_cache_get("rel-1").unwrap().is_none());
         store
-            .release_cache_put("rel-1", &serde_json::json!({"id": "rel-1", "title": "1"}), 2)
+            .release_cache_put(
+                "rel-1",
+                &serde_json::json!({"id": "rel-1", "title": "1"}),
+                2,
+            )
             .unwrap();
 
         let entry = store.release_cache_get("rel-1").unwrap().unwrap();
-        assert_eq!(entry.response, serde_json::json!({"id": "rel-1", "title": "1"}));
+        assert_eq!(
+            entry.response,
+            serde_json::json!({"id": "rel-1", "title": "1"})
+        );
         assert_eq!(entry.schema_version, 2);
 
         // Upsert overwrites in place, same as identification_cache_put.
         store
-            .release_cache_put("rel-1", &serde_json::json!({"id": "rel-1", "title": "1 (2015)"}), 3)
+            .release_cache_put(
+                "rel-1",
+                &serde_json::json!({"id": "rel-1", "title": "1 (2015)"}),
+                3,
+            )
             .unwrap();
         let updated = store.release_cache_get("rel-1").unwrap().unwrap();
         assert_eq!(updated.schema_version, 3);
@@ -3713,18 +4067,46 @@ mod tests {
 
         // Two files in the target folder...
         store
-            .upsert_source_file(source_id, "Beatles/1/01 Love Me Do.m4a", Uuid::new_v4(), "hash-1", 100, 0)
+            .upsert_source_file(
+                source_id,
+                "Beatles/1/01 Love Me Do.m4a",
+                Uuid::new_v4(),
+                "hash-1",
+                100,
+                0,
+            )
             .unwrap();
         store
-            .upsert_source_file(source_id, "Beatles/1/02 From Me To You.m4a", Uuid::new_v4(), "hash-2", 100, 0)
+            .upsert_source_file(
+                source_id,
+                "Beatles/1/02 From Me To You.m4a",
+                Uuid::new_v4(),
+                "hash-2",
+                100,
+                0,
+            )
             .unwrap();
         // ...one in a different folder...
         store
-            .upsert_source_file(source_id, "Editors/The Back Room/01 Bones.m4a", Uuid::new_v4(), "hash-3", 100, 0)
+            .upsert_source_file(
+                source_id,
+                "Editors/The Back Room/01 Bones.m4a",
+                Uuid::new_v4(),
+                "hash-3",
+                100,
+                0,
+            )
             .unwrap();
         // ...and one unavailable file in the target folder, which must be excluded.
         store
-            .upsert_source_file(source_id, "Beatles/1/03 She Loves You.m4a", Uuid::new_v4(), "hash-4", 100, 0)
+            .upsert_source_file(
+                source_id,
+                "Beatles/1/03 She Loves You.m4a",
+                Uuid::new_v4(),
+                "hash-4",
+                100,
+                0,
+            )
             .unwrap();
         store
             .connection
@@ -3739,7 +4121,10 @@ mod tests {
             .folder_members(&source_root.join("Beatles").join("1"))
             .unwrap();
 
-        let mut hashes: Vec<_> = members.iter().map(|member| member.content_hash.clone()).collect();
+        let mut hashes: Vec<_> = members
+            .iter()
+            .map(|member| member.content_hash.clone())
+            .collect();
         hashes.sort();
         assert_eq!(hashes, vec!["hash-1".to_string(), "hash-2".to_string()]);
     }
@@ -3863,14 +4248,24 @@ mod tests {
 
         store.set_artwork_url("hash-1", "/v1/blobs/first").unwrap();
         assert_eq!(
-            store.identification_result("hash-1").unwrap().unwrap().artwork_url.as_deref(),
+            store
+                .identification_result("hash-1")
+                .unwrap()
+                .unwrap()
+                .artwork_url
+                .as_deref(),
             Some("/v1/blobs/first")
         );
 
         // A concurrent normal write already having set it wins -- backfill never stomps it.
         store.set_artwork_url("hash-1", "/v1/blobs/second").unwrap();
         assert_eq!(
-            store.identification_result("hash-1").unwrap().unwrap().artwork_url.as_deref(),
+            store
+                .identification_result("hash-1")
+                .unwrap()
+                .unwrap()
+                .artwork_url
+                .as_deref(),
             Some("/v1/blobs/first")
         );
     }
@@ -3997,7 +4392,14 @@ mod tests {
 
         for folder in ["A", "B", "C", "D"] {
             store
-                .upsert_source_file(source_id, &format!("{folder}/a.m4a"), Uuid::new_v4(), folder, 100, 0)
+                .upsert_source_file(
+                    source_id,
+                    &format!("{folder}/a.m4a"),
+                    Uuid::new_v4(),
+                    folder,
+                    100,
+                    0,
+                )
                 .unwrap();
             store
                 .put_identification_result(&IdentificationResult {
@@ -4040,7 +4442,14 @@ mod tests {
             .register_host_source(source_id, "Library", "managed", &source_root)
             .unwrap();
         store
-            .upsert_source_file(source_id, "Neck Deep/a.m4a", Uuid::new_v4(), "hash-1", 100, 0)
+            .upsert_source_file(
+                source_id,
+                "Neck Deep/a.m4a",
+                Uuid::new_v4(),
+                "hash-1",
+                100,
+                0,
+            )
             .unwrap();
         store
             .put_identification_result(&IdentificationResult {
@@ -4076,15 +4485,26 @@ mod tests {
 
         assert!(store.recording_cache_get("rec-1").unwrap().is_none());
         store
-            .recording_cache_put("rec-1", &serde_json::json!({"id": "rec-1", "title": "Hey Jude"}), 2)
+            .recording_cache_put(
+                "rec-1",
+                &serde_json::json!({"id": "rec-1", "title": "Hey Jude"}),
+                2,
+            )
             .unwrap();
 
         let entry = store.recording_cache_get("rec-1").unwrap().unwrap();
-        assert_eq!(entry.response, serde_json::json!({"id": "rec-1", "title": "Hey Jude"}));
+        assert_eq!(
+            entry.response,
+            serde_json::json!({"id": "rec-1", "title": "Hey Jude"})
+        );
         assert_eq!(entry.schema_version, 2);
 
         store
-            .recording_cache_put("rec-1", &serde_json::json!({"id": "rec-1", "title": "Hey Jude!"}), 3)
+            .recording_cache_put(
+                "rec-1",
+                &serde_json::json!({"id": "rec-1", "title": "Hey Jude!"}),
+                3,
+            )
             .unwrap();
         let updated = store.recording_cache_get("rec-1").unwrap().unwrap();
         assert_eq!(updated.schema_version, 3);
@@ -4154,9 +4574,27 @@ mod tests {
 
         // "MostlyAccepted": 3 members, 2 group-sourced and 1 genuine per-file outlier (a
         // bonus track) -- not a rejected group, must not be selected.
-        seed_folder_result(&store, source_id, "MostlyAccepted/a.m4a", "m1", Some("group"));
-        seed_folder_result(&store, source_id, "MostlyAccepted/b.m4a", "m2", Some("group"));
-        seed_folder_result(&store, source_id, "MostlyAccepted/c.m4a", "m3", Some("per_file"));
+        seed_folder_result(
+            &store,
+            source_id,
+            "MostlyAccepted/a.m4a",
+            "m1",
+            Some("group"),
+        );
+        seed_folder_result(
+            &store,
+            source_id,
+            "MostlyAccepted/b.m4a",
+            "m2",
+            Some("group"),
+        );
+        seed_folder_result(
+            &store,
+            source_id,
+            "MostlyAccepted/c.m4a",
+            "m3",
+            Some("per_file"),
+        );
 
         // "TooSmall": below the group-matching minimum, never eligible in the first place.
         seed_folder_result(&store, source_id, "TooSmall/a.m4a", "t1", Some("per_file"));
@@ -4183,14 +4621,23 @@ mod tests {
             vec![source_root.join("Rejected")]
         );
 
-        store.record_group_reconcile_attempt(&source_root.join("Rejected")).unwrap();
+        store
+            .record_group_reconcile_attempt(&source_root.join("Rejected"))
+            .unwrap();
         assert_eq!(
             store.folders_needing_group_retry(2, 2, 10).unwrap(),
             vec![source_root.join("Rejected")]
         );
 
-        store.record_group_reconcile_attempt(&source_root.join("Rejected")).unwrap();
-        assert!(store.folders_needing_group_retry(2, 2, 10).unwrap().is_empty());
+        store
+            .record_group_reconcile_attempt(&source_root.join("Rejected"))
+            .unwrap();
+        assert!(
+            store
+                .folders_needing_group_retry(2, 2, 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -4220,13 +4667,21 @@ mod tests {
         // A lower/equal generation must never move the marker backwards.
         store.touch_identification_generation("hash-1", 2).unwrap();
         assert_eq!(
-            store.identification_result("hash-1").unwrap().unwrap().resolution_generation,
+            store
+                .identification_result("hash-1")
+                .unwrap()
+                .unwrap()
+                .resolution_generation,
             5
         );
 
         store.touch_identification_generation("hash-1", 7).unwrap();
         assert_eq!(
-            store.identification_result("hash-1").unwrap().unwrap().resolution_generation,
+            store
+                .identification_result("hash-1")
+                .unwrap()
+                .unwrap()
+                .resolution_generation,
             7
         );
     }
@@ -4493,6 +4948,148 @@ mod tests {
                 .unwrap();
         }
         assert!(!store.snapshot_tracks(0, 10).unwrap()[0].tombstoned);
+    }
+
+    #[test]
+    fn manual_metadata_remains_golden_until_explicit_reset() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let track_id = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+        let version = |millis| aro_sync_protocol::HybridTimestamp {
+            physical_millis: millis,
+            logical: 0,
+            device_id,
+        };
+        let operation = |payload: Value, fields: &[&str], millis| Operation {
+            operation_id: Uuid::new_v4(),
+            device_id,
+            entity_type: if millis == 1 { "track" } else { "track_state" }.into(),
+            entity_id: track_id.to_string(),
+            kind: "upsert".into(),
+            payload,
+            field_versions: fields
+                .iter()
+                .map(|field| ((*field).to_owned(), version(millis)))
+                .collect(),
+        };
+        store
+            .append_operations(&[operation(
+                serde_json::json!({
+                    "content_hash": "b".repeat(64),
+                    "title": "Scanned",
+                    "artist": "Scanned Artist"
+                }),
+                &["content_hash", "title", "artist"],
+                1,
+            )])
+            .unwrap();
+        store
+            .append_operations(&[operation(
+                serde_json::json!({
+                    "manual_title": "Chosen",
+                    "manual_title_set": true
+                }),
+                &["manual_title", "manual_title_set"],
+                2,
+            )])
+            .unwrap();
+        store
+            .append_operations(&[operation(
+                serde_json::json!({"title": "Later Identification"}),
+                &["title"],
+                3,
+            )])
+            .unwrap();
+        assert_eq!(
+            store.catalog_page(0, 10, None, None).unwrap().tracks[0].title,
+            "Chosen"
+        );
+
+        store
+            .append_operations(&[operation(
+                serde_json::json!({"manual_title_set": false}),
+                &["manual_title_set"],
+                4,
+            )])
+            .unwrap();
+        assert_eq!(
+            store.catalog_page(0, 10, None, None).unwrap().tracks[0].title,
+            "Later Identification"
+        );
+    }
+
+    #[test]
+    fn manual_artwork_is_imported_and_replicated_by_hash() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let track_id = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+        let timestamp = HybridTimestamp {
+            physical_millis: 1,
+            logical: 0,
+            device_id,
+        };
+        store
+            .append_operations(&[Operation {
+                operation_id: Uuid::new_v4(),
+                device_id,
+                entity_type: "track".into(),
+                entity_id: track_id.to_string(),
+                kind: "upsert".into(),
+                payload: serde_json::json!({
+                    "content_hash": "c".repeat(64),
+                    "title": "Track"
+                }),
+                field_versions: BTreeMap::from([
+                    ("content_hash".into(), timestamp.clone()),
+                    ("title".into(), timestamp.clone()),
+                ]),
+            }])
+            .unwrap();
+
+        let artwork = b"manual cover bytes";
+        let expected_hash = hex::encode(Sha256::digest(artwork));
+        let accepted = store
+            .append_operations(&[Operation {
+                operation_id: Uuid::new_v4(),
+                device_id,
+                entity_type: "track_state".into(),
+                entity_id: track_id.to_string(),
+                kind: "set_metadata".into(),
+                payload: serde_json::json!({
+                    "manual_artwork_set": true,
+                    "manual_artwork_base64": BASE64.encode(artwork)
+                }),
+                field_versions: BTreeMap::from([
+                    ("manual_artwork_set".into(), timestamp.clone()),
+                    ("manual_artwork_base64".into(), timestamp),
+                ]),
+            }])
+            .unwrap();
+
+        assert_eq!(
+            store.catalog_page(0, 10, None, None).unwrap().tracks[0]
+                .artwork_hash
+                .as_deref(),
+            Some(expected_hash.as_str())
+        );
+        assert_eq!(
+            fs::read(
+                store
+                    .blob_path_for_download(&expected_hash)
+                    .unwrap()
+                    .unwrap()
+            )
+            .unwrap(),
+            artwork
+        );
+        let payload = accepted[0].operation.payload.as_object().unwrap();
+        assert!(!payload.contains_key("manual_artwork_base64"));
+        assert_eq!(
+            payload.get("manual_artwork_hash").and_then(Value::as_str),
+            Some(expected_hash.as_str())
+        );
     }
 
     #[test]
@@ -4806,7 +5403,7 @@ mod tests {
     }
 
     #[test]
-    fn playback_activity_is_revisioned_and_feeds_existing_listening_stats() {
+    fn playback_activity_is_revisioned_without_fabricating_listening_history() {
         let directory = tempfile::tempdir().unwrap();
         let store = HubStore::open(directory.path()).unwrap();
         let track_id = Uuid::new_v4();
@@ -4879,7 +5476,7 @@ mod tests {
                 .unwrap()
         );
         let stats = store.dashboard_stats().unwrap();
-        assert_eq!(stats["listening"]["logged_plays"], 1);
+        assert_eq!(stats["listening"]["logged_plays"], 0);
         assert_eq!(stats["library"]["track_count"], 1);
         assert_eq!(stats["library"]["formats"][0]["name"], "FLAC");
         assert!(store.dashboard_live_activity().unwrap().is_empty());

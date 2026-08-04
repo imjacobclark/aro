@@ -240,11 +240,10 @@ struct MetadataView: View {
 
     private var syncBridge: IdentificationSyncBridge {
         IdentificationSyncBridge(
-            dataLocation: preferences.dataLocation,
-            localServers: localServers.servers,
-            remoteProfile: profileRegistry.activeProfile,
+            profile: profileRegistry.activeProfile,
             syncStore: syncStore,
-            libraryDeviceID: libraryDeviceID
+            libraryDeviceID: libraryDeviceID,
+            localAdminToken: preferences.localAdminToken
         )
     }
 

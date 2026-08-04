@@ -3,6 +3,7 @@ import AroCommon
 
 /// Result of one `synchronize()` pass, for surfacing progress/diagnostics.
 struct LocalHubSyncResult: Sendable {
+    let uploadedOperations: Int
     let appliedOperations: Int
     let cursor: UInt64
 }
@@ -19,10 +20,10 @@ struct LocalHubSyncResult: Sendable {
 /// has the bytes (this app never uploads anything to itself), and there is no
 /// pairing to authenticate. So this coordinator only does the one thing that's
 /// actually meaningful locally: pull the hub's operation log and apply it,
-/// pull-only, no push -- scan-derived library data (title, artist, loudness,
-/// identification) is server-authored, and personal per-device state
-/// (favourites, play counts, listening history) never needs to leave this Mac
-/// in the first place, so there is nothing this coordinator ever needs to push.
+/// Scan-derived library data remains pull-only and server-authored. Device-authored
+/// intent (favourites, listening sessions, and manual metadata), however, is pushed
+/// from the same durable outbox used for remote hubs so offline changes eventually
+/// reach the canonical server and its generated playlists.
 actor LocalHubReplicaCoordinator {
     private let hubID: UUID
     private let client: HubControlClient
@@ -43,6 +44,35 @@ actor LocalHubReplicaCoordinator {
         operations.ensureLocalHubMembership(
             hubID: hubID,
             displayName: status.displayName
+        )
+        let pending = operations.pending(limit: 200)
+        let outgoing = try pending.compactMap { pending -> SyncOperation? in
+            if pending.entityType == "track_state" {
+                let hubTrackID = operations.hubTrackID(
+                    localTrackID: pending.entityID,
+                    hubID: hubID
+                ) ?? pending.entityID
+                return try pending.wireOperation(entityID: hubTrackID)
+            }
+            if pending.entityType == "listening_session" {
+                let original = try pending.wireOperation()
+                guard case .object(var payload) = original.payload,
+                      case .string(let localTrackID)? = payload["track_id"] else {
+                    return nil
+                }
+                let hubTrackID = operations.hubTrackID(
+                    localTrackID: localTrackID,
+                    hubID: hubID
+                ) ?? localTrackID
+                payload["track_id"] = .string(hubTrackID)
+                return try pending.wireOperation(payload: .object(payload))
+            }
+            return try pending.wireOperation()
+        }
+        let accepted = try await client.pushOperations(outgoing)
+        let acceptedSet = Set(accepted)
+        operations.markSent(
+            pending.filter { acceptedSet.contains($0.id) }.map(\.id)
         )
         var cursor = operations.localHubServerCursor(hubID: hubID)
         var applied = 0
@@ -66,7 +96,11 @@ actor LocalHubReplicaCoordinator {
             }
         }
 
-        return LocalHubSyncResult(appliedOperations: applied, cursor: cursor)
+        return LocalHubSyncResult(
+            uploadedOperations: accepted.count,
+            appliedOperations: applied,
+            cursor: cursor
+        )
     }
 
     /// Resolves a `track` operation's content hash to its on-disk path via the

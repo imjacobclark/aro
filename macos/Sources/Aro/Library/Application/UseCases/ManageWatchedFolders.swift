@@ -60,4 +60,32 @@ struct ManageWatchedFolders: Sendable {
     func storeArtwork(trackID: String, data: Data) {
         catalog.storeArtwork(trackID: trackID, data: data)
     }
+
+    func metadataSnapshot(song: Song, librarySongs: [Song]) -> TrackMetadataSnapshot {
+        catalog.metadataSnapshot(song: song, librarySongs: librarySongs)
+    }
+
+    func applyManualMetadata(_ edits: [ManualMetadataEdit], trackIDs: [UUID]) {
+        catalog.applyManualMetadata(edits, trackIDs: trackIDs)
+    }
+
+    func applyManualArtwork(_ edit: ManualArtworkEdit, trackIDs: [UUID]) {
+        catalog.applyManualArtwork(edit, trackIDs: trackIDs)
+    }
+
+    func resetManualMetadata(trackIDs: [UUID]) {
+        catalog.resetManualMetadata(trackIDs: trackIDs)
+    }
+
+    func queueManualMetadata(
+        _ edits: [ManualMetadataEdit],
+        trackIDs: [UUID],
+        reset: Bool
+    ) {
+        catalog.queueManualMetadata(edits, trackIDs: trackIDs, reset: reset)
+    }
+
+    func queueManualArtwork(_ edit: ManualArtworkEdit, trackIDs: [UUID]) {
+        catalog.queueManualArtwork(edit, trackIDs: trackIDs)
+    }
 }

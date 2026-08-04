@@ -102,7 +102,7 @@ public enum ArtistLibrary {
         var albums: [ArtistAlbum] = []
 
         for (albumKey, albumSongs) in songsByAlbum {
-            let sortedSongs = SongLibrary.sorted(albumSongs)
+            let sortedSongs = SongLibrary.albumSorted(albumSongs)
             let albumName = preferredName(
                 albumSongs.map { displayAlbum(for: $0) },
                 fallback: unknownAlbum

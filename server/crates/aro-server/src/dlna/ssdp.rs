@@ -298,11 +298,7 @@ mod tests {
     use super::*;
 
     fn advertiser() -> Advertiser {
-        Advertiser::new(
-            Uuid::nil(),
-            "0.0.0.0:4850".parse().unwrap(),
-            4850,
-        )
+        Advertiser::new(Uuid::nil(), "0.0.0.0:4850".parse().unwrap(), 4850)
     }
 
     #[test]
@@ -326,9 +322,7 @@ mod tests {
         assert_eq!(targets.len(), 5);
         assert_eq!(targets[0], format!("uuid:{}", Uuid::nil()));
         assert!(targets.contains(&"upnp:rootdevice".to_string()));
-        assert!(
-            targets.contains(&"urn:schemas-upnp-org:service:ContentDirectory:1".to_string())
-        );
+        assert!(targets.contains(&"urn:schemas-upnp-org:service:ContentDirectory:1".to_string()));
     }
 
     #[test]
@@ -370,11 +364,7 @@ mod tests {
 
     #[test]
     fn fixed_bind_ip_wins_interface_selection() {
-        let advertiser = Advertiser::new(
-            Uuid::nil(),
-            "192.168.7.7:4850".parse().unwrap(),
-            4850,
-        );
+        let advertiser = Advertiser::new(Uuid::nil(), "192.168.7.7:4850".parse().unwrap(), 4850);
         assert_eq!(
             advertiser.advertised_ip(Some(Ipv4Addr::new(10, 0, 0, 9))),
             Some(Ipv4Addr::new(192, 168, 7, 7))

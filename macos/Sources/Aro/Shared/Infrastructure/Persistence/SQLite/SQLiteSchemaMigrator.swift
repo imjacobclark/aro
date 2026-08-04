@@ -45,6 +45,8 @@ struct SQLiteSchemaMigrator {
                 album TEXT,
                 genre TEXT,
                 release_year INTEGER,
+                track_number INTEGER,
+                disc_number INTEGER,
                 artwork BLOB,
                 scanned_at REAL NOT NULL
             );
@@ -107,6 +109,8 @@ struct SQLiteSchemaMigrator {
         try? execute(
             "ALTER TABLE scan_metadata ADD COLUMN release_year INTEGER"
         )
+        try? execute("ALTER TABLE scan_metadata ADD COLUMN track_number INTEGER")
+        try? execute("ALTER TABLE scan_metadata ADD COLUMN disc_number INTEGER")
         try? execute("ALTER TABLE scan_metadata ADD COLUMN artwork BLOB")
         // Set by the CRDT sync path (`SQLiteSyncOperationStore.applyTrack`) when a
         // remote track carries a Cover Art Archive URL but not the image bytes
@@ -130,6 +134,58 @@ struct SQLiteSchemaMigrator {
         // survives-rescan rationale as the two columns above.
         try? execute("ALTER TABLE track_state ADD COLUMN mb_genres_json TEXT")
         try? execute("ALTER TABLE track_state ADD COLUMN mood_tags_json TEXT")
+        // Artwork has the same three-layer ownership as text metadata: the
+        // embedded file image, online identification, and a nullable manual
+        // golden master. Keeping separate blobs prevents identification from
+        // destroying the original cover and lets Reset reveal it again.
+        try? execute("ALTER TABLE track_state ADD COLUMN identified_artwork BLOB")
+        try? execute("ALTER TABLE track_state ADD COLUMN identified_artwork_url TEXT")
+        try? execute("ALTER TABLE track_state ADD COLUMN manual_artwork BLOB")
+        try? execute("ALTER TABLE track_state ADD COLUMN manual_artwork_url TEXT")
+        try? execute(
+            "ALTER TABLE track_state ADD COLUMN manual_artwork_set INTEGER NOT NULL DEFAULT 0"
+        )
+        // Older builds downloaded online covers into scan_metadata. The URL is
+        // an unambiguous provenance marker, so lift those bytes into the new
+        // identified layer without touching genuinely embedded artwork.
+        try? execute(
+            """
+            UPDATE track_state
+            SET identified_artwork = COALESCE(
+                    identified_artwork,
+                    (SELECT artwork FROM scan_metadata sm WHERE sm.track_id = track_state.track_id)
+                ),
+                identified_artwork_url = COALESCE(
+                    identified_artwork_url,
+                    (SELECT artwork_url FROM scan_metadata sm WHERE sm.track_id = track_state.track_id)
+                )
+            WHERE EXISTS (
+                SELECT 1 FROM scan_metadata sm
+                WHERE sm.track_id = track_state.track_id AND sm.artwork_url IS NOT NULL
+            )
+            """
+        )
+        try? execute(
+            "UPDATE scan_metadata SET artwork = NULL, artwork_url = NULL WHERE artwork_url IS NOT NULL"
+        )
+
+        // Manual metadata is a separate, sparse layer over scanner and online
+        // identification data. A row's presence marks the value as a user-owned
+        // golden master; `value` may itself be NULL to deliberately clear an
+        // optional property. Nothing in the scan/identification paths writes here.
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS manual_metadata_overrides (
+                track_id TEXT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+                field TEXT NOT NULL,
+                value TEXT,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(track_id, field)
+            );
+            CREATE INDEX IF NOT EXISTS manual_metadata_overrides_track
+                ON manual_metadata_overrides(track_id);
+            """
+        )
 
         try execute(
             """
@@ -243,6 +299,14 @@ struct SQLiteSchemaMigrator {
             );
             CREATE INDEX IF NOT EXISTS blob_cache_lru
                 ON blob_availability(pinned, last_accessed_at);
+            -- Last-known server-authored read models. These are durable library
+            -- data needed for offline browsing, not preferences, so they belong
+            -- beside the replica/cache rather than in UserDefaults.
+            CREATE TABLE IF NOT EXISTS server_snapshots (
+                cache_key TEXT PRIMARY KEY,
+                payload BLOB NOT NULL,
+                updated_at REAL NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS sync_jobs (
                 job_id TEXT PRIMARY KEY,
                 hub_id TEXT NOT NULL,

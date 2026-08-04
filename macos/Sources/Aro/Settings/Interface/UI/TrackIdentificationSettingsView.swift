@@ -2,8 +2,8 @@ import AroCommon
 import SwiftUI
 
 /// Settings for the background track-identification pipeline: the personal AcoustID
-/// API key it authenticates with, and whether identified metadata gets written back
-/// into original audio files.
+/// API key it authenticates with. Identified and manual metadata always remains in
+/// Aro's library database; source audio files are immutable inputs.
 struct TrackIdentificationSettingsView: View {
     @Bindable var preferences: SyncPreferences
     /// AcoustID configuration lives on whichever machine runs the hub. For a
@@ -17,8 +17,6 @@ struct TrackIdentificationSettingsView: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var localServers = LocalAroServerMonitor()
-    @State private var persistMetadataToFiles = false
-    @State private var statusMessage: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -67,27 +65,18 @@ struct TrackIdentificationSettingsView: View {
                     }
 
                     Section {
-                        Toggle(
-                            "Write Identified Metadata to Original Files",
-                            isOn: $persistMetadataToFiles
+                        Label(
+                            "Original Files Are Never Modified",
+                            systemImage: "lock.doc"
                         )
-                        .disabled(preferences.acoustidApiKey.isEmpty)
-                        .onChange(of: persistMetadataToFiles) { _, newValue in
-                            Task { await updatePersistSetting(newValue) }
-                        }
                         Text(
-                            "Aro always keeps identified metadata in its library. Enable "
-                                + "this only if the original audio files should also change."
+                            "Identified and manually corrected metadata is stored in Aro's "
+                                + "library and used for browsing, sync, and export. Referenced "
+                                + "and managed source audio is never retagged."
                         )
                         .font(AroFont.footnote)
                         .foregroundStyle(.secondary)
                     }
-                }
-
-                if let statusMessage {
-                    Text(statusMessage)
-                        .font(AroFont.footnote)
-                        .foregroundStyle(.secondary)
                 }
 
                 if !isRemoteProfile, let localServersError = localServers.errorMessage {
@@ -108,43 +97,6 @@ struct TrackIdentificationSettingsView: View {
         .task {
             guard !isRemoteProfile else { return }
             localServers.refresh()
-            await loadPersistSetting()
-        }
-    }
-
-    private var controlClient: HubControlClient? {
-        let dataLocation = LibrarySettingsView.controlDataLocation(
-            preferred: preferences.dataLocation,
-            servers: localServers.servers
-        )
-        guard let dataLocation, !dataLocation.isEmpty else { return nil }
-        return HubControlClient(
-            socketURL: URL(fileURLWithPath: dataLocation)
-                .appendingPathComponent("control.sock")
-        )
-    }
-
-    private func loadPersistSetting() async {
-        guard let controlClient else { return }
-        do {
-            persistMetadataToFiles = try await controlClient.boolSetting(
-                key: "persist_metadata_to_files"
-            ) ?? false
-        } catch {
-            statusMessage = error.localizedDescription
-        }
-    }
-
-    private func updatePersistSetting(_ value: Bool) async {
-        guard let controlClient else {
-            statusMessage = "Aro cannot reach the Background Service to save this setting."
-            return
-        }
-        do {
-            try await controlClient.setSetting(key: "persist_metadata_to_files", value: value)
-            statusMessage = nil
-        } catch {
-            statusMessage = error.localizedDescription
         }
     }
 

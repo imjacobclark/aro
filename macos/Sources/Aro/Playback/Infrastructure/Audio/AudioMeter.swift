@@ -35,10 +35,10 @@ final class AudioMeterRelay: @unchecked Sendable {
         lock.unlock()
 
         // Audio render callbacks can arrive much faster than SwiftUI can draw.
-        // Keep only the newest sample and cap UI delivery at roughly 30 Hz so
+        // Keep only the newest sample and cap UI delivery at roughly 20 Hz so
         // the main executor never accumulates an unbounded render backlog.
         Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(33))
+            try? await Task.sleep(for: .milliseconds(50))
             self?.deliverLatest()
         }
     }

@@ -153,6 +153,27 @@ final class DevicesRedesignTests: XCTestCase {
         XCTAssertEqual(registry.activeProfileID, local.id)
     }
 
+    func testRemovingFinalProfileReturnsRegistryToFirstRunSetup() {
+        let suite = "DevicesRedesignTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let registry = LibraryProfileRegistry(defaults: defaults)
+        let remote = registry.createRemote(
+            name: "Mercury",
+            hubID: UUID(),
+            baseURL: URL(string: "https://aro-mercury.local:4848")!,
+            policy: .stream
+        )
+        registry.dismissSetup()
+
+        registry.remove(remote.id)
+
+        XCTAssertTrue(registry.profiles.isEmpty)
+        XCTAssertNil(registry.activeProfileID)
+        XCTAssertFalse(registry.setupDismissed)
+        XCTAssertFalse(registry.isConfigured)
+    }
+
     func testRepairingRemoteConnectionReusesReplicaProfile() {
         let suite = "DevicesRedesignTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!

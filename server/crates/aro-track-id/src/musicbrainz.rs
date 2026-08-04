@@ -172,6 +172,12 @@ pub struct ReleaseResponse {
     pub media: Vec<Medium>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ReleaseSearchResponse {
+    #[serde(default)]
+    releases: Vec<Release>,
+}
+
 /// Release-group affinity for one artist, collapsed into *title equivalence classes*
 /// rather than kept purely per-MBID. Real MusicBrainz data routinely links the "same"
 /// album (by title, to a listener) to several distinct release-group ids — different
@@ -352,8 +358,7 @@ pub fn select_release<'a>(
             let is_album = group.map(classify) == Some(ReleaseGroupKind::Album);
             let group_id = group.and_then(|group| group.id.as_deref());
             let affinity_count = group_id.map(|id| affinity.count(id)).unwrap_or(0);
-            let is_class_canonical =
-                group_id.is_some_and(|id| affinity.is_canonical(id));
+            let is_class_canonical = group_id.is_some_and(|id| affinity.is_canonical(id));
             let is_official = release.status.as_deref() == Some("Official");
             (
                 is_album,
@@ -413,16 +418,38 @@ pub fn canonicalize_tags(genres: &[MbTag], tags: &[MbTag]) -> (Vec<String>, Vec<
 /// generation.
 fn mood_for_tag(tag: &str) -> Option<&'static str> {
     const RELAXED: &[&str] = &[
-        "chillout", "chill", "ambient", "mellow", "downtempo", "acoustic", "lo-fi", "lofi",
-        "calm", "relaxing", "relaxed", "easy listening",
+        "chillout",
+        "chill",
+        "ambient",
+        "mellow",
+        "downtempo",
+        "acoustic",
+        "lo-fi",
+        "lofi",
+        "calm",
+        "relaxing",
+        "relaxed",
+        "easy listening",
     ];
     const MELANCHOLY: &[&str] = &["sad", "melancholy", "melancholic", "moody", "wistful"];
     const ENERGETIC: &[&str] = &[
-        "party", "dance", "upbeat", "energetic", "anthemic", "high energy", "banger",
+        "party",
+        "dance",
+        "upbeat",
+        "energetic",
+        "anthemic",
+        "high energy",
+        "banger",
         "workout",
     ];
     const FEELGOOD: &[&str] = &[
-        "feel good", "feelgood", "summer", "happy", "uplifting", "sunny", "fun",
+        "feel good",
+        "feelgood",
+        "summer",
+        "happy",
+        "uplifting",
+        "sunny",
+        "fun",
     ];
 
     let normalized = tag.trim().to_lowercase();
@@ -485,6 +512,34 @@ impl MusicBrainzClient {
             .await?
             .error_for_status()?;
         Ok(response.json().await?)
+    }
+
+    /// Finds releases named by a folder after fingerprint-derived group matching
+    /// has failed. This is deliberately a fallback: the returned IDs still have
+    /// to pass the normal full-tracklist group matcher before they can replace
+    /// per-file answers.
+    pub async fn search_releases(
+        &self,
+        artist: &str,
+        title: &str,
+        limit: usize,
+    ) -> Result<Vec<Release>, Error> {
+        self.limiter.acquire().await;
+        let query = format!("artist:\"{artist}\" AND release:\"{title}\"");
+        let response = self
+            .http
+            .get("https://musicbrainz.org/ws/2/release")
+            .query(&[
+                ("fmt", "json"),
+                ("inc", "release-groups+media"),
+                ("limit", &limit.to_string()),
+                ("query", &query),
+            ])
+            .header(reqwest::header::USER_AGENT, self.user_agent.as_str())
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<ReleaseSearchResponse>().await?.releases)
     }
 }
 
@@ -553,7 +608,12 @@ pub async fn fetch_cover_art_with_fallback(
         return Some(bytes);
     }
     let release_group_mbid = release_group_mbid?;
-    fetch_image(http, user_agent, &release_group_cover_art_url(release_group_mbid)).await
+    fetch_image(
+        http,
+        user_agent,
+        &release_group_cover_art_url(release_group_mbid),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -611,11 +671,7 @@ mod tests {
             ),
         ];
 
-        let chosen = select_release(
-            &releases,
-            None,
-            &AffinityIndex::default(),
-        );
+        let chosen = select_release(&releases, None, &AffinityIndex::default());
 
         assert_eq!(chosen.map(|release| release.id.as_str()), Some("comp-1"));
     }
@@ -694,11 +750,7 @@ mod tests {
     fn falls_back_to_first_release_when_nothing_ranks_above_it() {
         let releases = vec![release("only-1", "Untitled Release", None, None, None, &[])];
 
-        let chosen = select_release(
-            &releases,
-            None,
-            &AffinityIndex::default(),
-        );
+        let chosen = select_release(&releases, None, &AffinityIndex::default());
 
         assert_eq!(chosen.map(|release| release.id.as_str()), Some("only-1"));
     }
@@ -893,7 +945,13 @@ mod tests {
 
         assert_eq!(
             genre_names,
-            vec!["dream pop", "indie rock", "noise pop", "alternative rock", "shoegaze"]
+            vec![
+                "dream pop",
+                "indie rock",
+                "noise pop",
+                "alternative rock",
+                "shoegaze"
+            ]
         );
     }
 

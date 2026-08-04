@@ -314,6 +314,9 @@ final class LibraryProfileRegistry {
                     $0.lastActivatedAt < $1.lastActivatedAt
                 })?.id
         }
+        if profiles.isEmpty {
+            setupDismissed = false
+        }
         save()
     }
 

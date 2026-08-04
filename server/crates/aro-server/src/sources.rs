@@ -161,6 +161,12 @@ impl SourceManager {
         self.inner.audio_features.clone()
     }
 
+    pub fn enqueue_processing(&self, content_hash: &str, file: &Path) -> Result<()> {
+        self.maybe_enqueue_identification(content_hash, file)?;
+        self.maybe_enqueue_loudness(content_hash, file)?;
+        self.maybe_enqueue_audio_features(content_hash, file)
+    }
+
     pub fn list(&self) -> Result<Vec<SourceFolder>> {
         Ok(self.inner.store.source_folders()?)
     }
@@ -211,6 +217,74 @@ impl SourceManager {
         };
         let _ = self.inner.watcher.lock().unwatch(&source.path);
         Ok(self.inner.store.detach_source(source_id)?)
+    }
+
+    /// Moves a watched source without changing its stable identity. The new
+    /// watcher and a complete reconciliation must succeed before the old
+    /// path is released; failures restore the previous database row and
+    /// watcher so a UI "Locate" action cannot strand the source.
+    pub fn relocate(&self, source_id: Uuid, path: &Path) -> Result<SourceFolder> {
+        let previous = self
+            .inner
+            .store
+            .source_folder(source_id)?
+            .context("imported folder not found")?;
+        if !previous.watching {
+            bail!("imported folder is detached");
+        }
+        let path = path
+            .canonicalize()
+            .with_context(|| format!("cannot open imported folder {}", path.display()))?;
+        if !path.is_dir() {
+            bail!("imported folder is not a directory: {}", path.display());
+        }
+        let data = self.inner.store.root().canonicalize()?;
+        if path.starts_with(&data) || data.starts_with(&path) {
+            bail!("imported folders and Library Data must not contain one another");
+        }
+        for existing in self
+            .list()?
+            .into_iter()
+            .filter(|source| source.watching && source.source_id != source_id)
+        {
+            let existing_path = existing.path.canonicalize().unwrap_or(existing.path);
+            if path.starts_with(&existing_path) || existing_path.starts_with(&path) {
+                bail!(
+                    "imported folder overlaps existing folder {}",
+                    existing_path.display()
+                );
+            }
+        }
+
+        self.inner
+            .watcher
+            .lock()
+            .watch(&path, RecursiveMode::Recursive)?;
+        self.inner.store.register_host_source(
+            source_id,
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or(&previous.name),
+            self.inner.mode.as_str(),
+            &path,
+        )?;
+        if let Err(error) = self.scan(source_id) {
+            let _ = self.inner.store.register_host_source(
+                source_id,
+                &previous.name,
+                self.inner.mode.as_str(),
+                &previous.path,
+            );
+            let mut watcher = self.inner.watcher.lock();
+            let _ = watcher.unwatch(&path);
+            let _ = watcher.watch(&previous.path, RecursiveMode::Recursive);
+            return Err(error);
+        }
+        let _ = self.inner.watcher.lock().unwatch(&previous.path);
+        self.inner
+            .store
+            .source_folder(source_id)?
+            .context("relocated folder disappeared")
     }
 
     pub fn scan_all(&self) -> Result<()> {
@@ -519,5 +593,37 @@ mod tests {
                 .unwrap()
                 .watching
         );
+    }
+
+    #[tokio::test]
+    async fn relocation_preserves_source_identity_and_switches_the_watched_path() {
+        let root = tempfile::tempdir().unwrap();
+        let original = root.path().join("Original");
+        let relocated = root.path().join("Relocated");
+        let data = root.path().join("Data");
+        std::fs::create_dir_all(&original).unwrap();
+        std::fs::create_dir_all(&relocated).unwrap();
+        std::fs::write(original.join("Old.flac"), b"old audio").unwrap();
+        std::fs::write(relocated.join("New.flac"), b"new audio").unwrap();
+        let store = HubStore::open(&data).unwrap();
+        let hub_id = Uuid::new_v4();
+        let manager = SourceManager::start(
+            store.clone(),
+            hub_id,
+            StorageMode::Managed,
+            3_600,
+            IdentificationQueue::start(store.clone(), hub_id, None),
+            LoudnessQueue::start(store.clone(), hub_id),
+            AudioFeatureQueue::start(Arc::new(|_, _, _| Ok(())), Arc::new(|_, _, _| {})),
+        )
+        .unwrap();
+        let source = manager.add(&original).unwrap();
+
+        let moved = manager.relocate(source.source_id, &relocated).unwrap();
+
+        assert_eq!(moved.source_id, source.source_id);
+        assert_eq!(moved.path, relocated.canonicalize().unwrap());
+        assert!(moved.watching);
+        assert_eq!(store.source_files(source.source_id).unwrap().len(), 2);
     }
 }

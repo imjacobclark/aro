@@ -368,14 +368,24 @@ struct SyncSettingsView: View {
         )
     }
 
+    private var serverConnection: LibraryServerConnection? {
+        guard let activeProfile else { return nil }
+        return LibraryServerConnection.resolve(
+            profile: activeProfile,
+            operations: syncStore,
+            deviceID: libraryDeviceID,
+            localAdminToken: preferences.localAdminToken
+        )
+    }
+
     private func refreshImportedFolders() {
-        guard service.isEnabled, let controlClient else {
+        guard service.isEnabled, let serverConnection else {
             importedFolders = []
             return
         }
         Task {
             do {
-                importedFolders = try await controlClient.folders()
+                importedFolders = try await serverConnection.client.adminFolders()
             } catch {
                 diagnosticStatus = error.localizedDescription
             }
@@ -391,15 +401,12 @@ struct SyncSettingsView: View {
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK,
               let path = panel.url?.path,
-              let controlClient else { return }
+              let serverConnection else { return }
         Task {
             do {
-                _ = try await controlClient.importFolder(
-                    path: path,
-                    mode: preferences.importMode
-                )
-                importedFolders = try await controlClient.folders()
-                await syncLocalHub(using: controlClient)
+                _ = try await serverConnection.client.addAdminFolder(path: path)
+                importedFolders = try await serverConnection.client.adminFolders()
+                await refreshServerCatalog(using: serverConnection)
             } catch {
                 diagnosticStatus = error.localizedDescription
             }
@@ -407,12 +414,12 @@ struct SyncSettingsView: View {
     }
 
     private func scanFolder(_ id: UUID) {
-        guard let controlClient else { return }
+        guard let serverConnection else { return }
         Task {
             do {
-                try await controlClient.scanFolder(id)
-                importedFolders = try await controlClient.folders()
-                await syncLocalHub(using: controlClient)
+                try await serverConnection.client.scanAdminFolder(sourceID: id)
+                importedFolders = try await serverConnection.client.adminFolders()
+                await refreshServerCatalog(using: serverConnection)
             } catch {
                 diagnosticStatus = error.localizedDescription
             }
@@ -420,32 +427,30 @@ struct SyncSettingsView: View {
     }
 
     private func stopWatching(_ id: UUID) {
-        guard let controlClient else { return }
+        guard let serverConnection else { return }
         Task {
             do {
-                try await controlClient.removeFolder(id)
-                importedFolders = try await controlClient.folders()
+                try await serverConnection.client.removeAdminFolder(sourceID: id)
+                importedFolders = try await serverConnection.client.adminFolders()
             } catch {
                 diagnosticStatus = error.localizedDescription
             }
         }
     }
 
-    /// Pulls this Mac's own local hub's operation log into `library`'s
-    /// database via `LocalHubReplicaCoordinator`, then refreshes the folder/
-    /// song lists so an imported or rescanned folder's tracks actually show up
-    /// in Songs/Artists/Albums, not just in this settings sheet's own folder
-    /// list -- see `AroApp.synchronizeLocalHub`, which does the same thing for
-    /// a profile's initial folders.
-    private func syncLocalHub(using controlClient: HubControlClient) async {
-        guard let status = try? await controlClient.status() else { return }
-        let coordinator = LocalHubReplicaCoordinator(
-            hubID: status.hubID,
-            client: controlClient,
-            operations: syncStore
-        )
-        _ = try? await coordinator.synchronize()
-        library.refreshFoldersFromDatabase()
+    private func refreshServerCatalog(
+        using connection: LibraryServerConnection
+    ) async {
+        guard let baseURL = activeProfile?.baseURL,
+              let page = try? await connection.client.completeCatalog(
+                credential: connection.credential
+              ) else { return }
+        library.setServerCatalog(page.tracks, baseURL: baseURL)
+    }
+
+    private var libraryDeviceID: UUID {
+        UserDefaults.standard.string(forKey: "library.deviceID")
+            .flatMap(UUID.init(uuidString:)) ?? UUID()
     }
 
     @ViewBuilder

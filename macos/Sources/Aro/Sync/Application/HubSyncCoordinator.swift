@@ -37,24 +37,22 @@ actor HubSyncCoordinator {
         let pending = operations.pending(limit: 200)
         var outgoing = try pending.compactMap { pending -> SyncOperation? in
             if pending.entityType == "track_state" {
-                guard let hubTrackID = operations.hubTrackID(
+                let hubTrackID = operations.hubTrackID(
                     localTrackID: pending.entityID,
                     hubID: hubID
-                ) else {
-                    return nil
-                }
+                ) ?? pending.entityID
                 return try pending.wireOperation(entityID: hubTrackID)
             }
             if pending.entityType == "listening_session" {
                 let original = try pending.wireOperation()
                 guard case .object(var payload) = original.payload,
-                      case .string(let localTrackID)? = payload["track_id"],
-                      let hubTrackID = operations.hubTrackID(
-                        localTrackID: localTrackID,
-                        hubID: hubID
-                      ) else {
+                      case .string(let localTrackID)? = payload["track_id"] else {
                     return nil
                 }
+                let hubTrackID = operations.hubTrackID(
+                    localTrackID: localTrackID,
+                    hubID: hubID
+                ) ?? localTrackID
                 payload["track_id"] = .string(hubTrackID)
                 return try pending.wireOperation(
                     payload: .object(payload)
@@ -129,5 +127,68 @@ actor HubSyncCoordinator {
             cursor: cursor,
             canContribute: access.canContribute
         )
+    }
+}
+
+/// Pushes durable device-authored intent without subscribing a streaming client
+/// to the hub's full CRDT history. Canonical catalogue state comes from the resolved
+/// catalogue API; this path exists only for offline-created edits/history/favourites.
+actor HubMutationPushCoordinator {
+    private let hubID: UUID
+    private let client: AroSyncClient
+    private let credential: HubDeviceCredential?
+    private let operations: SQLiteSyncOperationStore
+
+    init(
+        hubID: UUID,
+        client: AroSyncClient,
+        credential: HubDeviceCredential?,
+        operations: SQLiteSyncOperationStore
+    ) {
+        self.hubID = hubID
+        self.client = client
+        self.credential = credential
+        self.operations = operations
+    }
+
+    func push() async throws -> Int {
+        let pending = operations.pending(limit: 200)
+        let outgoing = try pending.compactMap { pending -> SyncOperation? in
+            if pending.entityType == "track_state" {
+                let hubTrackID = operations.hubTrackID(
+                    localTrackID: pending.entityID,
+                    hubID: hubID
+                ) ?? pending.entityID
+                return try pending.wireOperation(entityID: hubTrackID)
+            }
+            if pending.entityType == "listening_session" {
+                let original = try pending.wireOperation()
+                guard case .object(var payload) = original.payload,
+                      case .string(let localTrackID)? = payload["track_id"] else {
+                    return nil
+                }
+                let hubTrackID = operations.hubTrackID(
+                    localTrackID: localTrackID,
+                    hubID: hubID
+                ) ?? localTrackID
+                payload["track_id"] = .string(hubTrackID)
+                return try pending.wireOperation(payload: .object(payload))
+            }
+            return try pending.wireOperation()
+        }
+        guard !outgoing.isEmpty else { return 0 }
+        let response = try await client.exchange(
+            SyncExchangeRequest(
+                afterSequence: UInt64.max,
+                limit: 1,
+                operations: outgoing
+            ),
+            credential: credential
+        )
+        let accepted = Set(response.accepted.map(\.operationID))
+        operations.markSent(
+            pending.filter { accepted.contains($0.id) }.map(\.id)
+        )
+        return accepted.count
     }
 }

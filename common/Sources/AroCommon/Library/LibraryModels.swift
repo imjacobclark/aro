@@ -91,6 +91,12 @@ public struct Song: Identifiable, Hashable, Sendable {
     public let album: String?
     public let genre: String?
     public let releaseYear: Int?
+    /// Position within the release medium, supplied by file tags or authoritative
+    /// MusicBrainz group matching. Album views use this rather than title order.
+    public let trackNumber: Int?
+    /// One-based release medium/disc position. `nil` is treated as disc one when a
+    /// track number is present.
+    public let discNumber: Int?
     public let artworkData: Data?
     public let duration: TimeInterval?
     public let fileSizeBytes: Int64?
@@ -122,6 +128,8 @@ public struct Song: Identifiable, Hashable, Sendable {
         album: String? = nil,
         genre: String? = nil,
         releaseYear: Int? = nil,
+        trackNumber: Int? = nil,
+        discNumber: Int? = nil,
         artworkData: Data? = nil,
         duration: TimeInterval?,
         fileSizeBytes: Int64? = nil,
@@ -140,6 +148,8 @@ public struct Song: Identifiable, Hashable, Sendable {
         self.album = album
         self.genre = genre
         self.releaseYear = releaseYear
+        self.trackNumber = trackNumber
+        self.discNumber = discNumber
         self.artworkData = artworkData
         self.duration = duration
         self.fileSizeBytes = fileSizeBytes
@@ -156,6 +166,54 @@ public struct Song: Identifiable, Hashable, Sendable {
         libraryID.uuidString
     }
 
+    /// `Song` values flow through SwiftUI collection inputs. Artwork is often a
+    /// large, album-repeated blob, so letting synthesized equality compare it
+    /// turns an otherwise cheap view diff into repeated multi-megabyte memcmp
+    /// work on the main thread. Artwork is intentionally excluded from the
+    /// catalog equality contract; all metadata which affects rows, grouping,
+    /// playback, and sorting remains part of it.
+    public static func == (lhs: Song, rhs: Song) -> Bool {
+        lhs.libraryID == rhs.libraryID
+            && lhs.url == rhs.url
+            && lhs.title == rhs.title
+            && lhs.artist == rhs.artist
+            && lhs.album == rhs.album
+            && lhs.genre == rhs.genre
+            && lhs.releaseYear == rhs.releaseYear
+            && lhs.trackNumber == rhs.trackNumber
+            && lhs.discNumber == rhs.discNumber
+            && lhs.duration == rhs.duration
+            && lhs.fileSizeBytes == rhs.fileSizeBytes
+            && lhs.audioProperties == rhs.audioProperties
+            && lhs.fileFingerprint == rhs.fileFingerprint
+            && lhs.contentHash == rhs.contentHash
+            && lhs.isFavourite == rhs.isFavourite
+            && lhs.loudness == rhs.loudness
+            && lhs.musicbrainzGenres == rhs.musicbrainzGenres
+            && lhs.moodTags == rhs.moodTags
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(libraryID)
+        hasher.combine(url)
+        hasher.combine(title)
+        hasher.combine(artist)
+        hasher.combine(album)
+        hasher.combine(genre)
+        hasher.combine(releaseYear)
+        hasher.combine(trackNumber)
+        hasher.combine(discNumber)
+        hasher.combine(duration)
+        hasher.combine(fileSizeBytes)
+        hasher.combine(audioProperties)
+        hasher.combine(fileFingerprint)
+        hasher.combine(contentHash)
+        hasher.combine(isFavourite)
+        hasher.combine(loudness)
+        hasher.combine(musicbrainzGenres)
+        hasher.combine(moodTags)
+    }
+
     public func replacingURL(_ url: URL) -> Song {
         Song(
             libraryID: libraryID,
@@ -165,6 +223,8 @@ public struct Song: Identifiable, Hashable, Sendable {
             album: album,
             genre: genre,
             releaseYear: releaseYear,
+            trackNumber: trackNumber,
+            discNumber: discNumber,
             artworkData: artworkData,
             duration: duration,
             fileSizeBytes: fileSizeBytes,
@@ -215,6 +275,37 @@ public enum SongLibrary {
                 return artistOrder == .orderedAscending
             }
 
+            return $0.id.localizedStandardCompare($1.id) == .orderedAscending
+        }
+    }
+
+    /// Catalog order for tracks that share an album. Numbered releases are ordered
+    /// by medium then track; unnumbered tracks retain the stable title order used by
+    /// the general library.
+    public static func albumSorted(_ songs: [Song]) -> [Song] {
+        songs.sorted {
+            switch ($0.trackNumber, $1.trackNumber) {
+            case let (.some(leftTrack), .some(rightTrack)):
+                let leftDisc = $0.discNumber ?? 1
+                let rightDisc = $1.discNumber ?? 1
+                if leftDisc != rightDisc { return leftDisc < rightDisc }
+                if leftTrack != rightTrack { return leftTrack < rightTrack }
+            case (.some, .none):
+                return true
+            case (.none, .some):
+                return false
+            case (.none, .none):
+                break
+            }
+
+            let titleOrder = $0.title.localizedStandardCompare($1.title)
+            if titleOrder != .orderedSame {
+                return titleOrder == .orderedAscending
+            }
+            let artistOrder = $0.artist.localizedStandardCompare($1.artist)
+            if artistOrder != .orderedSame {
+                return artistOrder == .orderedAscending
+            }
             return $0.id.localizedStandardCompare($1.id) == .orderedAscending
         }
     }

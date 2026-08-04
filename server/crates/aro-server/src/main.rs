@@ -1,11 +1,11 @@
 mod audio_metadata;
 mod config;
-mod playlists;
 #[cfg(unix)]
 mod control;
 mod dashboard;
 mod dlna;
 mod http;
+mod playlists;
 mod sources;
 
 use anyhow::{Context, Result, bail};
@@ -161,7 +161,9 @@ fn config_command(path: &Path, command: ConfigCommand) -> Result<()> {
         ConfigCommand::Get { key } => {
             let config = Config::load(path)?;
             let value = serde_json::to_value(&config)?;
-            let field = key.split('.').try_fold(&value, |current, part| current.get(part));
+            let field = key
+                .split('.')
+                .try_fold(&value, |current, part| current.get(part));
             match field {
                 Some(field) => println!("{field}"),
                 None => bail!("unknown config field: {key}"),
@@ -221,19 +223,24 @@ async fn serve(config: Config, config_path: PathBuf) -> Result<()> {
         config.hub_id,
         identification_config,
     );
-    let loudness =
-        aro_track_id::loudness::LoudnessQueue::start(store.clone(), config.hub_id);
+    let loudness = aro_track_id::loudness::LoudnessQueue::start(store.clone(), config.hub_id);
     let audio_features = {
         let success_store = store.clone();
         let failure_store = store.clone();
         aro_track_id::audio_features::AudioFeatureQueue::start(
-            std::sync::Arc::new(move |hash: &str, version: i64, features: &aro_track_id::audio_features::AudioFeatures| {
-                let payload = serde_json::to_string(features)?;
-                success_store.put_audio_features(hash, version, &payload)?;
-                Ok(())
-            }),
+            std::sync::Arc::new(
+                move |hash: &str,
+                      version: i64,
+                      features: &aro_track_id::audio_features::AudioFeatures| {
+                    let payload = serde_json::to_string(features)?;
+                    success_store.put_audio_features(hash, version, &payload)?;
+                    Ok(())
+                },
+            ),
             std::sync::Arc::new(move |hash: &str, version: i64, error: &str| {
-                failure_store.record_audio_feature_failure(hash, version, error).ok();
+                failure_store
+                    .record_audio_feature_failure(hash, version, error)
+                    .ok();
             }),
         )
     };
@@ -251,6 +258,8 @@ async fn serve(config: Config, config_path: PathBuf) -> Result<()> {
         config_path: config_path.clone(),
         hub_id: config.hub_id,
         display_name: config.display_name.clone(),
+        tls_fingerprint: fingerprint.clone(),
+        https_port: config.bind.port(),
         admin_token: config.admin_token.clone(),
         admin_allow: config.admin_allow.clone(),
         pairing,
@@ -275,7 +284,7 @@ async fn serve(config: Config, config_path: PathBuf) -> Result<()> {
         ));
         tracing::warn!(
             address = %config.dashboard.bind,
-            "Unauthenticated full-detail dashboard enabled"
+            "Dashboard enabled; telemetry is public and administration requires the admin token"
         );
         Some(tokio::spawn(async move {
             if let Err(error) = axum::serve(
@@ -311,10 +320,7 @@ async fn serve(config: Config, config_path: PathBuf) -> Result<()> {
     );
     let tls = RustlsConfig::from_pem_file(&config.tls_cert, &config.tls_key).await?;
     axum_server::bind_rustls(config.bind, tls)
-        .serve(
-            http::router(state)
-                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
+        .serve(http::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>())
         .await?;
     Ok(())
 }

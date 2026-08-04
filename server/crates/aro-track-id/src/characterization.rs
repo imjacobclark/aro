@@ -16,7 +16,11 @@ use std::collections::{HashMap, HashSet};
 
 #[test]
 fn every_fixture_deserializes() {
-    for name in ["december-neck-deep", "beatles-1-track-09", "blink-182-hyphen-dammit"] {
+    for name in [
+        "december-neck-deep",
+        "beatles-1-track-09",
+        "blink-182-hyphen-dammit",
+    ] {
         fixtures::acoustid_lookup(name);
         fixtures::mb_recording(name);
     }
@@ -49,11 +53,17 @@ fn every_fixture_deserializes() {
 #[test]
 fn release_stub_media_carries_track_count_and_position() {
     let release = fixtures::mb_release_raw("beatles-1");
-    let media = release["media"].as_array().expect("release should have media");
+    let media = release["media"]
+        .as_array()
+        .expect("release should have media");
     assert!(!media.is_empty());
-    let track_count = media[0]["track-count"].as_u64().expect("medium should have a track-count");
+    let track_count = media[0]["track-count"]
+        .as_u64()
+        .expect("medium should have a track-count");
     assert_eq!(track_count, 27);
-    let tracks = media[0]["tracks"].as_array().expect("medium should have tracks");
+    let tracks = media[0]["tracks"]
+        .as_array()
+        .expect("medium should have tracks");
     assert_eq!(tracks.len(), 27);
     assert!(tracks[0]["position"].is_u64());
     assert!(tracks[0]["title"].is_string());
@@ -68,7 +78,10 @@ fn release_stub_media_carries_track_count_and_position() {
 fn full_release_tracks_carry_a_nested_recording_id() {
     let release = fixtures::mb_release("beatles-1");
     let track = &release.media[0].tracks[0];
-    let recording = track.recording.as_ref().expect("track should carry a recording");
+    let recording = track
+        .recording
+        .as_ref()
+        .expect("track should carry a recording");
     assert!(!recording.id.is_empty());
     assert_eq!(track.title.as_deref(), Some("Love Me Do"));
 }
@@ -107,7 +120,8 @@ fn beatles_1_track_09_falls_back_to_first_title_artist_match_with_no_affinity() 
         title: Some("Ticket to Ride"),
         artist: Some("The Beatles"),
     };
-    let (_, recording) = acoustid::best_match(&lookup, hint, &HashMap::new()).expect("should match");
+    let (_, recording) =
+        acoustid::best_match(&lookup, hint, &HashMap::new()).expect("should match");
     let recording = recording.expect("should resolve a recording");
     assert_eq!(recording.id, "00c47ea6-3a10-4a32-b1f1-990ac756c6a0");
 }
@@ -123,7 +137,8 @@ fn blink_182_hyphen_variant_in_acoustid_data_still_matches_ascii_hint() {
         title: Some("Dammit"),
         artist: Some("blink-182"), // ASCII hyphen; AcoustID's own data uses U+2010.
     };
-    let (_, recording) = acoustid::best_match(&lookup, hint, &HashMap::new()).expect("should match");
+    let (_, recording) =
+        acoustid::best_match(&lookup, hint, &HashMap::new()).expect("should match");
     let recording = recording.expect("should resolve a recording");
     assert_eq!(recording.id, "7119c66f-5774-4c3f-b82a-2656b2406649");
 }
@@ -171,7 +186,8 @@ fn december_neck_deep_falls_back_to_first_match_with_no_affinity() {
         title: Some("December"),
         artist: Some("Neck Deep"),
     };
-    let (_, recording) = acoustid::best_match(&lookup, hint, &HashMap::new()).expect("should match");
+    let (_, recording) =
+        acoustid::best_match(&lookup, hint, &HashMap::new()).expect("should match");
     let recording = recording.expect("should resolve a recording");
     assert_eq!(recording.id, "33cab056-bba2-44da-bf42-600edd146587");
 }

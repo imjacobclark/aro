@@ -4,6 +4,29 @@ import XCTest
 @testable import AroCommon
 
 final class LibraryModelsTests: XCTestCase {
+    func testSongEqualityDoesNotCompareArtworkPayload() {
+        let id = UUID()
+        let first = Song(
+            libraryID: id,
+            url: URL(fileURLWithPath: "/first.flac"),
+            title: "First",
+            artist: "Artist",
+            artworkData: Data(repeating: 0, count: 512 * 1_024),
+            duration: 180
+        )
+        let replacementArtwork = Song(
+            libraryID: id,
+            url: URL(fileURLWithPath: "/first.flac"),
+            title: "First",
+            artist: "Artist",
+            artworkData: Data(repeating: 1, count: 512 * 1_024),
+            duration: 180
+        )
+
+        XCTAssertEqual(first, replacementArtwork)
+        XCTAssertEqual(first.hashValue, replacementArtwork.hashValue)
+    }
+
     func testAggregateDeduplicatesCanonicalSongURLs() {
         let idA = UUID()
         let idB = UUID()
@@ -27,6 +50,19 @@ final class LibraryModelsTests: XCTestCase {
         ])
 
         XCTAssertEqual(songs.map(\.title), ["Shared", "Unique"])
+    }
+
+    func testAlbumOrderUsesDiscThenTrackInsteadOfTitle() {
+        let songs = [
+            Song(url: URL(fileURLWithPath: "/sunset-2.flac"), title: "Orphans", artist: "Coldplay", album: "Everyday Life", trackNumber: 2, discNumber: 2, duration: 197),
+            Song(url: URL(fileURLWithPath: "/sunrise-2.flac"), title: "Church", artist: "Coldplay", album: "Everyday Life", trackNumber: 2, discNumber: 1, duration: 230),
+            Song(url: URL(fileURLWithPath: "/sunset-1.flac"), title: "Guns", artist: "Coldplay", album: "Everyday Life", trackNumber: 1, discNumber: 2, duration: 115),
+            Song(url: URL(fileURLWithPath: "/sunrise-1.flac"), title: "Sunrise", artist: "Coldplay", album: "Everyday Life", trackNumber: 1, discNumber: 1, duration: 151)
+        ]
+
+        let albums = AlbumLibrary.albums(from: songs)
+
+        XCTAssertEqual(albums.first?.songs.map(\.title), ["Sunrise", "Church", "Guns", "Orphans"])
     }
 
     func testDurationFormatting() {

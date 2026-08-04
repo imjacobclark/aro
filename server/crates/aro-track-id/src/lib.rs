@@ -12,9 +12,9 @@ pub mod album;
 pub mod audio_features;
 #[cfg(test)]
 mod characterization;
+pub mod fingerprint;
 #[cfg(test)]
 mod fixtures;
-pub mod fingerprint;
 pub mod loudness;
 mod matching;
 pub mod musicbrainz;
@@ -52,4 +52,7 @@ pub const CACHE_SCHEMA_VERSION: u32 = 2;
 /// current generation (see `queue`'s reconcile sweep) — each file is revisited at most once
 /// per generation, which is what makes the sweep provably terminating rather than relying on
 /// a heuristic stopping condition.
-pub const IDENTIFICATION_GENERATION: u32 = 1;
+/// - `2`: treat a flat `Artist - Album` folder name as authoritative presentation
+///   identity, preventing compilation fingerprints from splitting one folder across
+///   their tracks' original releases and performers.
+pub const IDENTIFICATION_GENERATION: u32 = 2;

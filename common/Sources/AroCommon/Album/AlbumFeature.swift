@@ -53,7 +53,7 @@ public enum AlbumLibrary {
         var albums: [LibraryAlbum] = []
 
         for (id, albumSongs) in grouped {
-            let sortedSongs = SongLibrary.sorted(albumSongs)
+            let sortedSongs = SongLibrary.albumSorted(albumSongs)
             var artworkData: Data?
             for song in sortedSongs where artworkData == nil {
                 artworkData = song.artworkData

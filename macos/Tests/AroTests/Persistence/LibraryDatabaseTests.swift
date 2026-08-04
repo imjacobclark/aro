@@ -288,11 +288,291 @@ final class LibraryDatabaseTests: XCTestCase {
         XCTAssertEqual(favouriteOperation?.payload, "{\"favourite\":true}")
     }
 
-    private func makeSong(path: String, contentHash: String) -> Song {
+    func testManualMetadataIsGoldenUntilReset() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let database = LibraryDatabase(
+            url: directory.appendingPathComponent("Library.sqlite3")
+        )
+        let folderID = UUID()
+        database.save(
+            folder: WatchedFolder(
+                id: folderID,
+                url: directory,
+                displayName: "Music",
+                bookmarkData: nil,
+                isAccessible: true,
+                didStartSecurityScope: false
+            )
+        )
+        let source = makeSong(
+            path: directory.appendingPathComponent("Track.flac").path,
+            contentHash: "golden-track"
+        )
+        let stored = try XCTUnwrap(
+            database.reconcile(songs: [source], folderID: folderID).first
+        )
+
+        database.applyManualMetadata(
+            [
+                ManualMetadataEdit(field: .artist, value: "Manual Artist"),
+                ManualMetadataEdit(field: .album, value: "Manual Album"),
+            ],
+            trackIDs: [stored.libraryID]
+        )
+        XCTAssertTrue(
+            database.applyIdentification(
+                contentHash: "golden-track",
+                title: nil,
+                artist: "Identified Artist",
+                album: "Identified Album",
+                musicbrainzRecordingID: "mbid",
+                acoustidID: "aid",
+                artworkData: nil
+            )
+        )
+
+        let protected = try XCTUnwrap(database.songs(folderID: folderID).first)
+        XCTAssertEqual(protected.artist, "Manual Artist")
+        XCTAssertEqual(protected.album, "Manual Album")
+
+        let snapshot = database.metadataSnapshot(
+            song: protected,
+            librarySongs: [protected]
+        )
+        XCTAssertTrue(
+            snapshot.candidates[.artist, default: []].contains(
+                MetadataCandidate(
+                    value: "Identified Artist",
+                    source: .identified
+                )
+            )
+        )
+        XCTAssertTrue(
+            snapshot.candidates[.album, default: []].contains(
+                MetadataCandidate(
+                    value: "Identified Album",
+                    source: .identified,
+                    relatedArtist: "Identified Artist"
+                )
+            )
+        )
+
+        _ = database.reconcile(songs: [source], folderID: folderID)
+        let rescanned = try XCTUnwrap(database.songs(folderID: folderID).first)
+        XCTAssertEqual(rescanned.artist, "Manual Artist")
+        XCTAssertEqual(rescanned.album, "Manual Album")
+
+        database.resetManualMetadata(trackIDs: [stored.libraryID])
+        let reset = try XCTUnwrap(database.songs(folderID: folderID).first)
+        XCTAssertEqual(reset.artist, "Identified Artist")
+        XCTAssertEqual(reset.album, "Identified Album")
+
+        let metadataOperations = SQLiteSyncOperationStore(database: database)
+            .pending()
+            .filter { $0.entityID == stored.libraryID.uuidString }
+        XCTAssertEqual(metadataOperations.map(\.operation), ["set_metadata", "reset_metadata"])
+    }
+
+    func testStreamingMetadataEditQueuesWithoutAReplicaTrackRow() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = LibraryDatabase(
+            url: directory.appendingPathComponent("Library.sqlite3")
+        )
+        let trackID = UUID()
+
+        database.queueManualMetadata(
+            [ManualMetadataEdit(field: .album, value: "Offline Album")],
+            trackIDs: [trackID],
+            reset: false
+        )
+
+        let store = SQLiteSyncOperationStore(database: database)
+        XCTAssertEqual(store.pending().count, 1)
+        XCTAssertEqual(
+            store.pendingManualMetadataEdits()[trackID]?.first?.value,
+            "Offline Album"
+        )
+    }
+
+    func testAlbumCandidatesFollowSelectedArtistAndKeepIdentifiedResult() {
+        let song = makeSong(path: "/tmp/Track.flac", contentHash: "candidate-track")
+        let snapshot = TrackMetadataSnapshot(
+            song: song,
+            effectiveValues: [.artist: "Artist A"],
+            manualFields: [],
+            candidates: [
+                .album: [
+                    MetadataCandidate(
+                        value: "Album A",
+                        source: .library,
+                        relatedArtist: "Artist A"
+                    ),
+                    MetadataCandidate(
+                        value: "Unrelated Album",
+                        source: .library,
+                        relatedArtist: "Artist B"
+                    ),
+                    MetadataCandidate(
+                        value: "MusicBrainz Album",
+                        source: .identified,
+                        relatedArtist: "Artist B"
+                    ),
+                ],
+            ]
+        )
+
+        XCTAssertEqual(
+            snapshot.candidates(for: .album, selectedArtist: " artist a ")
+                .map(\.value),
+            ["Album A", "MusicBrainz Album"]
+        )
+    }
+
+    func testManualArtworkKeepsOriginalAndIdentifiedLayersUntilReset() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let database = LibraryDatabase(
+            url: directory.appendingPathComponent("Library.sqlite3")
+        )
+        let folderID = UUID()
+        database.save(
+            folder: WatchedFolder(
+                id: folderID,
+                url: directory,
+                displayName: "Music",
+                bookmarkData: nil,
+                isAccessible: true,
+                didStartSecurityScope: false
+            )
+        )
+        let originalArtwork = Data([1, 2, 3])
+        let identifiedArtwork = Data([4, 5, 6])
+        let manualArtwork = Data([7, 8, 9])
+        let source = makeSong(
+            path: directory.appendingPathComponent("Artwork.flac").path,
+            contentHash: "artwork-track",
+            album: "Album",
+            artworkData: originalArtwork
+        )
+        let stored = try XCTUnwrap(
+            database.reconcile(songs: [source], folderID: folderID).first
+        )
+        XCTAssertTrue(
+            database.applyIdentification(
+                contentHash: "artwork-track",
+                title: nil,
+                artist: "Artist",
+                album: "Album",
+                musicbrainzRecordingID: "mbid-art",
+                acoustidID: "aid-art",
+                artworkData: identifiedArtwork
+            )
+        )
+        XCTAssertEqual(
+            database.songs(folderID: folderID).first?.artworkData,
+            identifiedArtwork
+        )
+
+        let identifiedSong = try XCTUnwrap(database.songs(folderID: folderID).first)
+        let snapshot = database.metadataSnapshot(
+            song: identifiedSong,
+            librarySongs: [identifiedSong]
+        )
+        XCTAssertTrue(
+            snapshot.artworkCandidates.contains {
+                $0.source == .file && $0.data == originalArtwork
+            }
+        )
+        XCTAssertTrue(
+            snapshot.artworkCandidates.contains {
+                $0.source == .identified && $0.data == identifiedArtwork
+            }
+        )
+
+        database.applyManualArtwork(
+            ManualArtworkEdit(data: manualArtwork),
+            trackIDs: [stored.libraryID]
+        )
+        _ = database.reconcile(songs: [source], folderID: folderID)
+        XCTAssertEqual(
+            database.songs(folderID: folderID).first?.artworkData,
+            manualArtwork
+        )
+
+        database.resetManualMetadata(trackIDs: [stored.libraryID])
+        XCTAssertEqual(
+            database.songs(folderID: folderID).first?.artworkData,
+            identifiedArtwork
+        )
+    }
+
+    func testStreamingSnapshotKeepsServerIdentificationSuggestions() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = LibraryDatabase(
+            url: directory.appendingPathComponent("Library.sqlite3")
+        )
+        let artwork = Data([10, 11, 12])
+        let song = makeSong(
+            path: "https://hub.invalid/v1/blobs/track",
+            contentHash: "streaming-snapshot",
+            album: "Server Album",
+            artworkData: artwork
+        )
+
+        let snapshot = database.metadataSnapshot(
+            song: song,
+            librarySongs: [song]
+        )
+
+        XCTAssertTrue(
+            snapshot.candidates[.artist, default: []].contains(
+                MetadataCandidate(value: "Artist", source: .identified)
+            )
+        )
+        XCTAssertTrue(
+            snapshot.artworkCandidates.contains {
+                $0.source == .identified && $0.data == artwork
+            }
+        )
+    }
+
+    private func makeSong(
+        path: String,
+        contentHash: String,
+        album: String? = nil,
+        artworkData: Data? = nil
+    ) -> Song {
         Song(
             url: URL(fileURLWithPath: path),
             title: "Track",
             artist: "Artist",
+            album: album,
+            artworkData: artworkData,
             duration: 180,
             fileSizeBytes: 1_024,
             audioProperties: AudioFileProperties(

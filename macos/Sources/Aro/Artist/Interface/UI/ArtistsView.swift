@@ -5,6 +5,7 @@ struct ArtistsView: View {
     let songs: [Song]
     let playback: PlaybackController
     let syncTrackData: (Song) async -> Void
+    let editMetadata: (MetadataEditorContext) -> Void
     var loadRadio: ((String) async -> ServerGeneratedPlaylist?)?
 
     @State private var selectedArtistID: LibraryArtist.ID?
@@ -120,6 +121,16 @@ struct ArtistsView: View {
                                         ? .isSelected
                                         : []
                                 )
+                                .contextMenu {
+                                    Button("Metadata…") {
+                                        editMetadata(
+                                            MetadataEditorContext(
+                                                scope: .artist,
+                                                songs: artist.songs
+                                            )
+                                        )
+                                    }
+                                }
                             }
                         }
                         .padding(.horizontal, 12)
@@ -164,7 +175,8 @@ struct ArtistsView: View {
                                 artworkData: album.artworkData,
                                 songs: album.songs,
                                 playback: playback,
-                                syncTrackData: syncTrackData
+                                syncTrackData: syncTrackData,
+                                editMetadata: editMetadata
                             )
                         }
                     }

@@ -190,7 +190,9 @@ fn analyze_samples(samples: &[f32], sample_rate: u32) -> Result<AudioFeatures, E
         return Err(Error::TooShort);
     }
 
-    let peak_amplitude = excerpt.iter().fold(0.0_f32, |max, sample| max.max(sample.abs()));
+    let peak_amplitude = excerpt
+        .iter()
+        .fold(0.0_f32, |max, sample| max.max(sample.abs()));
     let overall_rms = rms(excerpt);
 
     let window = hann_window(FRAME_SIZE);
@@ -206,7 +208,13 @@ fn analyze_samples(samples: &[f32], sample_rate: u32) -> Result<AudioFeatures, E
     let mut previous_magnitudes: Option<Vec<f32>> = None;
 
     let mut start = 0;
-    let mut buffer = vec![Complex { re: 0.0_f32, im: 0.0_f32 }; FRAME_SIZE];
+    let mut buffer = vec![
+        Complex {
+            re: 0.0_f32,
+            im: 0.0_f32
+        };
+        FRAME_SIZE
+    ];
     while start + FRAME_SIZE <= excerpt.len() {
         let frame = &excerpt[start..start + FRAME_SIZE];
         frame_energies.push(f64::from(rms(frame)));
@@ -280,8 +288,8 @@ fn select_excerpt(samples: &[f32], sample_rate: u32) -> &[f32] {
         return samples;
     }
     let start = (ANALYSIS_OFFSET_SECS * f64::from(sample_rate)) as usize;
-    let end = (start + (ANALYSIS_DURATION_SECS * f64::from(sample_rate)) as usize)
-        .min(samples.len());
+    let end =
+        (start + (ANALYSIS_DURATION_SECS * f64::from(sample_rate)) as usize).min(samples.len());
     &samples[start.min(samples.len())..end]
 }
 
@@ -295,8 +303,11 @@ fn rms(samples: &[f32]) -> f32 {
 
 fn mean_and_variance(values: &[f64]) -> (f32, f32) {
     let mean = values.iter().sum::<f64>() / values.len() as f64;
-    let variance =
-        values.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / values.len() as f64;
+    let variance = values
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / values.len() as f64;
     (mean as f32, variance as f32)
 }
 
@@ -318,7 +329,11 @@ fn spectral_centroid(magnitudes: &[f32], sample_rate: u32, frame_size: usize) ->
         weighted_sum += freq * magnitude;
         total += magnitude;
     }
-    if total > 0.0 { weighted_sum / total } else { 0.0 }
+    if total > 0.0 {
+        weighted_sum / total
+    } else {
+        0.0
+    }
 }
 
 /// Triangular mel filterbank — `bands` filters spanning 0 Hz to Nyquist, each row
@@ -333,13 +348,16 @@ fn mel_filterbank(sample_rate: u32, frame_size: usize, bands: usize) -> Vec<Vec<
     let hz_points: Vec<f64> = mel_points.iter().map(|mel| mel_to_hz(*mel)).collect();
     let bin_points: Vec<usize> = hz_points
         .iter()
-        .map(|hz| ((hz * frame_size as f64 / f64::from(sample_rate)).round() as usize).min(bin_count - 1))
+        .map(|hz| {
+            ((hz * frame_size as f64 / f64::from(sample_rate)).round() as usize).min(bin_count - 1)
+        })
         .collect();
 
     (0..bands)
         .map(|band| {
             let mut filter = vec![0.0_f32; bin_count];
-            let (left, center, right) = (bin_points[band], bin_points[band + 1], bin_points[band + 2]);
+            let (left, center, right) =
+                (bin_points[band], bin_points[band + 1], bin_points[band + 2]);
             for bin in left..center {
                 if center > left {
                     filter[bin] = (bin - left) as f32 / (center - left) as f32;
@@ -542,7 +560,8 @@ struct Job {
 /// depending on `aro_sync_store::HubStore` directly, as `loudness::LoudnessQueue`
 /// does) so this crate doesn't need a `HubStore` import solely for this queue; the
 /// caller (`aro-server`) supplies the store write.
-pub type AudioFeatureSink = Arc<dyn Fn(&str, i64, &AudioFeatures) -> anyhow::Result<()> + Send + Sync>;
+pub type AudioFeatureSink =
+    Arc<dyn Fn(&str, i64, &AudioFeatures) -> anyhow::Result<()> + Send + Sync>;
 pub type AudioFeatureFailureSink = Arc<dyn Fn(&str, i64, &str) + Send + Sync>;
 
 impl AudioFeatureQueue {
@@ -566,22 +585,18 @@ impl AudioFeatureQueue {
                 let path = job.path.clone();
                 let analyzed = tokio::task::spawn_blocking(move || analyze_file(&path)).await;
                 match analyzed {
-                    Ok(Ok(features)) => {
-                        match on_success(&hash, ALGORITHM_VERSION, &features) {
-                            Ok(()) => {
-                                worker.processed.fetch_add(1, Ordering::Relaxed);
-                            }
-                            Err(error) => {
-                                record_failure(&worker, &on_failure, &hash, &error.to_string());
-                            }
+                    Ok(Ok(features)) => match on_success(&hash, ALGORITHM_VERSION, &features) {
+                        Ok(()) => {
+                            worker.processed.fetch_add(1, Ordering::Relaxed);
                         }
-                    }
+                        Err(error) => {
+                            record_failure(&worker, &on_failure, &hash, &error.to_string());
+                        }
+                    },
                     Ok(Err(error)) => {
                         record_failure(&worker, &on_failure, &hash, &error.to_string())
                     }
-                    Err(error) => {
-                        record_failure(&worker, &on_failure, &hash, &error.to_string())
-                    }
+                    Err(error) => record_failure(&worker, &on_failure, &hash, &error.to_string()),
                 }
                 worker.pending.lock().expect("pending lock").remove(&hash);
                 worker.in_flight.store(false, Ordering::Relaxed);
@@ -641,7 +656,11 @@ fn record_failure(
         *last_error = Some(message.to_string());
     }
     on_failure(content_hash, ALGORITHM_VERSION, message);
-    tracing::warn!(content_hash, error = message, "audio feature analysis failed");
+    tracing::warn!(
+        content_hash,
+        error = message,
+        "audio feature analysis failed"
+    );
 }
 
 #[cfg(test)]
@@ -710,8 +729,8 @@ mod tests {
             for (offset, sample) in samples[position..position + 200].iter_mut().enumerate() {
                 // A short burst of a mid-range tone approximates a percussive click.
                 let t = offset as f32 / sample_rate as f32;
-                *sample = (t * 2_000.0 * std::f32::consts::TAU).sin()
-                    * (1.0 - offset as f32 / 200.0);
+                *sample =
+                    (t * 2_000.0 * std::f32::consts::TAU).sin() * (1.0 - offset as f32 / 200.0);
             }
             position += beat_interval;
         }

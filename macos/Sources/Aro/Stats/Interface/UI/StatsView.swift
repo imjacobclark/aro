@@ -10,6 +10,7 @@ private enum StatsMode: String, CaseIterable {
 struct StatsView: View {
     let playback: PlaybackController
     let loadStatsDashboard: LoadStatsDashboard
+    let serverDashboard: StatsDashboard?
 
     @State private var mode: StatsMode = .listening
     @State private var listening = ListeningStats()
@@ -274,7 +275,12 @@ struct StatsView: View {
     }
 
     private func refresh() async {
-        let dashboard = await loadStatsDashboard.execute()
+        let dashboard: StatsDashboard
+        if let serverDashboard {
+            dashboard = serverDashboard
+        } else {
+            dashboard = await loadStatsDashboard.execute()
+        }
         listening = dashboard.listening
         library = dashboard.library
     }

@@ -39,4 +39,15 @@ protocol LibraryCatalogRepository: Sendable {
     func pendingArtworkDownloads(limit: Int) -> [PendingArtwork]
 
     func storeArtwork(trackID: String, data: Data)
+
+    func metadataSnapshot(song: Song, librarySongs: [Song]) -> TrackMetadataSnapshot
+    func applyManualMetadata(_ edits: [ManualMetadataEdit], trackIDs: [UUID])
+    func applyManualArtwork(_ edit: ManualArtworkEdit, trackIDs: [UUID])
+    func resetManualMetadata(trackIDs: [UUID])
+    func queueManualMetadata(
+        _ edits: [ManualMetadataEdit],
+        trackIDs: [UUID],
+        reset: Bool
+    )
+    func queueManualArtwork(_ edit: ManualArtworkEdit, trackIDs: [UUID])
 }

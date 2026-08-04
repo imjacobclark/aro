@@ -93,6 +93,69 @@ struct SQLiteSyncOperationStore {
         repairRemoteLibraryFolders()
     }
 
+    func cachedServerSnapshot<Value: Decodable>(
+        _ key: String,
+        as type: Value.Type = Value.self
+    ) -> Value? {
+        let data: Data? = database.withReadConnection { connection in
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                connection,
+                "SELECT payload FROM server_snapshots WHERE cache_key = ?",
+                -1,
+                &statement,
+                nil
+            ) == SQLITE_OK,
+                  let statement else { return nil }
+            defer { sqlite3_finalize(statement) }
+            bind(key, statement, 1)
+            guard sqlite3_step(statement) == SQLITE_ROW,
+                  let bytes = sqlite3_column_blob(statement, 0) else { return nil }
+            return Data(
+                bytes: bytes,
+                count: Int(sqlite3_column_bytes(statement, 0))
+            )
+        } ?? nil
+        guard let data else { return nil }
+        return try? JSONDecoder.aroSyncProtocol().decode(type, from: data)
+    }
+
+    func saveServerSnapshot<Value: Encodable>(_ value: Value, key: String) {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(value) else { return }
+        database.withConnection { connection in
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                connection,
+                """
+                INSERT INTO server_snapshots (cache_key, payload, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                -1,
+                &statement,
+                nil
+            ) == SQLITE_OK,
+                  let statement else { return }
+            defer { sqlite3_finalize(statement) }
+            bind(key, statement, 1)
+            _ = data.withUnsafeBytes { bytes in
+                sqlite3_bind_blob(
+                    statement,
+                    2,
+                    bytes.baseAddress,
+                    Int32(data.count),
+                    unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+                )
+            }
+            sqlite3_bind_double(statement, 3, Date().timeIntervalSince1970)
+            _ = sqlite3_step(statement)
+        }
+    }
+
     /// Older clients accidentally converted remote library URLs into `/` when
     /// saving their synthetic watched-folder row. Repair those rows before the
     /// library store restores them, otherwise it scans the Mac's filesystem
@@ -191,6 +254,82 @@ struct SQLiteSyncOperationStore {
             }
             return operations
         } ?? []
+    }
+
+    /// Rehydrates optimistic golden metadata over the last server snapshot after an
+    /// offline relaunch. The durable outbox remains the source of truth until the
+    /// server accepts the operation and publishes a newer catalogue revision.
+    func pendingManualMetadataEdits() -> [UUID: [ManualMetadataEdit]] {
+        var values: [UUID: [EditableMetadataField: String?]] = [:]
+        for operation in pending(limit: 1_000)
+            where operation.entityType == "track_state" {
+            guard let trackID = UUID(uuidString: operation.entityID),
+                  let data = operation.payload.data(using: .utf8),
+                  case .object(let payload) = try? JSONDecoder().decode(
+                    JSONValue.self,
+                    from: data
+                  ) else { continue }
+            if operation.operation == "reset_metadata" {
+                values[trackID] = [:]
+                continue
+            }
+            for field in EditableMetadataField.allCases {
+                let key = "manual_\(field.rawValue)"
+                guard payload["\(key)_set"] == .bool(true) else { continue }
+                switch payload[key] {
+                case .string(let value):
+                    values[trackID, default: [:]][field] = value
+                case .number(let value):
+                    values[trackID, default: [:]][field] = String(format: "%g", value)
+                case .null, .none:
+                    values[trackID, default: [:]][field] = .some(nil)
+                default:
+                    break
+                }
+            }
+        }
+        return values.mapValues { fields in
+            fields.map { ManualMetadataEdit(field: $0.key, value: $0.value) }
+        }
+    }
+
+    func pendingManualArtworkEdits() -> [UUID: ManualArtworkEdit] {
+        var values: [UUID: ManualArtworkEdit] = [:]
+        let operations: [(UUID, [String: JSONValue])] = pending(limit: 1_000)
+            .filter { $0.entityType == "track_state" }
+            .compactMap { operation in
+                guard let trackID = UUID(uuidString: operation.entityID),
+                      let data = operation.payload.data(using: .utf8),
+                      case .object(let payload) = try? JSONDecoder().decode(
+                        JSONValue.self,
+                        from: data
+                      ) else { return nil }
+                return (trackID, payload)
+            }
+        var artworkByHash: [String: Data] = [:]
+        for (_, payload) in operations {
+            guard case .string(let hash)? = payload["manual_artwork_hash"],
+                  case .string(let encoded)? = payload["manual_artwork_base64"],
+                  let artwork = Data(base64Encoded: encoded) else { continue }
+            artworkByHash[hash] = artwork
+        }
+        for (trackID, payload) in operations {
+            if payload["manual_artwork_set"] == .bool(false) {
+                values.removeValue(forKey: trackID)
+                continue
+            }
+            guard payload["manual_artwork_set"] == .bool(true) else { continue }
+            if case .string(let encoded)? = payload["manual_artwork_base64"],
+               let artwork = Data(base64Encoded: encoded) {
+                values[trackID] = ManualArtworkEdit(data: artwork)
+            } else if case .string(let hash)? = payload["manual_artwork_hash"],
+                      let artwork = artworkByHash[hash] {
+                values[trackID] = ManualArtworkEdit(data: artwork)
+            } else if payload["manual_artwork_hash"] == .null {
+                values[trackID] = ManualArtworkEdit(data: nil)
+            }
+        }
+        return values
     }
 
     func markSent(_ operationIDs: [UUID]) {
@@ -1404,8 +1543,8 @@ struct SQLiteSyncOperationStore {
             INSERT INTO scan_metadata
                 (track_id, title, artist, duration, codec, sample_rate,
                  bit_depth, channel_count, bitrate, scanned_at, album, genre,
-                 release_year, artwork_url)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 release_year, artwork_url, track_number, disc_number)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(track_id) DO UPDATE SET
                 title = COALESCE(excluded.title, title),
                 artist = COALESCE(excluded.artist, artist),
@@ -1425,6 +1564,8 @@ struct SQLiteSyncOperationStore {
                     excluded.release_year,
                     release_year
                 ),
+                track_number = COALESCE(excluded.track_number, track_number),
+                disc_number = COALESCE(excluded.disc_number, disc_number),
                 artwork_url = COALESCE(excluded.artwork_url, artwork_url)
             """,
             connection
@@ -1442,7 +1583,9 @@ struct SQLiteSyncOperationStore {
             bindOptional(string(payload["album"]), $0, 11)
             bindOptional(string(payload["genre"]), $0, 12)
             bindOptional(integer(payload["release_year"]), $0, 13)
-            bindOptional(string(payload["artwork_url"]), $0, 14)
+            sqlite3_bind_null($0, 14)
+            bindOptional(integer(payload["track_number"]), $0, 15)
+            bindOptional(integer(payload["disc_number"]), $0, 16)
         }
         try run(
             """
@@ -1789,8 +1932,8 @@ struct SQLiteSyncOperationStore {
             INSERT INTO scan_metadata
                 (track_id, title, artist, duration, codec, sample_rate,
                  bit_depth, channel_count, bitrate, scanned_at, album, genre,
-                 release_year, artwork_url)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 release_year, artwork_url, track_number, disc_number)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(track_id) DO UPDATE SET
                 title = COALESCE(excluded.title, title),
                 artist = COALESCE(excluded.artist, artist),
@@ -1810,6 +1953,8 @@ struct SQLiteSyncOperationStore {
                     excluded.release_year,
                     release_year
                 ),
+                track_number = COALESCE(excluded.track_number, track_number),
+                disc_number = COALESCE(excluded.disc_number, disc_number),
                 artwork_url = COALESCE(excluded.artwork_url, artwork_url)
             """,
             connection
@@ -1827,7 +1972,9 @@ struct SQLiteSyncOperationStore {
             bindOptional(string(payload["album"]), $0, 11)
             bindOptional(string(payload["genre"]), $0, 12)
             bindOptional(integer(payload["release_year"]), $0, 13)
-            bindOptional(string(payload["artwork_url"]), $0, 14)
+            sqlite3_bind_null($0, 14)
+            bindOptional(integer(payload["track_number"]), $0, 15)
+            bindOptional(integer(payload["disc_number"]), $0, 16)
         }
         try run(
             """
@@ -2040,6 +2187,106 @@ struct SQLiteSyncOperationStore {
             bind(sequenced.kind, $0, 9)
             sqlite3_bind_double($0, 10, now)
             bind(localTrackID, $0, 11)
+        }
+
+        if let artworkURL = string(payload["artwork_url"]) {
+            try run(
+                """
+                UPDATE track_state
+                SET identified_artwork_url = COALESCE(?, identified_artwork_url)
+                WHERE track_id = ?
+                """,
+                connection
+            ) {
+                bind(artworkURL, $0, 1)
+                bind(localTrackID, $0, 2)
+            }
+        }
+
+        for field in EditableMetadataField.allCases {
+            let setKey = "manual_\(field.rawValue)_set"
+            guard let isSet = boolean(payload[setKey]) else { continue }
+            if !isSet {
+                try run(
+                    "DELETE FROM manual_metadata_overrides WHERE track_id = ? AND field = ?",
+                    connection
+                ) {
+                    bind(localTrackID, $0, 1)
+                    bind(field.rawValue, $0, 2)
+                }
+                continue
+            }
+            let value: String?
+            switch payload["manual_\(field.rawValue)"] {
+            case .string(let text): value = text
+            case .number(let number): value = String(Int(number))
+            case .null, .none: value = nil
+            default: continue
+            }
+            try run(
+                """
+                INSERT INTO manual_metadata_overrides
+                    (track_id, field, value, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(track_id, field) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                connection
+            ) {
+                bind(localTrackID, $0, 1)
+                bind(field.rawValue, $0, 2)
+                bindOptional(value, $0, 3)
+                sqlite3_bind_double($0, 4, now)
+            }
+        }
+
+        if let artworkSet = boolean(payload["manual_artwork_set"]) {
+            if !artworkSet {
+                try run(
+                    """
+                    UPDATE track_state
+                    SET manual_artwork = NULL, manual_artwork_url = NULL,
+                        manual_artwork_set = 0
+                    WHERE track_id = ?
+                    """,
+                    connection
+                ) {
+                    bind(localTrackID, $0, 1)
+                }
+            } else if let hash = string(payload["manual_artwork_hash"]),
+                      !hash.isEmpty {
+                let url = "/v1/blobs/\(hash)"
+                try run(
+                    """
+                    UPDATE track_state
+                    SET manual_artwork = CASE
+                            WHEN manual_artwork_url IS NULL
+                              OR manual_artwork_url = ? THEN manual_artwork
+                            ELSE NULL
+                        END,
+                        manual_artwork_url = ?, manual_artwork_set = 1
+                    WHERE track_id = ?
+                    """,
+                    connection
+                ) {
+                    bind(url, $0, 1)
+                    bind(url, $0, 2)
+                    bind(localTrackID, $0, 3)
+                }
+            } else {
+                try run(
+                    """
+                    UPDATE track_state
+                    SET manual_artwork = NULL, manual_artwork_url = NULL,
+                        manual_artwork_set = 1
+                    WHERE track_id = ?
+                    """,
+                    connection
+                ) {
+                    bind(localTrackID, $0, 1)
+                }
+            }
         }
     }
 

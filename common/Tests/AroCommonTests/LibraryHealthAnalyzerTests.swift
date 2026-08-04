@@ -294,7 +294,7 @@ struct LibraryHealthAnalyzerTests {
 @Suite("Review library health")
 struct ReviewLibraryHealthTests {
     @Test("The use case analyzes tracks supplied by its query boundary")
-    func executesQuery() {
+    func executesQuery() async {
         let trackID = UUID()
         let useCase = ReviewLibraryHealth(
             tracks: StubLibraryHealthTracks(
@@ -322,7 +322,7 @@ struct ReviewLibraryHealthTests {
             )
         )
 
-        let result = useCase.execute()
+        let result = await useCase.execute()
 
         #expect(
             result.missingFiles.map(\.id)

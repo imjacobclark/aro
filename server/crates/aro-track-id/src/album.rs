@@ -196,7 +196,11 @@ const POSITION_WEIGHT: f64 = 0.05;
 /// all, rather than penalizing the pair for missing data); the weighted sum is renormalized
 /// over just the terms that fired, so a release with sparse metadata isn't systematically
 /// penalized relative to one with complete metadata.
-fn pair_score(file: &GroupFile<'_>, medium: &musicbrainz::Medium, track: &musicbrainz::Track) -> f64 {
+fn pair_score(
+    file: &GroupFile<'_>,
+    medium: &musicbrainz::Medium,
+    track: &musicbrainz::Track,
+) -> f64 {
     let mut weighted_sum = 0.0;
     let mut weight_total = 0.0;
 
@@ -226,13 +230,18 @@ fn pair_score(file: &GroupFile<'_>, medium: &musicbrainz::Medium, track: &musicb
         weight_total += DURATION_WEIGHT;
     }
 
-    if let (Some(file_title), Some(track_title)) = (file.tags.title.as_deref(), track.title.as_deref()) {
+    if let (Some(file_title), Some(track_title)) =
+        (file.tags.title.as_deref(), track.title.as_deref())
+    {
         weighted_sum += TITLE_WEIGHT * matching::title_similarity(file_title, track_title);
         weight_total += TITLE_WEIGHT;
     }
 
-    if let (Some(file_track_number), Some(track_position)) = (file.tags.track_number, track.position) {
-        let disc_agrees = file.tags.disc_number.is_none() || file.tags.disc_number == medium.position;
+    if let (Some(file_track_number), Some(track_position)) =
+        (file.tags.track_number, track.position)
+    {
+        let disc_agrees =
+            file.tags.disc_number.is_none() || file.tags.disc_number == medium.position;
         let matches = file_track_number == track_position && disc_agrees;
         weighted_sum += POSITION_WEIGHT * if matches { 1.0 } else { 0.0 };
         weight_total += POSITION_WEIGHT;
@@ -256,7 +265,10 @@ struct Candidate<'r> {
 /// `musicbrainz::MusicBrainzClient::release`, not a release *stub*: only a full fetch
 /// carries a nested recording id per track (verified directly — a recording lookup's
 /// embedded release stub does not, even with `+media`).
-pub fn match_group_against_release(files: &[GroupFile<'_>], release: &musicbrainz::ReleaseResponse) -> GroupMatch {
+pub fn match_group_against_release(
+    files: &[GroupFile<'_>],
+    release: &musicbrainz::ReleaseResponse,
+) -> GroupMatch {
     let mut candidates = Vec::new();
     for medium in &release.media {
         let medium_position = medium.position.unwrap_or(1);
@@ -300,13 +312,20 @@ pub fn match_group_against_release(files: &[GroupFile<'_>], release: &musicbrain
         1.0 - (release_track_total as f64 - files.len() as f64).abs() / denominator
     };
 
-    let score = 0.55 * assigned_fraction + 0.30 * mean_assigned_score + 0.15 * track_count_agreement;
+    let score =
+        0.55 * assigned_fraction + 0.30 * mean_assigned_score + 0.15 * track_count_agreement;
 
     GroupMatch {
         release_id: release.id.clone(),
         release_title: release.title.clone(),
-        release_group_id: release.release_group.as_ref().and_then(|group| group.id.clone()),
-        release_artist: release.artist_credit.first().and_then(|credit| credit.name.clone()),
+        release_group_id: release
+            .release_group
+            .as_ref()
+            .and_then(|group| group.id.clone()),
+        release_artist: release
+            .artist_credit
+            .first()
+            .and_then(|credit| credit.name.clone()),
         score,
         assigned_fraction,
         assignments,
@@ -506,7 +525,11 @@ mod tests {
         assert_eq!(result.assignments.len(), 27);
         assert!(result.unmatched_files.is_empty());
         assert_eq!(duplicate_track_positions(&result.assignments), 0);
-        assert!(result.score > 0.95, "expected a near-perfect score, got {}", result.score);
+        assert!(
+            result.score > 0.95,
+            "expected a near-perfect score, got {}",
+            result.score
+        );
         assert!(accept(&result, None, files.len()));
     }
 
@@ -593,7 +616,12 @@ mod tests {
         }
     }
 
-    fn synthetic_track(id: &str, position: u32, title: &str, length_ms: Option<u64>) -> musicbrainz::Track {
+    fn synthetic_track(
+        id: &str,
+        position: u32,
+        title: &str,
+        length_ms: Option<u64>,
+    ) -> musicbrainz::Track {
         musicbrainz::Track {
             id: id.to_string(),
             position: Some(position),
@@ -609,7 +637,10 @@ mod tests {
         }
     }
 
-    fn synthetic_release(id: &str, tracks: Vec<musicbrainz::Track>) -> musicbrainz::ReleaseResponse {
+    fn synthetic_release(
+        id: &str,
+        tracks: Vec<musicbrainz::Track>,
+    ) -> musicbrainz::ReleaseResponse {
         let track_count = tracks.len() as u32;
         musicbrainz::ReleaseResponse {
             id: id.to_string(),
@@ -633,8 +664,14 @@ mod tests {
     /// construction.
     #[test]
     fn assignment_is_one_to_one_for_identical_durations() {
-        let tags_a = ExistingTags { title: Some("Song A".into()), ..Default::default() };
-        let tags_b = ExistingTags { title: Some("Song B".into()), ..Default::default() };
+        let tags_a = ExistingTags {
+            title: Some("Song A".into()),
+            ..Default::default()
+        };
+        let tags_b = ExistingTags {
+            title: Some("Song B".into()),
+            ..Default::default()
+        };
         let empty_candidates: Vec<String> = Vec::new();
         let files = vec![
             GroupFile {
@@ -689,7 +726,12 @@ mod tests {
         assert_eq!(result.assignments[0].pair_score, 1.0);
     }
 
-    fn synthetic_match(release_id: &str, release_group_id: Option<&str>, score: f64, assigned: usize) -> GroupMatch {
+    fn synthetic_match(
+        release_id: &str,
+        release_group_id: Option<&str>,
+        score: f64,
+        assigned: usize,
+    ) -> GroupMatch {
         GroupMatch {
             release_id: release_id.to_string(),
             release_title: None,
@@ -753,7 +795,11 @@ mod tests {
         assert!(accept(&strong, None, 1));
     }
 
-    fn synthetic_stub_release(id: &str, group_id: Option<&str>, track_total: Option<u32>) -> musicbrainz::Release {
+    fn synthetic_stub_release(
+        id: &str,
+        group_id: Option<&str>,
+        track_total: Option<u32>,
+    ) -> musicbrainz::Release {
         musicbrainz::Release {
             id: id.to_string(),
             title: Some(id.to_string()),
@@ -801,7 +847,12 @@ mod tests {
             .collect();
         let files = borrow_group_files(&owned);
 
-        let shortlisted = shortlist_candidates(&files, &releases_per_file, &musicbrainz::AffinityIndex::default(), 2);
+        let shortlisted = shortlist_candidates(
+            &files,
+            &releases_per_file,
+            &musicbrainz::AffinityIndex::default(),
+            2,
+        );
 
         assert!(shortlisted.len() <= 2);
     }
@@ -812,7 +863,11 @@ mod tests {
         // support threshold for a 5-file group (max(2, ceil(0.15*5)) = 2).
         let releases_per_file: Vec<Vec<musicbrainz::Release>> = (0..5)
             .map(|file_index| {
-                let mut releases = vec![synthetic_stub_release("rel-popular", Some("rg-pop"), Some(5))];
+                let mut releases = vec![synthetic_stub_release(
+                    "rel-popular",
+                    Some("rg-pop"),
+                    Some(5),
+                )];
                 if file_index == 0 {
                     releases.push(synthetic_stub_release("rel-rare", Some("rg-rare"), Some(5)));
                 }
@@ -829,7 +884,12 @@ mod tests {
             .collect();
         let files = borrow_group_files(&owned);
 
-        let shortlisted = shortlist_candidates(&files, &releases_per_file, &musicbrainz::AffinityIndex::default(), 5);
+        let shortlisted = shortlist_candidates(
+            &files,
+            &releases_per_file,
+            &musicbrainz::AffinityIndex::default(),
+            5,
+        );
 
         assert_eq!(shortlisted, vec!["rel-popular".to_string()]);
     }

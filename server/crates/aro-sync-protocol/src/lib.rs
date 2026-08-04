@@ -256,6 +256,36 @@ pub struct SourceHealthReport {
     pub mode: String,
     pub available: bool,
     pub warning: Option<String>,
+    #[serde(default)]
+    pub song_count: Option<u64>,
+}
+
+/// Authenticated, user-facing view of the library relationship graph.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TopologySnapshot {
+    pub hub_id: Uuid,
+    pub display_name: String,
+    /// Live, non-tombstoned tracks in the hub catalog. Clients must not infer
+    /// this from the size of a streaming/on-demand local replica.
+    pub track_count: u64,
+    pub devices: Vec<DeviceSummary>,
+    pub sources: Vec<SourceHealthReport>,
+    /// Streams currently being served by this hub. This is a count rather
+    /// than a client attribution: a stream can be prefetched before playback.
+    pub active_transfers: u64,
+    /// Fresh playback reports let clients draw the actual listening route,
+    /// rather than inferring liveness from a device's last sync time.
+    pub live_playback: Vec<TopologyPlaybackActivity>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TopologyPlaybackActivity {
+    pub device_id: Uuid,
+    pub device_name: String,
+    pub device_type: String,
+    pub state: PlaybackActivityState,
+    pub observed_at: DateTime<Utc>,
+    pub playback: PlaybackActivitySnapshot,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -270,6 +300,48 @@ pub struct ExchangeResponse {
 pub struct SnapshotPage {
     pub tracks: Vec<ManifestEntry>,
     pub next_cursor: Option<String>,
+}
+
+/// Lightweight server-owned catalog row used by normal browsing. Unlike a
+/// manifest entry this is presentation-ready and contains no CRDT field
+/// versions or artwork bytes.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CatalogTrack {
+    pub track_id: Uuid,
+    #[serde(default)]
+    pub source_id: Option<Uuid>,
+    #[serde(default)]
+    pub source_name: Option<String>,
+    pub content_hash: Option<String>,
+    pub title: String,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub genre: Option<String>,
+    pub release_year: Option<u32>,
+    pub duration_seconds: Option<f64>,
+    pub byte_count: Option<u64>,
+    pub codec: Option<String>,
+    pub sample_rate: Option<f64>,
+    pub bit_depth: Option<u32>,
+    pub channel_count: Option<u32>,
+    pub bitrate: Option<f64>,
+    pub integrated_lufs: Option<f64>,
+    pub peak_amplitude: Option<f64>,
+    pub loudness_analyzed_at: Option<f64>,
+    pub loudness_algorithm_version: Option<u32>,
+    pub track_number: Option<u32>,
+    pub disc_number: Option<u32>,
+    pub artwork_hash: Option<String>,
+    #[serde(default)]
+    pub favourite: bool,
+    pub available: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CatalogPage {
+    pub tracks: Vec<CatalogTrack>,
+    pub next_cursor: Option<String>,
+    pub revision: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

@@ -31,6 +31,12 @@ final class PlaybackController {
     private(set) var visualizerLevels = Array(repeating: 0.0, count: 9)
     private(set) var isShuffleEnabled: Bool
     private(set) var repeatMode: PlaybackRepeatMode
+    /// Set by the active library transport. While offline, catalogue entries remain
+    /// browsable but queues are reduced to media actually present on this Mac.
+    var restrictsPlaybackToLocalMedia = false
+    /// A colocated server outage is an infrastructure failure, not permission
+    /// to bypass the authority by opening original files directly.
+    private(set) var serverUnavailableReason: String?
 
     @ObservationIgnored private var engine: (any AudioPlaybackEngine)?
     @ObservationIgnored private let engineFactory: @MainActor () -> any AudioPlaybackEngine
@@ -44,6 +50,8 @@ final class PlaybackController {
     @ObservationIgnored private let prepareSong: PrepareSongForPlayback?
     @ObservationIgnored private let mediaLocationResolver:
         (@MainActor (Song) -> PlaybackMediaLocation?)?
+    @ObservationIgnored private let localMediaAvailability:
+        @MainActor (Song) -> Bool
     /// Reorders upcoming tracks by measured audio similarity; `nil` when no hub is
     /// available, in which case shuffle stays uniformly random.
     ///
@@ -83,6 +91,8 @@ final class PlaybackController {
         prepareSong: PrepareSongForPlayback? = nil,
         mediaLocationResolver:
             (@MainActor (Song) -> PlaybackMediaLocation?)? = nil,
+        localMediaAvailability:
+            @escaping @MainActor (Song) -> Bool = { $0.url.isFileURL },
         smartShuffleOrder:
             (@MainActor ([String], String?) async -> [String]?)? = nil,
         progressivePlaybackEligibility:
@@ -108,6 +118,7 @@ final class PlaybackController {
         self.effectiveModeResolver = effectiveModeResolver ?? { [preferences] in preferences.mode }
         self.prepareSong = prepareSong
         self.mediaLocationResolver = mediaLocationResolver
+        self.localMediaAvailability = localMediaAvailability
         self.smartShuffleOrder = smartShuffleOrder
         self.progressivePlaybackEligibility = progressivePlaybackEligibility
         self.progressiveDownloadFallbackAllowed =
@@ -124,7 +135,7 @@ final class PlaybackController {
     }
 
     var canTogglePlayback: Bool {
-        currentSong != nil
+        currentSong != nil && serverUnavailableReason == nil
     }
 
     var canGoPrevious: Bool {
@@ -150,9 +161,20 @@ final class PlaybackController {
     }
 
     func play(song: Song, queue requestedQueue: [Song]) {
+        guard serverUnavailableReason == nil else {
+            fail(serverUnavailableReason ?? "The library server is unavailable.")
+            return
+        }
+        let playableQueue = restrictsPlaybackToLocalMedia
+            ? requestedQueue.filter(localMediaAvailability)
+            : requestedQueue
+        guard !restrictsPlaybackToLocalMedia || localMediaAvailability(song) else {
+            fail("This song has not been downloaded and the library server is offline.")
+            return
+        }
         let prepared = queuePolicy.prepare(
             selectedSong: song,
-            requestedQueue: requestedQueue
+            requestedQueue: playableQueue
         )
         canonicalQueue = prepared.songs
         if isShuffleEnabled {
@@ -279,6 +301,10 @@ final class PlaybackController {
     }
 
     func togglePlayPause() {
+        guard serverUnavailableReason == nil else {
+            fail(serverUnavailableReason ?? "The library server is unavailable.")
+            return
+        }
         switch state {
         case .playing, .buffering:
             guard let engine else {
@@ -302,6 +328,18 @@ final class PlaybackController {
         case .idle, .loading:
             break
         }
+    }
+
+    func setServerUnavailable(_ reason: String?) {
+        guard serverUnavailableReason != reason else { return }
+        serverUnavailableReason = reason
+        guard let reason else { return }
+        preparationTask?.cancel()
+        engine?.stop()
+        listeningSession.end()
+        stopProgressUpdates()
+        state = .failed(reason)
+        publishNowPlayingInfo()
     }
 
     func previous() {
@@ -451,6 +489,10 @@ final class PlaybackController {
         shouldPlay: Bool = true,
         isStallRetry: Bool = false
     ) {
+        guard serverUnavailableReason == nil else {
+            fail(serverUnavailableReason ?? "The library server is unavailable.")
+            return
+        }
         guard queue.indices.contains(index) else {
             finishQueue()
             return
@@ -642,8 +684,12 @@ final class PlaybackController {
         guard queue.indices.contains(index) else { return [] }
         var result: [PlaybackQueueItem] = []
         for song in queue[index...] {
-            let location = mediaLocationResolver?(song)
-                ?? (song.url.isFileURL ? .local(song.url) : nil)
+            // Once a remote item has been downloaded/verified, `replacingURL`
+            // makes its URL local. Never ask the remote resolver to reinterpret
+            // that prepared copy as another network resource.
+            let location = song.url.isFileURL
+                ? .local(song.url)
+                : mediaLocationResolver?(song)
             guard let location else {
                 break
             }

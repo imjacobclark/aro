@@ -79,6 +79,34 @@ struct SQLiteLibraryCatalogRepository: LibraryCatalogRepository {
         database.storeArtwork(trackID: trackID, data: data)
     }
 
+    func metadataSnapshot(song: Song, librarySongs: [Song]) -> TrackMetadataSnapshot {
+        database.metadataSnapshot(song: song, librarySongs: librarySongs)
+    }
+
+    func applyManualMetadata(_ edits: [ManualMetadataEdit], trackIDs: [UUID]) {
+        database.applyManualMetadata(edits, trackIDs: trackIDs)
+    }
+
+    func applyManualArtwork(_ edit: ManualArtworkEdit, trackIDs: [UUID]) {
+        database.applyManualArtwork(edit, trackIDs: trackIDs)
+    }
+
+    func resetManualMetadata(trackIDs: [UUID]) {
+        database.resetManualMetadata(trackIDs: trackIDs)
+    }
+
+    func queueManualMetadata(
+        _ edits: [ManualMetadataEdit],
+        trackIDs: [UUID],
+        reset: Bool
+    ) {
+        database.queueManualMetadata(edits, trackIDs: trackIDs, reset: reset)
+    }
+
+    func queueManualArtwork(_ edit: ManualArtworkEdit, trackIDs: [UUID]) {
+        database.queueManualArtwork(edit, trackIDs: trackIDs)
+    }
+
     private func enriching(_ songs: [Song]) -> [Song] {
         let missingFingerprints = songs.compactMap { song in
             song.loudness == nil ? song.fileFingerprint?.cacheKey : nil
@@ -86,7 +114,7 @@ struct SQLiteLibraryCatalogRepository: LibraryCatalogRepository {
         guard !missingFingerprints.isEmpty else { return songs }
         let analyses = loudness.analyses(
             fingerprints: missingFingerprints,
-            algorithmVersion: LoudnessAnalysis.algorithmVersion
+            algorithmVersion: LoudnessAnalysis.remoteAlgorithmVersion
         )
         guard !analyses.isEmpty else { return songs }
         return songs.map { song in

@@ -5,6 +5,7 @@ struct AlbumSongList: View {
     let songs: [Song]
     let playback: PlaybackController
     let syncTrackData: (Song) async -> Void
+    let editMetadata: (Song) -> Void
 
     var body: some View {
         AppKitSongTable(
@@ -19,6 +20,7 @@ struct AlbumSongList: View {
             onSyncTrackData: { song in
                 await syncTrackData(song)
             },
+            onEditMetadata: { song in editMetadata(song) },
             onRequestRemoval: nil
         )
         .frame(

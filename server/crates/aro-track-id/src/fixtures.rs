@@ -24,8 +24,12 @@ use serde::Deserialize;
 
 pub(crate) fn acoustid_lookup(name: &str) -> acoustid::LookupResponse {
     let json = match name {
-        "december-neck-deep" => include_str!("../../../fixtures/track-id/acoustid/december-neck-deep.json"),
-        "beatles-1-track-09" => include_str!("../../../fixtures/track-id/acoustid/beatles-1-track-09.json"),
+        "december-neck-deep" => {
+            include_str!("../../../fixtures/track-id/acoustid/december-neck-deep.json")
+        }
+        "beatles-1-track-09" => {
+            include_str!("../../../fixtures/track-id/acoustid/beatles-1-track-09.json")
+        }
         "blink-182-hyphen-dammit" => {
             include_str!("../../../fixtures/track-id/acoustid/blink-182-hyphen-dammit.json")
         }
@@ -43,7 +47,9 @@ pub(crate) fn mb_recording(name: &str) -> musicbrainz::RecordingResponse {
             include_str!("../../../fixtures/track-id/musicbrainz/recording-beatles-1-track-09.json")
         }
         "blink-182-hyphen-dammit" => {
-            include_str!("../../../fixtures/track-id/musicbrainz/recording-blink-182-hyphen-dammit.json")
+            include_str!(
+                "../../../fixtures/track-id/musicbrainz/recording-blink-182-hyphen-dammit.json"
+            )
         }
         other => panic!("no musicbrainz recording fixture named {other:?}"),
     };
@@ -68,7 +74,9 @@ pub(crate) fn mb_release(name: &str) -> musicbrainz::ReleaseResponse {
 pub(crate) fn mb_recording_with_media(name: &str) -> musicbrainz::RecordingResponse {
     let json = match name {
         "ticket-to-ride" => {
-            include_str!("../../../fixtures/track-id/musicbrainz/recording-ticket-to-ride-with-media.json")
+            include_str!(
+                "../../../fixtures/track-id/musicbrainz/recording-ticket-to-ride-with-media.json"
+            )
         }
         other => panic!("no musicbrainz recording-with-media fixture named {other:?}"),
     };
@@ -78,9 +86,13 @@ pub(crate) fn mb_recording_with_media(name: &str) -> musicbrainz::RecordingRespo
 /// Raw JSON for a `ws/2/release/{id}?inc=recordings+artist-credits+release-groups` response.
 pub(crate) fn mb_release_raw(name: &str) -> serde_json::Value {
     let json = match name {
-        "beatles-1" => include_str!("../../../fixtures/track-id/musicbrainz/release-beatles-1.json"),
+        "beatles-1" => {
+            include_str!("../../../fixtures/track-id/musicbrainz/release-beatles-1.json")
+        }
         "blink-182-greatest-hits" => {
-            include_str!("../../../fixtures/track-id/musicbrainz/release-blink-182-greatest-hits.json")
+            include_str!(
+                "../../../fixtures/track-id/musicbrainz/release-blink-182-greatest-hits.json"
+            )
         }
         "arctic-monkeys-am" => {
             include_str!("../../../fixtures/track-id/musicbrainz/release-arctic-monkeys-am.json")
@@ -130,9 +142,13 @@ pub(crate) fn group(name: &str) -> GroupFixture {
         "blink-182-greatest-hits" => {
             include_str!("../../../fixtures/track-id/groups/blink-182-greatest-hits.json")
         }
-        "arctic-monkeys-am" => include_str!("../../../fixtures/track-id/groups/arctic-monkeys-am.json"),
+        "arctic-monkeys-am" => {
+            include_str!("../../../fixtures/track-id/groups/arctic-monkeys-am.json")
+        }
         "neck-deep-lifes-not-out-to-get-you" => {
-            include_str!("../../../fixtures/track-id/groups/neck-deep-lifes-not-out-to-get-you.json")
+            include_str!(
+                "../../../fixtures/track-id/groups/neck-deep-lifes-not-out-to-get-you.json"
+            )
         }
         "mixed-bag" => include_str!("../../../fixtures/track-id/groups/mixed-bag.json"),
         other => panic!("no group fixture named {other:?}"),

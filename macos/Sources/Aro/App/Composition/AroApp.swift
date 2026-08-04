@@ -99,7 +99,9 @@ struct AroApp: App {
         // `selectedProfile` is still nil) needs its own hub running to scan,
         // hash, and identify anything, whether or not the user ever turns on
         // LAN sharing/pairing on top of it.
-        if selectedProfile == nil || selectedProfile?.kind == .local {
+        if selectedProfile == nil || registry.profiles.contains(where: {
+            $0.kind == .local
+        }) {
             if syncPreferences.dataLocation.isEmpty {
                 self.syncPreferences.dataLocation =
                     SyncPreferences.recommendedDataLocation
@@ -137,26 +139,13 @@ struct AroApp: App {
                 await hubService.ensureCompatibleHelper(
                     dataLocation: syncPreferences.dataLocation
                 )
-                // Keeps this Mac's local database current with its own hub's
-                // operation log on an ongoing basis -- new identification
-                // results, loudness analysis, and safety-rescan changes all
-                // land here, not just what importInitialFoldersAndSync pulled
-                // in once at profile-activation time. Tied to `runtime` via
-                // `.id(ObjectIdentifier(runtime))` above, so switching
-                // profiles cancels and restarts this loop against the newly
-                // active one.
-                while !Task.isCancelled {
-                    if profileRegistry.activeProfile?.kind == .local,
-                       hubService.isEnabled,
-                       !syncPreferences.dataLocation.isEmpty {
-                        let control = HubControlClient(
-                            socketURL: URL(
-                                fileURLWithPath: syncPreferences.dataLocation
-                            ).appendingPathComponent("control.sock")
-                        )
-                        await synchronizeLocalHub(client: control, into: runtime)
-                    }
-                    try? await Task.sleep(for: .seconds(5))
+                await enforceLocalServerExposure()
+                // The control socket is bootstrap-only: learn the local hub's
+                // endpoint and certificate identity, persist them on the
+                // profile, then rebuild the runtime so all normal catalogue
+                // and media traffic uses pinned loopback HTTPS.
+                if await bootstrapLocalServerProfile() {
+                    return
                 }
             }
         }
@@ -192,9 +181,6 @@ struct AroApp: App {
         // render a player bar backed by a retiring controller.
         runtime.playbackController.stopAndClear()
         profileRegistry.activate(profile.id)
-        if profile.kind == .remote, hubService.isEnabled {
-            hubService.setEnabled(false)
-        }
         let replacement = LibraryRuntime(
             databaseURL: URL(fileURLWithPath: profile.databasePath),
             playbackPreferences: playbackPreferences,
@@ -210,8 +196,7 @@ struct AroApp: App {
         // or not LAN sharing/pairing is ever turned on on top of it (see
         // `init()`'s matching comment). Folders are imported through it rather
         // than scanned in-process -- this Mac's library is a replica of its
-        // own hub's operation log (`LocalHubReplicaCoordinator`), not a
-        // second, independent scanner.
+        // its catalogue over the same pinned HTTPS API used for a remote hub.
         if profile.kind == .local {
             if syncPreferences.dataLocation.isEmpty {
                 syncPreferences.dataLocation =
@@ -225,28 +210,103 @@ struct AroApp: App {
             // with `mode` alone telling the hub whether to copy it into its
             // own managed blob store or just index it in place.
             let initialPaths = profile.referencedMusicPaths
-            let importMode: HubImportMode = profile.managedMusicPath != nil
-                ? .managed
-                : .referenced
             Task {
                 await importInitialFoldersAndSync(
                     paths: initialPaths,
-                    mode: importMode,
                     into: replacement
                 )
             }
         }
     }
 
-    /// Imports this profile's initial folders through the local hub (its
-    /// `SourceManager`, not this app's own scanner) and pulls the resulting
-    /// library state back into `runtime`'s local database. Best-effort: a
-    /// helper that hasn't finished starting yet just means nothing to import
-    /// this pass -- the periodic sync in `body`'s `.task` will catch up once
-    /// it has.
+    /// Returns true when the runtime was replaced. The enclosing `.task` is
+    /// tied to that runtime and should finish so its replacement can start a
+    /// fresh synchronization loop with the newly persisted server session.
+    private func bootstrapLocalServerProfile() async -> Bool {
+        guard var profile = profileRegistry.activeProfile,
+              profile.kind == .local,
+              !syncPreferences.dataLocation.isEmpty,
+              let adminToken = syncPreferences.localAdminToken,
+              !adminToken.isEmpty else {
+            return false
+        }
+        let control = HubControlClient(
+            socketURL: URL(fileURLWithPath: syncPreferences.dataLocation)
+                .appendingPathComponent("control.sock")
+        )
+        do {
+            let status = try await control.status()
+            guard let baseURL = URL(
+                string: "https://127.0.0.1:\(status.httpsPort)"
+            ) else { return false }
+            let client = AroSyncClient(
+                localAdminBaseURL: baseURL,
+                adminToken: adminToken,
+                pinnedTLSFingerprint: status.tlsFingerprint
+            )
+            let hub = try await client.compatibleHubInfo()
+            guard hub.hubID == status.hubID else { return false }
+
+            runtime.syncOperationStore.upsertMembership(
+                hub: hub,
+                baseURL: baseURL,
+                tlsFingerprint: status.tlsFingerprint,
+                replicaMode: .onDemand
+            )
+            let changed = profile.hubID != hub.hubID
+                || profile.baseURL != baseURL
+            profile.hubID = hub.hubID
+            profile.baseURL = baseURL
+            profile.name = hub.displayName
+            profileRegistry.update(profile)
+            guard changed else { return false }
+            activateProfile(profile)
+            return true
+        } catch {
+            hubService.errorMessage = "The local library server could not be "
+                + "authenticated: \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    /// LAN visibility is a property of the hosted profile, not of whether the
+    /// server process is running. The process stays available on loopback for
+    /// all local-library work even when sharing is switched off.
+    private func enforceLocalServerExposure() async {
+        guard !syncPreferences.dataLocation.isEmpty else { return }
+        let profile = profileRegistry.profiles.first { $0.kind == .local }
+        let sharing = profile?.sharingEnabled ?? false
+        let port = profile?.baseURL?.port ?? 4848
+        let desiredBind = sharing ? "[::]:\(port)" : "127.0.0.1:\(port)"
+        let desiredMDNS = sharing ? "true" : "false"
+        let control = HubControlClient(
+            socketURL: URL(fileURLWithPath: syncPreferences.dataLocation)
+                .appendingPathComponent("control.sock")
+        )
+        do {
+            async let currentBind = control.configValue(key: "bind")
+            async let currentMDNS = control.configValue(key: "advertise_mdns")
+            let (bind, mdns) = try await (currentBind, currentMDNS)
+            let needsUpdate = bind != desiredBind || mdns != desiredMDNS
+            guard needsUpdate else { return }
+            try await control.setConfig(key: "bind", value: desiredBind)
+            try await control.setConfig(
+                key: "advertise_mdns",
+                value: desiredMDNS
+            )
+            await hubService.ensureCompatibleHelper(
+                dataLocation: syncPreferences.dataLocation
+            )
+        } catch {
+            hubService.errorMessage = "The local server's network visibility "
+                + "could not be applied: \(error.localizedDescription)"
+        }
+    }
+
+    /// Imports initial paths through the same HTTPS admin API used by the rest
+    /// of the app. The control socket has already completed trust bootstrap.
     private func importInitialFoldersAndSync(
         paths: [String],
-        mode: HubImportMode,
         into runtime: LibraryRuntime
     ) async {
         await hubService.ensureCompatibleHelper(
@@ -255,34 +315,17 @@ struct AroApp: App {
         guard hubService.isEnabled, !syncPreferences.dataLocation.isEmpty else {
             return
         }
-        let control = HubControlClient(
-            socketURL: URL(fileURLWithPath: syncPreferences.dataLocation)
-                .appendingPathComponent("control.sock")
-        )
+        guard let profile = profileRegistry.activeProfile,
+              let connection = LibraryServerConnection.resolve(
+                profile: profile,
+                operations: runtime.syncOperationStore,
+                deviceID: runtime.database.deviceID,
+                localAdminToken: syncPreferences.localAdminToken
+              ),
+              connection.isLocallyHosted else { return }
         for path in paths {
-            _ = try? await control.importFolder(path: path, mode: mode)
+            _ = try? await connection.client.addAdminFolder(path: path)
         }
-        await synchronizeLocalHub(client: control, into: runtime)
-    }
-
-    /// Pulls this Mac's own local hub's operation log into `runtime`'s local
-    /// database via `LocalHubReplicaCoordinator`, then refreshes the UI's
-    /// folder/song lists to reflect whatever landed -- including a brand-new
-    /// synthetic "folder" row the coordinator may just have created, which
-    /// `LibraryStore`'s in-memory folder list doesn't know about until asked
-    /// to re-read the database.
-    private func synchronizeLocalHub(
-        client: HubControlClient,
-        into runtime: LibraryRuntime
-    ) async {
-        guard let status = try? await client.status() else { return }
-        let coordinator = LocalHubReplicaCoordinator(
-            hubID: status.hubID,
-            client: client,
-            operations: runtime.syncOperationStore
-        )
-        _ = try? await coordinator.synchronize()
-        runtime.libraryStore.refreshFoldersFromDatabase()
     }
 
     /// Client-only action: disconnects this Mac from a remote library it
@@ -297,15 +340,31 @@ struct AroApp: App {
         if profile.id == profileRegistry.activeProfileID {
             // The active profile's database is open via `runtime`; switch
             // away first so that connection closes before its file is
-            // deleted below. If there's nothing else to switch to, the
-            // Settings UI is expected to have disabled this action.
+            // deleted below. When this is the final profile, replace it with
+            // a neutral empty runtime; removing the registry entry below then
+            // makes Settings render the same setup flow as first launch.
             let fallback = profileRegistry.profiles.first {
                 $0.id != profile.id && $0.kind == .local
             } ?? profileRegistry.profiles
                 .filter { $0.id != profile.id }
                 .max { $0.lastActivatedAt < $1.lastActivatedAt }
-            guard let fallback else { return }
-            activateProfile(fallback)
+            if let fallback {
+                activateProfile(fallback)
+            } else {
+                runtime.playbackController.stopAndClear()
+                let replacement = LibraryRuntime(
+                    databaseURL: LibraryDatabase.defaultURL(),
+                    playbackPreferences: playbackPreferences,
+                    audioDeviceManager: audioDeviceManager,
+                    profile: nil,
+                    localAdminToken: syncPreferences.localAdminToken
+                )
+                replacement.libraryStore.selection = .settings
+                runtime = replacement
+                nowPlayingCoordinator.rebind(
+                    to: replacement.playbackController
+                )
+            }
         }
 
         try? FileManager.default.removeItem(
@@ -342,39 +401,21 @@ struct AroApp: App {
     }
 
     private func removeSong(_ song: Song) async throws {
-        if profileRegistry.activeProfile?.kind == .local,
-           let hash = song.fileFingerprint?.contentHash {
-            if syncPreferences.dataLocation.isEmpty {
-                syncPreferences.dataLocation =
-                    SyncPreferences.recommendedDataLocation
-            }
-            let wasEnabled = hubService.isEnabled
-            if !wasEnabled {
-                hubService.setEnabled(true)
-                await hubService.ensureCompatibleHelper(
-                    dataLocation: syncPreferences.dataLocation
-                )
-            }
-            defer {
-                if !wasEnabled {
-                    hubService.setEnabled(false)
-                }
-            }
-            let control = HubControlClient(
-                socketURL: URL(
-                    fileURLWithPath: syncPreferences.dataLocation
-                ).appendingPathComponent("control.sock")
-            )
-            for attempt in 0 ..< 25 {
-                do {
-                    try await control.removeTrack(contentHash: hash)
-                    break
-                } catch where attempt < 24 {
-                    try await Task.sleep(for: .milliseconds(200))
-                }
-            }
+        guard let profile = profileRegistry.activeProfile,
+              let hash = song.contentHash,
+              let connection = LibraryServerConnection.resolve(
+                profile: profile,
+                operations: runtime.syncOperationStore,
+                deviceID: runtime.database.deviceID,
+                localAdminToken: syncPreferences.localAdminToken
+              ) else {
+            throw AroSyncClientError.invalidResponse
         }
-        try runtime.removeFromLibrary(trackID: song.libraryID)
+        _ = try await connection.client.removeTrack(
+            contentHash: hash,
+            credential: connection.credential
+        )
+        runtime.libraryStore.reflectServerRemoval(trackID: song.libraryID)
     }
 
     private func setSongFavourite(

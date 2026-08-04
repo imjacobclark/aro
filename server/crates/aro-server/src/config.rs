@@ -211,7 +211,9 @@ impl Config {
             "display_name" => self.display_name = value.to_string(),
             "bind" => self.bind = value.parse().context("invalid bind address")?,
             "advertise_mdns" => {
-                self.advertise_mdns = value.parse().context("advertise_mdns must be true or false")?;
+                self.advertise_mdns = value
+                    .parse()
+                    .context("advertise_mdns must be true or false")?;
             }
             "source_rescan_seconds" => {
                 self.source_rescan_seconds = value
@@ -219,14 +221,17 @@ impl Config {
                     .context("source_rescan_seconds must be a positive integer")?;
             }
             "dashboard.enabled" => {
-                self.dashboard.enabled =
-                    value.parse().context("dashboard.enabled must be true or false")?;
+                self.dashboard.enabled = value
+                    .parse()
+                    .context("dashboard.enabled must be true or false")?;
             }
             "dashboard.bind" => {
                 self.dashboard.bind = value.parse().context("invalid dashboard.bind address")?;
             }
             "dlna.enabled" => {
-                self.dlna.enabled = value.parse().context("dlna.enabled must be true or false")?;
+                self.dlna.enabled = value
+                    .parse()
+                    .context("dlna.enabled must be true or false")?;
             }
             "dlna.bind" => {
                 self.dlna.bind = value.parse().context("invalid dlna.bind address")?;
@@ -252,7 +257,9 @@ impl Config {
             bail!("admin_token must contain at least 16 characters");
         }
         if self.admin_allow.is_empty() {
-            bail!("admin_allow must contain at least one network; use 127.0.0.0/8 to restrict to this machine");
+            bail!(
+                "admin_allow must contain at least one network; use 127.0.0.0/8 to restrict to this machine"
+            );
         }
         if self.source_rescan_seconds < 10 {
             bail!("source_rescan_seconds must be at least 10");
@@ -336,12 +343,16 @@ mod admin_allow_tests {
     #[test]
     fn defaults_to_loopback_only() {
         let config = Config::default();
-        assert!(config.admin_allow.contains(
-            &"127.0.0.0/8".parse::<IpNet>().unwrap()
-        ));
-        assert!(config.admin_allow.contains(
-            &"::1/128".parse::<IpNet>().unwrap()
-        ));
+        assert!(
+            config
+                .admin_allow
+                .contains(&"127.0.0.0/8".parse::<IpNet>().unwrap())
+        );
+        assert!(
+            config
+                .admin_allow
+                .contains(&"::1/128".parse::<IpNet>().unwrap())
+        );
         assert!(config.validate().is_ok());
     }
 
@@ -395,7 +406,10 @@ mod admin_allow_tests {
         assert!(config.validate().is_err(), "should reject the sync port");
         config.dashboard.enabled = true;
         config.dlna.bind = "127.0.0.1:4849".parse().unwrap();
-        assert!(config.validate().is_err(), "should reject the dashboard port");
+        assert!(
+            config.validate().is_err(),
+            "should reject the dashboard port"
+        );
         config.dlna.bind = "127.0.0.1:4850".parse().unwrap();
         assert!(config.validate().is_ok());
     }
@@ -405,7 +419,9 @@ mod admin_allow_tests {
         let mut config = Config::default();
         config.set_field("dlna.enabled", "true").unwrap();
         config.set_field("dlna.bind", "127.0.0.1:4850").unwrap();
-        config.set_field("dlna.friendly_name", "Living Room Aro").unwrap();
+        config
+            .set_field("dlna.friendly_name", "Living Room Aro")
+            .unwrap();
         assert!(config.dlna.enabled);
         assert_eq!(config.dlna.friendly_name, "Living Room Aro");
         assert!(
@@ -427,12 +443,12 @@ mod admin_allow_tests {
         config.set_field("display_name", "Living Room").unwrap();
         assert_eq!(config.display_name, "Living Room");
         config.set_field("dashboard.enabled", "true").unwrap();
-        config.set_field("dashboard.bind", "127.0.0.1:4849").unwrap();
+        config
+            .set_field("dashboard.bind", "127.0.0.1:4849")
+            .unwrap();
         assert!(config.dashboard.enabled);
         assert!(
-            config
-                .set_field("dashboard.bind", "8.8.8.8:4849")
-                .is_err(),
+            config.set_field("dashboard.bind", "8.8.8.8:4849").is_err(),
             "should reject a public dashboard bind via validate()"
         );
     }

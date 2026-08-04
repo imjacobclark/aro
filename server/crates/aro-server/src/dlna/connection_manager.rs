@@ -23,10 +23,14 @@ pub async fn control(headers: HeaderMap, body: String) -> Response {
         .and_then(|value| value.rsplit_once('#'))
         .map(|(_, action)| action.to_string())
         .or_else(|| {
-            ["GetProtocolInfo", "GetCurrentConnectionIDs", "GetCurrentConnectionInfo"]
-                .into_iter()
-                .find(|action| body.contains(action))
-                .map(str::to_string)
+            [
+                "GetProtocolInfo",
+                "GetCurrentConnectionIDs",
+                "GetCurrentConnectionInfo",
+            ]
+            .into_iter()
+            .find(|action| body.contains(action))
+            .map(str::to_string)
         });
     match action.as_deref() {
         Some("GetProtocolInfo") => respond(

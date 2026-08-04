@@ -4,6 +4,14 @@ import OSLog
 import ServiceManagement
 import AroCommon
 
+enum LocalServerState: Sendable, Equatable {
+    case starting
+    case online
+    case recovering
+    case needsApproval
+    case unavailable(String)
+}
+
 @MainActor
 @Observable
 final class AroHubService {
@@ -18,6 +26,7 @@ final class AroHubService {
     private let fileManager = FileManager.default
 
     var errorMessage: String?
+    var serverState: LocalServerState = .starting
 
     var status: SMAppService.Status {
         service.status
@@ -35,8 +44,12 @@ final class AroHubService {
                 try service.unregister()
             }
             errorMessage = nil
+            serverState = enabled ? .starting : .unavailable("Server disabled")
         } catch {
             errorMessage = error.localizedDescription
+            serverState = service.status == .requiresApproval
+                ? .needsApproval
+                : .unavailable(error.localizedDescription)
         }
     }
 
@@ -102,6 +115,7 @@ final class AroHubService {
 
     func ensureCompatibleHelper(dataLocation: String) async {
         guard !dataLocation.isEmpty else { return }
+        serverState = .recovering
         if !isEnabled,
            UserDefaults.standard.bool(
             forKey: LegacyProductMigration.restoreBackgroundServiceKey
@@ -115,12 +129,19 @@ final class AroHubService {
                 errorMessage = "Aro migrated your library, but its Background "
                     + "Service needs to be enabled again: "
                     + error.localizedDescription
+                serverState = .unavailable(errorMessage ?? error.localizedDescription)
                 return
             }
         }
-        guard isEnabled else { return }
+        guard isEnabled else {
+            serverState = service.status == .requiresApproval
+                ? .needsApproval
+                : .unavailable("The local library server is not enabled.")
+            return
+        }
         guard SyncPreferences.isSupportedHelperLocation(dataLocation) else {
             errorMessage = SyncPreferences.protectedLocationMessage
+            serverState = .unavailable(SyncPreferences.protectedLocationMessage)
             return
         }
         // Always restarts the LaunchAgent once per app launch, rather than only
@@ -155,6 +176,7 @@ final class AroHubService {
             await restartForUpgrade()
             if errorMessage == nil, await waitForCompatibleHelper(client) {
                 errorMessage = nil
+                serverState = .online
                 Self.logger.info(
                     "Background Service listening after attempt \(attempt, privacy: .public)"
                 )
@@ -171,6 +193,9 @@ final class AroHubService {
         Self.logger.error("Background Service did not start listening after restart")
         errorMessage = "The Aro Background Service is enabled but did not start "
             + "listening. Use Restart Background Service in Advanced Devices settings."
+        serverState = service.status == .requiresApproval
+            ? .needsApproval
+            : .unavailable(errorMessage ?? "The local library server is unavailable.")
     }
 
     /// How many full unregister/register/verify cycles to run before giving up, and

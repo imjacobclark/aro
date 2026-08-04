@@ -66,6 +66,9 @@ enum ControlCommand {
         #[serde(default = "default_identification_results_limit")]
         limit: u32,
     },
+    SetManualMetadata {
+        request: ManualMetadataRequest,
+    },
     SetSetting {
         key: String,
         value: Value,
@@ -123,6 +126,24 @@ enum ControlCommand {
         #[serde(default = "default_changes_after_limit")]
         limit: u32,
     },
+    /// Appends device-authored mutations from this Mac's durable outbox. This is
+    /// the local-socket counterpart to the HTTPS exchange upload path; keeping it
+    /// separate from catalogue replication lets the GUI remain an offline-capable
+    /// client of its own hub rather than silently retaining favourites/history only
+    /// in its private replica.
+    PushOperations {
+        operations: Vec<aro_sync_protocol::Operation>,
+    },
+    Catalog {
+        #[serde(default)]
+        cursor: u64,
+        #[serde(default = "default_catalog_limit")]
+        limit: u32,
+        #[serde(default)]
+        q: Option<String>,
+        #[serde(default)]
+        sort: Option<String>,
+    },
     /// Resolves a content hash to its on-disk path so a same-machine client can
     /// open the file directly for playback, instead of reading its bytes through
     /// the socket the way `Blob` does (appropriate for artwork, not for streaming
@@ -165,6 +186,10 @@ fn default_radio_limit() -> usize {
     crate::playlists::RADIO_DEFAULT_LIMIT
 }
 
+fn default_catalog_limit() -> u32 {
+    50
+}
+
 #[derive(Deserialize, Debug)]
 struct IdentifyTrackRequest {
     content_hash: String,
@@ -184,7 +209,81 @@ struct ControlResponse {
     error: Option<String>,
 }
 
-const CONTROL_PROTOCOL_VERSION: u16 = 9;
+const CONTROL_PROTOCOL_VERSION: u16 = 13;
+
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct ManualMetadataRequest {
+    content_hashes: Vec<String>,
+    #[serde(default)]
+    fields: serde_json::Map<String, Value>,
+    #[serde(default)]
+    reset: bool,
+}
+
+pub(crate) fn apply_manual_metadata(
+    state: &AppState,
+    request: ManualMetadataRequest,
+    device_id: Uuid,
+) -> Result<usize> {
+    const FIELDS: [&str; 7] = [
+        "title",
+        "artist",
+        "album",
+        "genre",
+        "release_year",
+        "track_number",
+        "disc_number",
+    ];
+    let timestamp = aro_sync_protocol::HybridTimestamp {
+        physical_millis: chrono::Utc::now().timestamp_millis(),
+        logical: 0,
+        device_id,
+    };
+    let mut operations = Vec::new();
+    for hash in request.content_hashes {
+        let Some(track_id) = state.store.track_id_for_hash(&hash)? else {
+            continue;
+        };
+        let mut payload = serde_json::Map::new();
+        if request.reset {
+            for field in FIELDS {
+                payload.insert(format!("manual_{field}_set"), Value::Bool(false));
+            }
+            payload.insert("manual_artwork_set".into(), Value::Bool(false));
+        } else {
+            for (field, value) in &request.fields {
+                if FIELDS.contains(&field.as_str()) {
+                    payload.insert(format!("manual_{field}"), value.clone());
+                    payload.insert(format!("manual_{field}_set"), Value::Bool(true));
+                }
+            }
+        }
+        if payload.is_empty() {
+            continue;
+        }
+        let field_versions = payload
+            .keys()
+            .map(|field| (field.clone(), timestamp.clone()))
+            .collect();
+        operations.push(aro_sync_protocol::Operation {
+            operation_id: Uuid::new_v4(),
+            device_id,
+            entity_type: "track_state".into(),
+            entity_id: track_id.to_string(),
+            kind: if request.reset {
+                "reset_metadata"
+            } else {
+                "set_metadata"
+            }
+            .into(),
+            payload: Value::Object(payload),
+            field_versions,
+        });
+    }
+    let count = operations.len();
+    state.store.append_operations(&operations)?;
+    Ok(count)
+}
 
 pub async fn start(path: &Path, state: Arc<AppState>) -> Result<JoinHandle<()>> {
     if let Some(parent) = path.parent() {
@@ -344,6 +443,9 @@ async fn handle(stream: &mut UnixStream, state: Arc<AppState>) -> Result<Value> 
         ControlCommand::IdentificationResults { after, limit } => {
             serde_json::to_value(state.store.identification_results_since(after, limit)?)?
         }
+        ControlCommand::SetManualMetadata { request } => json!({
+            "updated": apply_manual_metadata(&state, request, state.hub_id)?
+        }),
         ControlCommand::SetSetting { key, value } => {
             state.store.set_setting(&key, &value)?;
             json!({"ok": true})
@@ -362,9 +464,7 @@ async fn handle(stream: &mut UnixStream, state: Arc<AppState>) -> Result<Value> 
                 )
             })
         }
-        ControlCommand::Playlists {
-            utc_offset_minutes,
-        } => {
+        ControlCommand::Playlists { utc_offset_minutes } => {
             let store = state.store.clone();
             let seeds = tokio::task::spawn_blocking(move || store.playlist_seeds()).await??;
             serde_json::to_value(crate::playlists::generate(
@@ -393,6 +493,25 @@ async fn handle(stream: &mut UnixStream, state: Arc<AppState>) -> Result<Value> 
             after_sequence,
             limit,
         } => serde_json::to_value(state.store.changes_after(after_sequence, limit)?)?,
+        ControlCommand::PushOperations { operations } => {
+            let accepted: Vec<Uuid> = operations
+                .iter()
+                .map(|operation| operation.operation_id)
+                .collect();
+            state.store.append_operations(&operations)?;
+            json!({"accepted": accepted})
+        }
+        ControlCommand::Catalog {
+            cursor,
+            limit,
+            q,
+            sort,
+        } => serde_json::to_value(state.store.catalog_page(
+            cursor,
+            limit,
+            q.as_deref(),
+            sort.as_deref(),
+        )?)?,
         ControlCommand::TrackLocation { hash } => {
             let path = state
                 .store
@@ -423,14 +542,15 @@ async fn handle(stream: &mut UnixStream, state: Arc<AppState>) -> Result<Value> 
         }
         ControlCommand::Purge { hash } => {
             let store = state.store.clone();
-            let removed =
-                tokio::task::spawn_blocking(move || store.purge_blob(&hash)).await??;
+            let removed = tokio::task::spawn_blocking(move || store.purge_blob(&hash)).await??;
             json!({"removed": removed})
         }
         ControlCommand::Status => json!({
             "control_protocol_version": CONTROL_PROTOCOL_VERSION,
             "hub_id": state.hub_id,
             "display_name": state.display_name,
+            "tls_fingerprint": state.tls_fingerprint,
+            "https_port": state.https_port,
             "sequence": state.store.latest_sequence()?,
             "pairing_available": state.pairing.is_open()
             ,"storage_mode": state.sources.mode().as_str()
@@ -478,6 +598,8 @@ mod tests {
             config_path,
             hub_id,
             display_name: "Test Hub".into(),
+            tls_fingerprint: "test-fingerprint".into(),
+            https_port: 4848,
             admin_token: config.admin_token.clone(),
             admin_allow: config.admin_allow.clone(),
             pairing: aro_sync_core::PairingManager::new("test-fingerprint".into()),
@@ -529,20 +651,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn status_bootstraps_the_pinned_https_endpoint() {
+        let (state, _root) = test_state().await;
+
+        let result = dispatch(&state, json!({"command": "status"}))
+            .await
+            .unwrap();
+
+        assert_eq!(result["control_protocol_version"], CONTROL_PROTOCOL_VERSION);
+        assert_eq!(result["hub_id"], state.hub_id.to_string());
+        assert_eq!(result["tls_fingerprint"], "test-fingerprint");
+        assert_eq!(result["https_port"], 4848);
+    }
+
+    #[tokio::test]
+    async fn push_operations_materializes_offline_device_intent() {
+        let (state, _root) = test_state().await;
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("Song.flac"), b"audio").unwrap();
+        state.sources.add(source.path()).unwrap();
+        let hash = state
+            .store
+            .content_hashes()
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let track_id = state.store.track_id_for_hash(&hash).unwrap().unwrap();
+        let operation_id = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+
+        let result = dispatch(
+            &state,
+            json!({
+                "command": "push_operations",
+                "operations": [{
+                    "operation_id": operation_id,
+                    "device_id": device_id,
+                    "entity_type": "track_state",
+                    "entity_id": track_id,
+                    "kind": "favourite",
+                    "payload": {"favourite": true},
+                    "field_versions": {
+                        "favourite": {
+                            "physical_millis": 1,
+                            "logical": 0,
+                            "device_id": device_id
+                        }
+                    }
+                }]
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["accepted"][0], operation_id.to_string());
+        assert!(state.store.catalog_page(0, 10, None, None).unwrap().tracks[0].favourite);
+    }
+
+    #[tokio::test]
     async fn track_location_resolves_a_managed_import_to_its_blob_path() {
         let (state, _root) = test_state().await;
         let source = tempfile::tempdir().unwrap();
         let song = source.path().join("Song.flac");
         std::fs::write(&song, b"audio").unwrap();
         state.sources.add(source.path()).unwrap();
-        let hash = state.store.content_hashes().unwrap().into_iter().next().unwrap();
+        let hash = state
+            .store
+            .content_hashes()
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
 
-        let result = dispatch(
-            &state,
-            json!({"command": "track_location", "hash": hash}),
-        )
-        .await
-        .unwrap();
+        let result = dispatch(&state, json!({"command": "track_location", "hash": hash}))
+            .await
+            .unwrap();
         let path = result["path"].as_str().unwrap();
         assert!(std::path::Path::new(path).is_file());
     }
@@ -603,24 +787,33 @@ mod tests {
         let source = tempfile::tempdir().unwrap();
         std::fs::write(source.path().join("Song.flac"), b"audio").unwrap();
         state.sources.add(source.path()).unwrap();
-        let hash = state.store.content_hashes().unwrap().into_iter().next().unwrap();
+        let hash = state
+            .store
+            .content_hashes()
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
         let path = state.store.blob_path_for_download(&hash).unwrap().unwrap();
         std::fs::remove_file(&path).unwrap();
 
-        let result = dispatch(&state, json!({"command": "verify"})).await.unwrap();
+        let result = dispatch(&state, json!({"command": "verify"}))
+            .await
+            .unwrap();
         let failures = result["failures"].as_array().unwrap();
-        assert!(failures.iter().any(|value| value.as_str() == Some(hash.as_str())));
+        assert!(
+            failures
+                .iter()
+                .any(|value| value.as_str() == Some(hash.as_str()))
+        );
     }
 
     #[tokio::test]
     async fn purge_reports_whether_a_blob_existed() {
         let (state, _root) = test_state().await;
-        let missing = dispatch(
-            &state,
-            json!({"command": "purge", "hash": "0".repeat(64)}),
-        )
-        .await
-        .unwrap();
+        let missing = dispatch(&state, json!({"command": "purge", "hash": "0".repeat(64)}))
+            .await
+            .unwrap();
         assert_eq!(missing["removed"], json!(false));
     }
 }

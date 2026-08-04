@@ -8,6 +8,7 @@ struct LibraryAlbumSection: View {
     let songs: [Song]
     let playback: PlaybackController
     let syncTrackData: (Song) async -> Void
+    let editMetadata: (MetadataEditorContext) -> Void
     var syncAlbumData: (([Song]) async -> Void)?
 
     var body: some View {
@@ -34,6 +35,12 @@ struct LibraryAlbumSection: View {
                         ) {
                             Task { await syncAlbumData(songs) }
                         }
+                    }
+                    Divider()
+                    Button("Metadata…", systemImage: "info.circle") {
+                        editMetadata(
+                            MetadataEditorContext(scope: .album, songs: songs)
+                        )
                     }
                 } label: {
                     Image(systemName: "ellipsis")
@@ -85,6 +92,10 @@ struct LibraryAlbumSection: View {
                 playAlbum()
             }
             .disabled(songs.isEmpty)
+            Divider()
+            Button("Metadata…") {
+                editMetadata(MetadataEditorContext(scope: .album, songs: songs))
+            }
         }
     }
 
@@ -121,7 +132,10 @@ struct LibraryAlbumSection: View {
         AlbumSongList(
             songs: songs,
             playback: playback,
-            syncTrackData: syncTrackData
+            syncTrackData: syncTrackData,
+            editMetadata: { song in
+                editMetadata(MetadataEditorContext(scope: .track, songs: [song]))
+            }
         )
         .padding(.vertical, 4)
     }

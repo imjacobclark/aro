@@ -424,6 +424,9 @@ final class MediaCacheController {
     private(set) var usedBytes: Int64 = 0
     private(set) var downloadedFileCount = 0
     private(set) var protectedFileCount = 0
+    /// A UI-facing snapshot. Table rendering must not synchronously execute a
+    /// SQLite query once for every catalog row.
+    private(set) var cachedContentHashes: Set<String> = []
 
     init(
         database: LibraryDatabase,
@@ -440,10 +443,6 @@ final class MediaCacheController {
             removeProgressiveArtifacts()
         }
         refreshSummary()
-    }
-
-    func isCached(hash: String) -> Bool {
-        cache.localURL(hash: hash) != nil
     }
 
     /// Exposes the underlying (Sendable) cache so callers like the library
@@ -463,6 +462,7 @@ final class MediaCacheController {
         )
         usedBytes = entries.reduce(0) { $0 + $1.byteCount }
         downloadedFileCount = entries.count
+        cachedContentHashes = Set(entries.map(\.contentHash))
         protectedFileCount = entries.filter {
             $0.isPinned || $0.isQueued || $0.isCurrent
         }.count
@@ -571,6 +571,87 @@ final class MediaCacheController {
         if let limit {
             enforceLimit(limit)
         }
+        refreshSummary()
+    }
+
+    /// Applies an offline policy directly to the server-resolved catalogue. Normal
+    /// clients therefore do not need to replay the hub's CRDT history merely to
+    /// decide which content-addressed blobs to retain.
+    func apply(
+        _ policy: OfflineDownloadPolicy,
+        catalog: [CatalogTrack],
+        baseURL: URL,
+        storageLimitBytes: Int64? = nil
+    ) async {
+        storagePolicyState.update(policy)
+        if policy == .streamOnly {
+            removeAllStoredMedia()
+            removeProgressiveArtifacts()
+            statusMessage = "Stream only is active. No music is stored."
+            refreshSummary()
+            return
+        }
+
+        let selected: [CatalogTrack]
+        switch policy {
+        case .streamOnly, .stream:
+            selected = []
+        case .favourites:
+            selected = catalog.filter { $0.favourite == true }
+        case .selectedAlbums(let albums):
+            selected = catalog.filter {
+                $0.favourite == true || $0.album.map(albums.contains) == true
+            }
+        case .fullLibrary:
+            selected = catalog
+        }
+        let requested = selected.compactMap { track -> RemoteMedia? in
+            guard track.available,
+                  let hash = track.contentHash,
+                  let byteCount = track.byteCount else { return nil }
+            return RemoteMedia(
+                trackID: track.trackID,
+                contentHash: hash,
+                byteCount: Int64(byteCount),
+                downloadURL: baseURL.appendingPathComponent("v1/blobs/\(hash)")
+            )
+        }
+        let limit = policy == .fullLibrary
+            ? nil
+            : resolvedLimit(configured: storageLimitBytes)
+        let media = limit.map {
+            mediaWithinLimit(requested, limitBytes: $0)
+        } ?? requested
+        cache.replacePins(with: Set(media.map(\.contentHash)))
+        if let limit { enforceLimit(limit) }
+        guard let prepare, !media.isEmpty else {
+            refreshSummary()
+            return
+        }
+        downloadProgress = (0, media.count)
+        statusMessage = "Downloading offline music…"
+        do {
+            for (index, item) in media.enumerated() {
+                try Task.checkCancellation()
+                let url = try await prepare.execute(.remote(item))
+                cache.register(
+                    hash: item.contentHash,
+                    localURL: url,
+                    byteCount: item.byteCount,
+                    pinned: true
+                )
+                downloadProgress = (index + 1, media.count)
+            }
+            statusMessage = "Offline music is up to date."
+            errorMessage = nil
+        } catch is CancellationError {
+            statusMessage = "Offline download paused."
+        } catch {
+            errorMessage = error.localizedDescription
+            statusMessage = "Some offline music could not be downloaded."
+        }
+        downloadProgress = nil
+        if let limit { enforceLimit(limit) }
         refreshSummary()
     }
 
