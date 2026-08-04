@@ -613,6 +613,7 @@ mod tests {
                 "Aro/test".into(),
             )),
             artwork_http: reqwest::Client::new(),
+            transcode_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
         });
         (state, root)
     }

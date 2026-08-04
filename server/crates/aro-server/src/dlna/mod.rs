@@ -722,6 +722,7 @@ mod integration_tests {
                 "Aro/test".into(),
             )),
             artwork_http: reqwest::Client::new(),
+            transcode_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
         };
         (Arc::new(DlnaState::new(app, &config)), root)
     }

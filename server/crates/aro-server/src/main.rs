@@ -273,6 +273,9 @@ async fn serve(config: Config, config_path: PathBuf) -> Result<()> {
             config.musicbrainz_user_agent.clone(),
         )),
         artwork_http: reqwest::Client::new(),
+        transcode_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            http::default_transcode_slots(),
+        )),
     };
     let _dashboard = if config.dashboard.enabled {
         let listener = tokio::net::TcpListener::bind(config.dashboard.bind)

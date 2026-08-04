@@ -69,6 +69,23 @@ pub struct AppState {
     /// pickers exceed MusicBrainz's one-request-a-second policy between them.
     pub musicbrainz: Arc<aro_track_id::musicbrainz::MusicBrainzClient>,
     pub artwork_http: reqwest::Client,
+    /// Caps concurrent transcodes to what this machine can actually sustain.
+    ///
+    /// Encoding is CPU-bound and the hosts differ enormously: measured at 96 kbps, a
+    /// 32-bit armv7 Raspberry Pi manages ~8× realtime on 4 cores while a 12-core laptop
+    /// manages ~254×. Without a limit, `spawn_blocking`'s large default pool would happily
+    /// start a transcode per request — unnoticeable on the laptop, and enough to thrash the
+    /// Pi's cores and 917 MB of RAM. Sizing from the host's own parallelism keeps one core
+    /// free to keep serving requests, and means neither machine is designed around the
+    /// other's limits.
+    pub transcode_slots: Arc<tokio::sync::Semaphore>,
+}
+
+/// Concurrent transcodes permitted, derived from the host rather than assumed.
+pub fn default_transcode_slots() -> usize {
+    std::thread::available_parallelism()
+        .map(|value| value.get().saturating_sub(1).max(1))
+        .unwrap_or(1)
 }
 
 #[derive(Clone, Default)]
@@ -1229,11 +1246,22 @@ async fn stream_blob(
         .await;
     }
 
+    // Waiting here rather than inside the blocking task is deliberate: it applies
+    // backpressure at the point a listener asks, instead of piling up encodes that each
+    // occupy a pool thread while waiting their turn.
+    let permit = state
+        .transcode_slots
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| ApiError::internal("transcode capacity unavailable"))?;
+
     let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(8);
     let store = state.store.clone();
     let cache_hash = hash.clone();
     // Encoding is CPU-bound and blocking, so it belongs off the async runtime's threads.
     tokio::task::spawn_blocking(move || {
+        let _permit = permit;
         let mut sink = ChannelSink {
             sender,
             spill: Vec::new(),
