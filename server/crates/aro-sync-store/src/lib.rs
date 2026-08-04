@@ -3136,6 +3136,27 @@ impl HubStore {
     ) -> Result<(), StoreError> {
         let mut connection = self.connection.lock();
         let transaction = connection.transaction()?;
+        // A track belongs to one release-group at a time, so re-identifying it has to move
+        // its vote rather than add another. Without this a track that was filed wrongly
+        // keeps voting for the wrong album forever, and affinity — a ranking tier in both
+        // `select_release` and `shortlist_candidates` — keeps handing that album standing
+        // it has lost, which is exactly how a mistake makes itself permanent.
+        let previous: Vec<(String, String)> = {
+            let mut statement = transaction.prepare(
+                "SELECT artist_normalized, release_group_id \
+                 FROM release_group_affinity_members WHERE content_hash = ?1",
+            )?;
+            let rows = statement
+                .query_map([content_hash], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        // Cleared across every artist, not just this one: a manual artist edit changes the
+        // normalized key, which would otherwise strand the old rows unreachable.
+        transaction.execute(
+            "DELETE FROM release_group_affinity_members WHERE content_hash = ?1",
+            params![content_hash],
+        )?;
         transaction.execute(
             r#"
             INSERT OR IGNORE INTO release_group_affinity_members
@@ -3157,6 +3178,28 @@ impl HubStore {
                 )
             "#,
             params![artist_normalized, release_group_id, release_title],
+        )?;
+        // Every group this track has just left needs its tally corrected too — the upsert
+        // above only recomputes the group it moved to.
+        for (previous_artist, previous_group) in previous {
+            if previous_artist == artist_normalized && previous_group == release_group_id {
+                continue;
+            }
+            transaction.execute(
+                r#"
+                UPDATE release_group_affinity SET track_count = (
+                    SELECT COUNT(*) FROM release_group_affinity_members AS members
+                    WHERE members.artist_normalized = ?1
+                      AND members.release_group_id = ?2
+                )
+                WHERE artist_normalized = ?1 AND release_group_id = ?2
+                "#,
+                params![previous_artist, previous_group],
+            )?;
+        }
+        transaction.execute(
+            "DELETE FROM release_group_affinity WHERE track_count <= 0",
+            [],
         )?;
         transaction.commit()?;
         Ok(())
@@ -3793,21 +3836,30 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
             content_hash TEXT NOT NULL,
             PRIMARY KEY(artist_normalized, release_group_id, content_hash)
         );
-        INSERT OR IGNORE INTO release_group_affinity_members
-            (artist_normalized, release_group_id, content_hash)
-        SELECT affinity.artist_normalized, results.release_group_id, results.content_hash
-        FROM identification_results AS results
-        JOIN release_group_affinity AS affinity
-            ON affinity.release_group_id = results.release_group_id
-        WHERE results.release_group_id IS NOT NULL;
-        UPDATE release_group_affinity SET track_count = (
-            SELECT COUNT(*) FROM release_group_affinity_members AS members
-            WHERE members.artist_normalized = release_group_affinity.artist_normalized
-              AND members.release_group_id = release_group_affinity.release_group_id
-        );
-        INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (13, unixepoch());
         "#,
     )?;
+    // Unlike the `CREATE TABLE IF NOT EXISTS` batches above, these repairs rewrite data
+    // and must run exactly once. Every statement in this function executes on every open,
+    // so a data repair left unguarded would re-apply itself on each restart — harmless for
+    // an idempotent recount, destructive for the deletion in migration 15.
+    run_once(connection, 13, |connection| {
+        connection.execute_batch(
+            r#"
+            INSERT OR IGNORE INTO release_group_affinity_members
+                (artist_normalized, release_group_id, content_hash)
+            SELECT affinity.artist_normalized, results.release_group_id, results.content_hash
+            FROM identification_results AS results
+            JOIN release_group_affinity AS affinity
+                ON affinity.release_group_id = results.release_group_id
+            WHERE results.release_group_id IS NOT NULL;
+            UPDATE release_group_affinity SET track_count = (
+                SELECT COUNT(*) FROM release_group_affinity_members AS members
+                WHERE members.artist_normalized = release_group_affinity.artist_normalized
+                  AND members.release_group_id = release_group_affinity.release_group_id
+            );
+            "#,
+        )
+    })?;
     connection.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS artwork_candidate_cache (
@@ -3817,6 +3869,55 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
         );
         INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (14, unixepoch());
         "#,
+    )?;
+    // Votes cast before a track was re-identified were never withdrawn, so a track filed
+    // wrongly and later corrected was counted for both albums at once — 23 of 407 votes in
+    // one real library. Drop every vote that disagrees with what identification currently
+    // says, then rebuild the tallies from what's left.
+    run_once(connection, 15, |connection| {
+        connection.execute_batch(
+            r#"
+            DELETE FROM release_group_affinity_members
+            WHERE NOT EXISTS (
+                SELECT 1 FROM identification_results AS results
+                WHERE results.content_hash = release_group_affinity_members.content_hash
+                  AND results.release_group_id = release_group_affinity_members.release_group_id
+            );
+            UPDATE release_group_affinity SET track_count = (
+                SELECT COUNT(*) FROM release_group_affinity_members AS members
+                WHERE members.artist_normalized = release_group_affinity.artist_normalized
+                  AND members.release_group_id = release_group_affinity.release_group_id
+            );
+            DELETE FROM release_group_affinity WHERE track_count <= 0;
+            "#,
+        )
+    })?;
+    Ok(())
+}
+
+/// Runs a data repair the first time only, recording it in `schema_migrations`.
+///
+/// Every other statement in [`migrate`] is a `CREATE TABLE IF NOT EXISTS` or an equivalent
+/// no-op on second running, so they can be issued unconditionally on every open. A repair
+/// that rewrites or deletes rows cannot: re-running it would undo whatever the running
+/// system has legitimately done since.
+fn run_once(
+    connection: &Connection,
+    version: i64,
+    apply: impl FnOnce(&Connection) -> Result<(), rusqlite::Error>,
+) -> Result<(), rusqlite::Error> {
+    let already_applied: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
+        [version],
+        |row| row.get(0),
+    )?;
+    if already_applied {
+        return Ok(());
+    }
+    apply(connection)?;
+    connection.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?1, unixepoch())",
+        [version],
     )?;
     Ok(())
 }
@@ -5471,6 +5572,35 @@ mod tests {
             Some(&2)
         );
 
+        // Re-identifying a track onto a *different* album must move its vote, not add a
+        // second one. A track counted for both the album it was wrongly filed under and
+        // the one it was corrected to keeps propping up the mistake on every later import.
+        store
+            .record_release_group_choice(
+                "neck deep",
+                "rg-corrected-album",
+                Some("The Peace and the Panic"),
+                "hash-track-two",
+            )
+            .unwrap();
+        let moved = store.release_group_affinity("neck deep").unwrap();
+        assert_eq!(moved.get("rg-real-album"), Some(&1));
+        assert_eq!(moved.get("rg-corrected-album"), Some(&1));
+
+        // And a group nothing points at any more should stop being an affinity signal
+        // entirely rather than lingering at zero.
+        store
+            .record_release_group_choice(
+                "neck deep",
+                "rg-corrected-album",
+                Some("The Peace and the Panic"),
+                "hash-track-one",
+            )
+            .unwrap();
+        let emptied = store.release_group_affinity("neck deep").unwrap();
+        assert_eq!(emptied.get("rg-real-album"), None);
+        assert_eq!(emptied.get("rg-corrected-album"), Some(&2));
+
         // Scoped per artist: the Beatles tally never shows up for Neck Deep and
         // vice versa.
         let beatles = store.release_group_affinity("the beatles").unwrap();
@@ -5482,7 +5612,7 @@ mod tests {
             reopened
                 .release_group_affinity("neck deep")
                 .unwrap()
-                .get("rg-real-album"),
+                .get("rg-corrected-album"),
             Some(&2)
         );
     }
