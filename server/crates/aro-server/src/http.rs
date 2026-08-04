@@ -63,6 +63,12 @@ pub struct AppState {
     /// "no key is set" apart from "nothing's queued right now" without
     /// exposing the key itself.
     pub identification_available: bool,
+    pub musicbrainz_user_agent: String,
+    /// Shared so artwork discovery's many lookups queue behind one rate limiter.
+    /// A per-request client would hold a per-request limiter and let concurrent
+    /// pickers exceed MusicBrainz's one-request-a-second policy between them.
+    pub musicbrainz: Arc<aro_track_id::musicbrainz::MusicBrainzClient>,
+    pub artwork_http: reqwest::Client,
 }
 
 #[derive(Clone, Default)]
@@ -222,6 +228,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/identify", post(identify_tracks))
         .route("/v1/identification/status", get(identification_status))
         .route("/v1/identification/results", get(identification_results))
+        .route("/v1/artwork/candidates", get(artwork_candidates))
+        .route("/v1/artwork/resolve", post(resolve_artwork))
         .route("/v1/metadata-overrides", post(set_manual_metadata))
         .route("/v1/library/tracks/remove", post(remove_track))
         .route("/v1/imports", post(create_import))
@@ -1279,6 +1287,99 @@ async fn topology(
         active_transfers: state.telemetry.active_transfers(),
         live_playback: state.store.topology_live_activity()?,
     }))
+}
+
+#[derive(Deserialize)]
+struct ArtworkCandidatesQuery {
+    content_hash: String,
+    /// Discards the cached list and walks MusicBrainz again — for when art has been
+    /// uploaded to the archive since the last look.
+    #[serde(default)]
+    refresh: bool,
+}
+
+/// Every cover a listener could plausibly choose for this track: each pressing of its
+/// album, plus one cover from each of the artist's other albums. Identification only ever
+/// stores the single front cover of the one release it matched, which is a reasonable
+/// default and a poor menu — see `aro_track_id::artwork` for why the archive's per-release
+/// population makes that default miss most of what exists.
+///
+/// Cached per release-group, because a cold walk costs dozens of rate-limited requests.
+async fn artwork_candidates(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ArtworkCandidatesQuery>,
+) -> Result<Json<Vec<aro_track_id::artwork::ArtworkCandidate>>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    let result = state
+        .store
+        .identification_result(&query.content_hash)?
+        .ok_or_else(|| ApiError::not_found("track_not_identified"))?;
+    // Keyed by release-group so every track on an album shares one walk; falling back to
+    // the release, then the track itself, when identification resolved less than that.
+    let cache_key = result
+        .release_group_id
+        .clone()
+        .or_else(|| result.release_id.clone())
+        .unwrap_or_else(|| query.content_hash.clone());
+    if !query.refresh
+        && let Some(cached) = state.store.cached_artwork_candidates(&cache_key)?
+        && let Ok(candidates) = serde_json::from_str(&cached)
+    {
+        return Ok(Json(candidates));
+    }
+    let candidates = aro_track_id::artwork::discover_candidates(
+        &state.musicbrainz,
+        &state.artwork_http,
+        &state.musicbrainz_user_agent,
+        &state.store,
+        result.release_id.as_deref(),
+        result.release_group_id.as_deref(),
+        result.album.as_deref(),
+    )
+    .await;
+    if let Ok(encoded) = serde_json::to_string(&candidates) {
+        state.store.cache_artwork_candidates(&cache_key, &encoded)?;
+    }
+    Ok(Json(candidates))
+}
+
+#[derive(Deserialize)]
+struct ResolveArtworkRequest {
+    image_url: String,
+}
+
+#[derive(Serialize)]
+struct ResolveArtworkResponse {
+    blob: String,
+}
+
+/// Pulls the full-resolution original for a candidate the listener has actually chosen and
+/// caches it as a blob. Discovery deliberately only fetches thumbnails, so this is where
+/// the real bytes are paid for — once, for one image.
+async fn resolve_artwork(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<ResolveArtworkRequest>,
+) -> Result<Json<ResolveArtworkResponse>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    // Only the archive serves these, and the URL arrives from a client: without this an
+    // authenticated device could point the hub at an arbitrary host.
+    if !request.image_url.starts_with("https://coverartarchive.org/")
+        && !request.image_url.starts_with("https://archive.org/")
+        && !request.image_url.starts_with("https://ia")
+    {
+        return Err(ApiError::bad_request("unsupported_artwork_host"));
+    }
+    let blob = aro_track_id::artwork::resolve_full_image(
+        &state.artwork_http,
+        &state.musicbrainz_user_agent,
+        &state.store,
+        &request.image_url,
+    )
+    .await
+    .ok_or_else(|| ApiError::not_found("artwork_unavailable"))?;
+    Ok(Json(ResolveArtworkResponse { blob }))
 }
 
 async fn set_manual_metadata(

@@ -489,3 +489,39 @@ public struct RemoteSyncJob: Codable, Sendable {
     public let totalUnits: UInt64
     public let error: String?
 }
+
+/// Where a cover offered by the hub's artwork picker came from, so the UI can group
+/// candidates instead of presenting one undifferentiated wall of images.
+public enum RemoteArtworkOrigin: String, Codable, Sendable {
+    /// A pressing of the album this track is currently filed under. MusicBrainz often
+    /// carries one album as many releases, and the Cover Art Archive is populated per
+    /// release, so these are genuinely different scans rather than duplicates.
+    case thisAlbum = "this_album"
+    /// A different album by the same artist.
+    case artistCatalogue = "artist_catalogue"
+}
+
+/// One cover the hub found for a track. `thumbnail` is already cached as a hub blob and is
+/// what the picker renders; `fullImageURL` is fetched only if this candidate is chosen, so
+/// browsing a discography never pulls full-resolution art for images nobody picks.
+public struct RemoteArtworkCandidate: Codable, Sendable, Hashable {
+    public let thumbnail: String
+    public let fullImageURL: String
+    public let origin: RemoteArtworkOrigin
+    public let album: String?
+    public let releaseID: String?
+    public let releaseGroupID: String?
+    public let isFront: Bool
+}
+
+public struct RemoteArtworkResolveRequest: Codable, Sendable {
+    public let imageURL: String
+
+    public init(imageURL: String) {
+        self.imageURL = imageURL
+    }
+}
+
+public struct RemoteArtworkResolveResponse: Codable, Sendable {
+    public let blob: String
+}

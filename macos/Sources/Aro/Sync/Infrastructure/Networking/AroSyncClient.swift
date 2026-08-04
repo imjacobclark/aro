@@ -780,6 +780,35 @@ actor AroSyncClient {
         try await getAuthenticated("v1/topology", credential: credential)
     }
 
+    /// Covers the hub found for this track: every pressing of its album, plus one from
+    /// each of the artist's other albums. Only thumbnails come back — see
+    /// `resolveArtwork(imageURL:)` for the full-resolution fetch, which happens once a
+    /// listener actually chooses an image.
+    func artworkCandidates(
+        contentHash: String,
+        refresh: Bool = false,
+        credential: HubDeviceCredential? = nil
+    ) async throws -> [RemoteArtworkCandidate] {
+        let escaped = contentHash.addingPercentEncoding(
+            withAllowedCharacters: .urlQueryAllowed
+        ) ?? contentHash
+        return try await getAuthenticated(
+            "v1/artwork/candidates?content_hash=\(escaped)&refresh=\(refresh)",
+            credential: credential
+        )
+    }
+
+    func resolveArtwork(
+        imageURL: String,
+        credential: HubDeviceCredential? = nil
+    ) async throws -> RemoteArtworkResolveResponse {
+        try await postAuthenticated(
+            "v1/artwork/resolve",
+            body: RemoteArtworkResolveRequest(imageURL: imageURL),
+            credential: credential
+        )
+    }
+
     func setManualMetadata(
         _ request: ManualMetadataUpload,
         credential: HubDeviceCredential? = nil

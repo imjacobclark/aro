@@ -608,6 +608,11 @@ mod tests {
             sources,
             telemetry: crate::http::RuntimeTelemetry::default(),
             identification_available: false,
+            musicbrainz_user_agent: "Aro/test".into(),
+            musicbrainz: Arc::new(aro_track_id::musicbrainz::MusicBrainzClient::new(
+                "Aro/test".into(),
+            )),
+            artwork_http: reqwest::Client::new(),
         });
         (state, root)
     }

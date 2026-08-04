@@ -268,6 +268,11 @@ async fn serve(config: Config, config_path: PathBuf) -> Result<()> {
         sources,
         telemetry: http::RuntimeTelemetry::default(),
         identification_available: !config.acoustid_api_key.is_empty(),
+        musicbrainz_user_agent: config.musicbrainz_user_agent.clone(),
+        musicbrainz: std::sync::Arc::new(aro_track_id::musicbrainz::MusicBrainzClient::new(
+            config.musicbrainz_user_agent.clone(),
+        )),
+        artwork_http: reqwest::Client::new(),
     };
     let _dashboard = if config.dashboard.enabled {
         let listener = tokio::net::TcpListener::bind(config.dashboard.bind)

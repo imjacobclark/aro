@@ -67,6 +67,19 @@ pub struct MbTag {
 pub struct ArtistCredit {
     #[serde(default)]
     pub name: Option<String>,
+    /// The credited artist's own entity, which is where the artist MBID lives — the
+    /// credit's `name` is just the display string for this particular release (it
+    /// carries things like "The Shadows feat. Cliff Richard"). Browsing an artist's
+    /// other release-groups needs the MBID, so artwork discovery reads it from here.
+    #[serde(default)]
+    pub artist: Option<ArtistRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtistRef {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -541,6 +554,199 @@ impl MusicBrainzClient {
             .error_for_status()?;
         Ok(response.json::<ReleaseSearchResponse>().await?.releases)
     }
+
+    /// Every release in one release-group — i.e. every pressing of the same album.
+    /// Artwork discovery needs these because the Cover Art Archive is populated per
+    /// *release*: nine pressings of "Greatest Hits" can carry nine different scans, and
+    /// the one release we matched is often not the one somebody uploaded art for.
+    pub async fn releases_in_group(
+        &self,
+        release_group_mbid: &str,
+        limit: usize,
+    ) -> Result<Vec<Release>, Error> {
+        self.limiter.acquire().await;
+        let response = self
+            .http
+            .get("https://musicbrainz.org/ws/2/release")
+            .query(&[
+                ("fmt", "json"),
+                ("inc", "media"),
+                ("limit", &limit.to_string()),
+                ("release-group", release_group_mbid),
+            ])
+            .header(reqwest::header::USER_AGENT, self.user_agent.as_str())
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<ReleaseBrowseResponse>().await?.releases)
+    }
+
+    /// An artist's release-groups — the "adjacent" half of artwork discovery, letting a
+    /// track offer covers from the rest of that artist's catalogue rather than only the
+    /// album it currently sits on.
+    pub async fn release_groups_for_artist(
+        &self,
+        artist_mbid: &str,
+        limit: usize,
+    ) -> Result<Vec<ReleaseGroup>, Error> {
+        self.limiter.acquire().await;
+        let response = self
+            .http
+            .get("https://musicbrainz.org/ws/2/release-group")
+            .query(&[
+                ("fmt", "json"),
+                ("limit", &limit.to_string()),
+                ("artist", artist_mbid),
+            ])
+            .header(reqwest::header::USER_AGENT, self.user_agent.as_str())
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response
+            .json::<ReleaseGroupBrowseResponse>()
+            .await?
+            .release_groups)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ReleaseBrowseResponse {
+    #[serde(default)]
+    releases: Vec<Release>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ReleaseGroupBrowseResponse {
+    #[serde(default, rename = "release-groups")]
+    release_groups: Vec<ReleaseGroup>,
+}
+
+/// One image in a Cover Art Archive manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoverArtImage {
+    /// The archive's own image id, stable per upload — what a client hands back when it
+    /// picks this candidate and wants the full-resolution version.
+    #[serde(default)]
+    pub id: Option<serde_json::Value>,
+    #[serde(default)]
+    pub front: bool,
+    #[serde(default)]
+    pub back: bool,
+    #[serde(default)]
+    pub image: Option<String>,
+    #[serde(default)]
+    pub thumbnails: CoverArtThumbnails,
+}
+
+impl CoverArtImage {
+    /// The id as a string. The archive returns it as a JSON number in some responses and
+    /// a string in others, so it can't simply be typed as one or the other.
+    pub fn id_string(&self) -> Option<String> {
+        match self.id.as_ref()? {
+            serde_json::Value::String(value) => Some(value.clone()),
+            serde_json::Value::Number(value) => Some(value.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Small image for a picker grid, preferring the archive's 250px rendering and
+    /// falling back through the larger ones. Never the full-size original: a grid of
+    /// those would be tens of megabytes for one artist.
+    pub fn thumbnail_url(&self) -> Option<&str> {
+        self.thumbnails
+            .small
+            .as_deref()
+            .or(self.thumbnails.size_250.as_deref())
+            .or(self.thumbnails.size_500.as_deref())
+            .or(self.thumbnails.large.as_deref())
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CoverArtThumbnails {
+    #[serde(default)]
+    pub small: Option<String>,
+    #[serde(default)]
+    pub large: Option<String>,
+    #[serde(default, rename = "250")]
+    pub size_250: Option<String>,
+    #[serde(default, rename = "500")]
+    pub size_500: Option<String>,
+    #[serde(default, rename = "1200")]
+    pub size_1200: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CoverArtManifest {
+    #[serde(default)]
+    images: Vec<CoverArtImage>,
+}
+
+/// Lists every image the Cover Art Archive holds for a release, rather than blindly
+/// following the `/front` redirect. A picker wants the whole set — some releases have
+/// several fronts, and the "front" the archive picks isn't always the packaging the
+/// listener recognises. Returns an empty list rather than an error when a release has
+/// no art, which is the common case and not a failure.
+pub async fn fetch_cover_art_manifest(
+    http: &reqwest::Client,
+    user_agent: &str,
+    release_mbid: &str,
+) -> Vec<CoverArtImage> {
+    fetch_manifest(
+        http,
+        user_agent,
+        &format!("https://coverartarchive.org/release/{release_mbid}"),
+    )
+    .await
+}
+
+/// [`fetch_cover_art_manifest`] against a release-*group*, which the archive resolves to
+/// whichever release it considers representative. Used for an artist's other albums,
+/// where one cover each is enough and fetching every pressing would be gratuitous.
+pub async fn fetch_release_group_cover_art_manifest(
+    http: &reqwest::Client,
+    user_agent: &str,
+    release_group_mbid: &str,
+) -> Vec<CoverArtImage> {
+    fetch_manifest(
+        http,
+        user_agent,
+        &format!("https://coverartarchive.org/release-group/{release_group_mbid}"),
+    )
+    .await
+}
+
+async fn fetch_manifest(
+    http: &reqwest::Client,
+    user_agent: &str,
+    url: &str,
+) -> Vec<CoverArtImage> {
+    let Ok(response) = http
+        .get(url)
+        .header(reqwest::header::USER_AGENT, user_agent)
+        .send()
+        .await
+    else {
+        return Vec::new();
+    };
+    if !response.status().is_success() {
+        return Vec::new();
+    }
+    response
+        .json::<CoverArtManifest>()
+        .await
+        .map(|manifest| manifest.images)
+        .unwrap_or_default()
+}
+
+/// Fetches an arbitrary Cover Art Archive image URL (a thumbnail from a manifest, or a
+/// full-size original once the listener has actually chosen it).
+pub async fn fetch_cover_art_image(
+    http: &reqwest::Client,
+    user_agent: &str,
+    url: &str,
+) -> Option<Vec<u8>> {
+    fetch_image(http, user_agent, url).await
 }
 
 /// The well-known Cover Art Archive front-cover redirect for a release — no separate
@@ -619,6 +825,66 @@ pub async fn fetch_cover_art_with_fallback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The archive returns image ids as a JSON number on some endpoints and a string on
+    /// others, so neither type alone can deserialize both.
+    #[test]
+    fn cover_art_image_ids_survive_either_json_type() {
+        let numeric: CoverArtImage =
+            serde_json::from_str(r#"{"id": 12345678, "front": true}"#).unwrap();
+        assert_eq!(numeric.id_string().as_deref(), Some("12345678"));
+        let textual: CoverArtImage =
+            serde_json::from_str(r#"{"id": "12345678", "front": true}"#).unwrap();
+        assert_eq!(textual.id_string().as_deref(), Some("12345678"));
+        let missing: CoverArtImage = serde_json::from_str(r#"{"front": false}"#).unwrap();
+        assert_eq!(missing.id_string(), None);
+    }
+
+    /// A picker grid must never pull full-size originals — one artist's discography would
+    /// run to tens of megabytes. The smallest rendering the archive offers wins, and a
+    /// manifest carrying no thumbnails at all yields nothing rather than the original.
+    #[test]
+    fn thumbnail_selection_prefers_the_smallest_rendering_available() {
+        let full: CoverArtImage = serde_json::from_str(
+            r#"{"image": "https://coverartarchive.org/release/x/1.jpg",
+                "thumbnails": {"small": "small.jpg", "large": "large.jpg",
+                               "250": "250.jpg", "500": "500.jpg", "1200": "1200.jpg"}}"#,
+        )
+        .unwrap();
+        assert_eq!(full.thumbnail_url(), Some("small.jpg"));
+
+        let only_sized: CoverArtImage = serde_json::from_str(
+            r#"{"image": "https://coverartarchive.org/release/x/1.jpg",
+                "thumbnails": {"500": "500.jpg", "1200": "1200.jpg"}}"#,
+        )
+        .unwrap();
+        assert_eq!(only_sized.thumbnail_url(), Some("500.jpg"));
+
+        let none: CoverArtImage = serde_json::from_str(
+            r#"{"image": "https://coverartarchive.org/release/x/1.jpg"}"#,
+        )
+        .unwrap();
+        assert_eq!(none.thumbnail_url(), None);
+    }
+
+    /// The artist MBID drives "other albums by this artist", and it lives on the credit's
+    /// nested artist entity rather than the credit itself — the credit's `name` is a
+    /// display string like "The Shadows feat. Cliff Richard".
+    #[test]
+    fn artist_credits_expose_the_artist_mbid() {
+        let credit: ArtistCredit = serde_json::from_str(
+            r#"{"name": "The Shadows feat. Cliff Richard",
+                "artist": {"id": "6d0c6a1e-0000-0000-0000-000000000000",
+                           "name": "The Shadows"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            credit.artist.as_ref().map(|artist| artist.id.as_str()),
+            Some("6d0c6a1e-0000-0000-0000-000000000000")
+        );
+        let bare: ArtistCredit = serde_json::from_str(r#"{"name": "Unknown"}"#).unwrap();
+        assert!(bare.artist.is_none());
+    }
 
     fn release(
         id: &str,

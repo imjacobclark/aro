@@ -717,6 +717,11 @@ mod integration_tests {
             sources,
             telemetry: crate::http::RuntimeTelemetry::default(),
             identification_available: false,
+            musicbrainz_user_agent: "Aro/test".into(),
+            musicbrainz: std::sync::Arc::new(aro_track_id::musicbrainz::MusicBrainzClient::new(
+                "Aro/test".into(),
+            )),
+            artwork_http: reqwest::Client::new(),
         };
         (Arc::new(DlnaState::new(app, &config)), root)
     }

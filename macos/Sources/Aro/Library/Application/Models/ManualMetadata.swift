@@ -145,3 +145,25 @@ struct MetadataEditorContext: Identifiable, Sendable {
     let scope: MetadataEditingScope
     let songs: [Song]
 }
+
+/// A cover offered by the hub rather than found in this Mac's own library.
+///
+/// The local library can only ever offer artwork it already holds — the file's embedded
+/// image, the one cover identification settled on, and whatever other tracks happen to
+/// carry. That misses almost everything the Cover Art Archive actually has: it is
+/// populated per *release*, and MusicBrainz routinely carries one album as many releases,
+/// so the pressing a track matched is often not the one anybody scanned. These candidates
+/// come from the hub walking that out — every pressing of this album, and one cover from
+/// each of the artist's other albums.
+///
+/// `thumbnail` is a small image for the picker grid. `fullImageURL` is resolved to real
+/// bytes only when a listener chooses this candidate, so browsing a discography never
+/// downloads full-resolution art for covers nobody picks.
+struct HubArtworkCandidate: Hashable, Sendable, Identifiable {
+    let thumbnail: Data
+    let fullImageURL: String
+    let origin: RemoteArtworkOrigin
+    let album: String?
+
+    var id: String { fullImageURL }
+}

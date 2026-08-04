@@ -3162,6 +3162,39 @@ impl HubStore {
         Ok(())
     }
 
+    /// A previously-discovered artwork candidate list, if one was cached. Discovery costs
+    /// dozens of rate-limited MusicBrainz and Cover Art Archive requests — well over a
+    /// minute for a prolific artist — so reopening the picker must not repeat it.
+    pub fn cached_artwork_candidates(&self, cache_key: &str) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .connection
+            .lock()
+            .query_row(
+                "SELECT response FROM artwork_candidate_cache WHERE cache_key = ?1",
+                [cache_key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
+    pub fn cache_artwork_candidates(
+        &self,
+        cache_key: &str,
+        response: &str,
+    ) -> Result<(), StoreError> {
+        self.connection.lock().execute(
+            r#"
+            INSERT INTO artwork_candidate_cache(cache_key, response, refreshed_at)
+            VALUES (?1, ?2, unixepoch())
+            ON CONFLICT(cache_key) DO UPDATE SET
+                response = excluded.response,
+                refreshed_at = excluded.refreshed_at
+            "#,
+            params![cache_key, response],
+        )?;
+        Ok(())
+    }
+
     /// The release-group affinity tally for `artist_normalized`, keyed by
     /// release-group id, as recorded by `record_release_group_choice`.
     pub fn release_group_affinity(
@@ -3773,6 +3806,16 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
               AND members.release_group_id = release_group_affinity.release_group_id
         );
         INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (13, unixepoch());
+        "#,
+    )?;
+    connection.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS artwork_candidate_cache (
+            cache_key TEXT PRIMARY KEY,
+            response TEXT NOT NULL,
+            refreshed_at INTEGER NOT NULL
+        );
+        INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (14, unixepoch());
         "#,
     )?;
     Ok(())

@@ -1,26 +1,40 @@
 import SwiftUI
+import AroCommon
 
 struct MetadataEditorView: View {
     let context: MetadataEditorContext
     let snapshot: TrackMetadataSnapshot
     let save: ([ManualMetadataEdit], ManualArtworkEdit?) -> Void
     let reset: () -> Void
+    /// Asks the hub what artwork exists for this track. `nil` on a library with no hub to
+    /// ask, in which case the picker simply shows what's held locally.
+    let loadHubArtwork: (() async -> [HubArtworkCandidate])?
+    /// Pulls the full-resolution image for a chosen candidate; `nil` leaves the thumbnail
+    /// in place rather than failing the selection outright.
+    let resolveHubArtwork: ((HubArtworkCandidate) async -> Data?)?
 
     @Environment(\.dismiss) private var dismiss
     @State private var values: [EditableMetadataField: String]
     @State private var artworkEdit: ManualArtworkEdit?
     @State private var showResetConfirmation = false
+    @State private var hubArtwork: [HubArtworkCandidate] = []
+    @State private var hubArtworkLoading = false
+    @State private var resolvingArtwork: HubArtworkCandidate?
 
     init(
         context: MetadataEditorContext,
         snapshot: TrackMetadataSnapshot,
         save: @escaping ([ManualMetadataEdit], ManualArtworkEdit?) -> Void,
-        reset: @escaping () -> Void
+        reset: @escaping () -> Void,
+        loadHubArtwork: (() async -> [HubArtworkCandidate])? = nil,
+        resolveHubArtwork: ((HubArtworkCandidate) async -> Data?)? = nil
     ) {
         self.context = context
         self.snapshot = snapshot
         self.save = save
         self.reset = reset
+        self.loadHubArtwork = loadHubArtwork
+        self.resolveHubArtwork = resolveHubArtwork
         _values = State(initialValue: snapshot.effectiveValues)
         _artworkEdit = State(initialValue: nil)
     }
@@ -248,7 +262,117 @@ struct MetadataEditorView: View {
                 .padding(.vertical, 2)
             }
             .scrollIndicators(.hidden)
+
+            hubArtworkSection(
+                title: "Other Pressings of This Album",
+                origin: .thisAlbum,
+                empty: "No other cover art is archived for this album."
+            )
+            hubArtworkSection(
+                title: artistCatalogueTitle,
+                origin: .artistCatalogue,
+                empty: "No cover art is archived for this artist's other albums."
+            )
         }
+        .task(id: snapshot.song.libraryID) {
+            guard let loadHubArtwork, hubArtwork.isEmpty else { return }
+            hubArtworkLoading = true
+            hubArtwork = await loadHubArtwork()
+            hubArtworkLoading = false
+        }
+    }
+
+    private var artistCatalogueTitle: String {
+        let artist = (values[.artist] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return artist.isEmpty ? "Other Albums by This Artist" : "Other Albums by \(artist)"
+    }
+
+    /// Covers the hub found, split by where they came from. Kept separate from the local
+    /// candidates above because they mean different things: those are images this Mac
+    /// already holds, these are what exists in the archive but hasn't been chosen.
+    @ViewBuilder
+    private func hubArtworkSection(
+        title: String,
+        origin: RemoteArtworkOrigin,
+        empty: String
+    ) -> some View {
+        let candidates = hubArtwork.filter { $0.origin == origin }
+        if hubArtworkLoading || !candidates.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Text(title)
+                        .font(.subheadline.weight(.medium))
+                    if hubArtworkLoading {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+                .padding(.top, 4)
+
+                if candidates.isEmpty {
+                    if !hubArtworkLoading {
+                        Text(empty)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    ScrollView(.horizontal) {
+                        HStack(spacing: 12) {
+                            ForEach(candidates) { candidate in
+                                hubArtworkButton(candidate)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                    .scrollIndicators(.hidden)
+                }
+            }
+        }
+    }
+
+    private func hubArtworkButton(_ candidate: HubArtworkCandidate) -> some View {
+        let resolving = resolvingArtwork == candidate
+        return Button {
+            // The grid holds thumbnails; the full-resolution image is only worth
+            // fetching for the one a listener actually settles on. Show the thumbnail
+            // immediately so the choice registers, then upgrade it in place.
+            artworkEdit = ManualArtworkEdit(data: candidate.thumbnail)
+            guard let resolveHubArtwork else { return }
+            resolvingArtwork = candidate
+            Task {
+                let full = await resolveHubArtwork(candidate)
+                if let full, artworkEdit?.data == candidate.thumbnail {
+                    artworkEdit = ManualArtworkEdit(data: full)
+                }
+                resolvingArtwork = nil
+            }
+        } label: {
+            VStack(spacing: 5) {
+                AlbumArtworkView(data: candidate.thumbnail, maxDimension: 78)
+                    .frame(width: 78, height: 78)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(
+                                artworkEdit?.data == candidate.thumbnail
+                                    ? Color.accentColor
+                                    : Color.clear,
+                                lineWidth: 3
+                            )
+                    }
+                    .overlay {
+                        if resolving {
+                            ProgressView().controlSize(.small)
+                        }
+                    }
+                Text(candidate.album ?? "Cover")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .frame(width: 92)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Select artwork from \(candidate.album ?? "the archive")")
     }
 
     private func artworkButton(data: Data?, label: String) -> some View {

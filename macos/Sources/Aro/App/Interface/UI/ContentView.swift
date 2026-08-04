@@ -465,7 +465,9 @@ struct ContentView: View {
                     reset: {
                         store.resetManualMetadata(for: context.songs)
                         syncDataStatus = "Metadata reset; server sync queued"
-                    }
+                    },
+                    loadHubArtwork: hubArtworkLoader(for: song),
+                    resolveHubArtwork: resolveHubArtwork
                 )
             }
         }
@@ -683,6 +685,82 @@ struct ContentView: View {
                 } ?? false))
         guard status.lastError != nil || attemptOutranSuccess else { return .online }
         return syncStore.pending(limit: 1).isEmpty ? .offline : .failing
+    }
+
+    /// Asks the hub what cover art exists for this track and brings back the thumbnails.
+    /// Returns an empty list rather than surfacing an error: the picker still has the
+    /// local candidates to offer, and a failed archive lookup shouldn't block editing
+    /// metadata. `nil` when there's no hub to ask at all, which hides the sections.
+    private func hubArtworkLoader(
+        for song: Song
+    ) -> (() async -> [HubArtworkCandidate])? {
+        guard let contentHash = song.contentHash else { return nil }
+        return {
+            guard let remote = await remoteSyncContext else { return [] }
+            let candidates: [RemoteArtworkCandidate]
+            do {
+                candidates = try await remote.client.artworkCandidates(
+                    contentHash: contentHash,
+                    credential: remote.credential
+                )
+            } catch {
+                Self.logger.warning(
+                    "hub artwork lookup failed: \(String(describing: error), privacy: .public)"
+                )
+                return []
+            }
+            return await withTaskGroup(
+                of: (Int, HubArtworkCandidate?).self
+            ) { group in
+                for (index, candidate) in candidates.enumerated() {
+                    group.addTask {
+                        guard let hash = candidate.thumbnail.split(separator: "/").last,
+                              let data = try? await remote.client.downloadBlob(
+                                  hash: String(hash),
+                                  from: 0,
+                                  credential: remote.credential
+                              ),
+                              !data.isEmpty else {
+                            return (index, nil)
+                        }
+                        return (
+                            index,
+                            HubArtworkCandidate(
+                                thumbnail: data,
+                                fullImageURL: candidate.fullImageURL,
+                                origin: candidate.origin,
+                                album: candidate.album
+                            )
+                        )
+                    }
+                }
+                // Reassembled in the hub's order, which puts this album's pressings
+                // ahead of the artist's other records.
+                var loaded: [(Int, HubArtworkCandidate)] = []
+                for await (index, candidate) in group {
+                    if let candidate {
+                        loaded.append((index, candidate))
+                    }
+                }
+                return loaded.sorted { $0.0 < $1.0 }.map(\.1)
+            }
+        }
+    }
+
+    private func resolveHubArtwork(
+        _ candidate: HubArtworkCandidate
+    ) async -> Data? {
+        guard let remote = await remoteSyncContext else { return nil }
+        guard let resolved = try? await remote.client.resolveArtwork(
+            imageURL: candidate.fullImageURL,
+            credential: remote.credential
+        ) else { return nil }
+        guard let hash = resolved.blob.split(separator: "/").last else { return nil }
+        return try? await remote.client.downloadBlob(
+            hash: String(hash),
+            from: 0,
+            credential: remote.credential
+        )
     }
 
     private func resolveRemoteArtworkBlob(hash: String) async -> Data? {
