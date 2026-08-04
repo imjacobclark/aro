@@ -177,10 +177,15 @@ actor HubMutationPushCoordinator {
             return try pending.wireOperation()
         }
         guard !outgoing.isEmpty else { return 0 }
+        // Upload-only: this path exists to flush the outbox, and the full sync
+        // loop is what pulls changes down. Ask for none with an explicit limit
+        // of zero and report the cursor we genuinely hold — an out-of-range
+        // cursor used as a "send me nothing" sentinel reads as a real position
+        // to the hub and cannot survive a signed-integer column.
         let response = try await client.exchange(
             SyncExchangeRequest(
-                afterSequence: UInt64.max,
-                limit: 1,
+                afterSequence: operations.serverCursor(hubID: hubID),
+                limit: 0,
                 operations: outgoing
             ),
             credential: credential

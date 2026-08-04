@@ -382,11 +382,16 @@ impl HubStore {
         after_sequence: u64,
         limit: u32,
     ) -> Result<Vec<SequencedOperation>, StoreError> {
+        // An upload-only exchange says so with an explicit zero rather than by
+        // parking the cursor somewhere unreachable.
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         // SQLite's INTEGER is signed, so binding a u64 above i64::MAX fails the
-        // conversion outright rather than simply matching no rows. A push-only
-        // exchange legitimately sends u64::MAX to mean "return nothing to me",
-        // and a cursor that large can never match a real sequence anyway, so
-        // saturating here is lossless and keeps client input from 500ing.
+        // conversion outright rather than simply matching no rows. Older clients
+        // still send u64::MAX to mean "return nothing to me", and a cursor that
+        // large can never match a real sequence anyway, so saturating here is
+        // lossless and keeps any client's input from 500ing the hub.
         let after_sequence = after_sequence.min(i64::MAX as u64);
         let connection = self.connection.lock();
         let mut statement = connection.prepare(
@@ -3949,6 +3954,19 @@ mod tests {
         );
         // The ordinary cursor path must be untouched by the saturation.
         assert_eq!(store.changes_after(0, 10).unwrap().len(), 1);
+    }
+
+    /// The upload-only exchange asks for nothing with an explicit zero, which
+    /// must mean "no changes" rather than falling through to a clamped page.
+    #[test]
+    fn a_zero_limit_returns_no_changes_rather_than_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        store
+            .append_operations(&[operation(Uuid::new_v4())])
+            .unwrap();
+        assert!(store.changes_after(0, 0).unwrap().is_empty());
+        assert_eq!(store.changes_after(0, 1).unwrap().len(), 1);
     }
 
     /// The offline count arrives straight off the wire and lands in the same
