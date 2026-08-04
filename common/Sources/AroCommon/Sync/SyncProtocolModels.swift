@@ -525,3 +525,93 @@ public struct RemoteArtworkResolveRequest: Codable, Sendable {
 public struct RemoteArtworkResolveResponse: Codable, Sendable {
     public let blob: String
 }
+
+/// The quality a track is delivered at. `original` is the untouched source file; every
+/// other tier is Opus, which is markedly better than AAC or MP3 at these bitrates and which
+/// the playback engine already decodes.
+///
+/// A losslessly-ripped library is enormous next to what a phone on a mobile connection
+/// needs — roughly 24 MB a track against a little over 2 MB at `saver`.
+public enum StreamQuality: String, Codable, Sendable, CaseIterable, Identifiable {
+    case original
+    case high
+    case balanced
+    case saver
+    case minimum
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .original: "Original"
+        case .high: "High"
+        case .balanced: "Balanced"
+        case .saver: "Saver"
+        case .minimum: "Minimum"
+        }
+    }
+
+    /// `nil` for `original`, which is never re-encoded.
+    public var kilobitsPerSecond: Int? {
+        switch self {
+        case .original: nil
+        case .high: 192
+        case .balanced: 128
+        case .saver: 96
+        case .minimum: 64
+        }
+    }
+
+    public var detail: String {
+        switch self {
+        case .original: "Bit-perfect. Largest files, no conversion needed."
+        case .high: "192 kbps Opus. Transparent for almost any listening."
+        case .balanced: "128 kbps Opus. Excellent quality at a third of the size."
+        case .saver: "96 kbps Opus. Good quality, roughly a tenth of the size."
+        case .minimum: "64 kbps Opus. For tight mobile connections."
+        }
+    }
+}
+
+/// What converting the library to a given quality would cost, quoted by the hub that would
+/// do the work. Hubs differ by more than an order of magnitude, so this is measured on the
+/// machine itself rather than estimated from a constant.
+public struct RemoteTranscodePlan: Codable, Sendable {
+    public let quality: String
+    public let tracksTotal: UInt64
+    public let tracksPending: UInt64
+    public let pendingAudioSeconds: Double
+    public let estimatedSeconds: Double
+    public let estimatedBytes: UInt64
+    public let concurrency: Int
+}
+
+public struct RemoteTranscodeStartRequest: Codable, Sendable {
+    public let quality: String
+
+    public init(quality: String) {
+        self.quality = quality
+    }
+}
+
+public struct RemoteTranscodeCleanupRequest: Codable, Sendable {
+    /// The quality to keep; every other cached encode is removed.
+    public let keep: String
+
+    public init(keep: String) {
+        self.keep = keep
+    }
+}
+
+public struct RemoteTranscodeCleanupResponse: Codable, Sendable {
+    public let removed: UInt64
+    public let freedBytes: UInt64
+}
+
+public struct RemoteTranscodeUsage: Codable, Sendable, Identifiable {
+    public let quality: String
+    public let tracks: UInt64
+    public let bytes: UInt64
+
+    public var id: String { quality }
+}

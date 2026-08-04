@@ -262,6 +262,8 @@ final class SyncPreferences {
         static let replicaMode = "sync.replicaMode"
         static let cacheLimit = "sync.cacheLimitBytes"
         static let manualAddress = "sync.manualAddress"
+        static let streamQuality = "sync.streamQuality"
+        static let downloadQuality = "sync.downloadQuality"
         // Legacy locations, migrated into `LocalHubSecretStore` on first load.
         static let legacyAdminToken = "sync.host.adminToken"
         static let legacyAcoustidApiKey = "sync.host.acoustidApiKey"
@@ -338,6 +340,17 @@ final class SyncPreferences {
     var manualAddress: String {
         didSet { defaults.set(manualAddress, forKey: Key.manualAddress) }
     }
+    /// Quality for streamed playback — the bandwidth lever. Changing it only affects which
+    /// encode is requested; the encodes themselves are produced by a conversion job on the
+    /// hub, so a quality with nothing generated yet simply falls back to the original.
+    var streamQuality: StreamQuality {
+        didSet { defaults.set(streamQuality.rawValue, forKey: Key.streamQuality) }
+    }
+    /// Quality for tracks kept offline — the disk-space lever, and deliberately separate:
+    /// what is worth carrying on a laptop is not what is worth spending mobile data on.
+    var downloadQuality: StreamQuality {
+        didSet { defaults.set(downloadQuality.rawValue, forKey: Key.downloadQuality) }
+    }
     /// Personal AcoustID API key used for background track identification. Rewrites
     /// `aro.toml` on change, same as `dataLocation`/`importMode` — the running
     /// Background Service picks it up on its next restart.
@@ -378,6 +391,13 @@ final class SyncPreferences {
             .flatMap(HubImportMode.init(rawValue:)) ?? .managed
         replicaMode = defaults.string(forKey: Key.replicaMode)
             .flatMap(SyncReplicaMode.init(rawValue:)) ?? .onDemand
+        // Both default to the untouched source: nothing is re-encoded until it is asked
+        // for, and the first run of a library should never silently be lower quality than
+        // the files it was given.
+        streamQuality = defaults.string(forKey: Key.streamQuality)
+            .flatMap(StreamQuality.init(rawValue:)) ?? .original
+        downloadQuality = defaults.string(forKey: Key.downloadQuality)
+            .flatMap(StreamQuality.init(rawValue:)) ?? .original
         cacheLimitBytes = defaults.object(forKey: Key.cacheLimit) == nil
             ? CacheEvictionPolicy.defaultLimitBytes
             : defaults.object(forKey: Key.cacheLimit) as? Int64

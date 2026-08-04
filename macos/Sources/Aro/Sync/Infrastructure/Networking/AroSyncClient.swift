@@ -780,6 +780,47 @@ actor AroSyncClient {
         try await getAuthenticated("v1/topology", credential: credential)
     }
 
+    /// What converting the library to `quality` would cost on this hub. Asked before any
+    /// conversion is agreed to: the same library is minutes of work on a fast machine and
+    /// hours on a slow one, so the number has to come from the hub itself.
+    func transcodePlan(
+        quality: StreamQuality,
+        credential: HubDeviceCredential? = nil
+    ) async throws -> RemoteTranscodePlan {
+        try await getAuthenticated(
+            "v1/transcode/plan?quality=\(quality.rawValue)",
+            credential: credential
+        )
+    }
+
+    func startTranscode(
+        quality: StreamQuality,
+        credential: HubDeviceCredential? = nil
+    ) async throws -> RemoteSyncJob {
+        try await postAuthenticated(
+            "v1/transcode/start",
+            body: RemoteTranscodeStartRequest(quality: quality.rawValue),
+            credential: credential
+        )
+    }
+
+    func cleanupTranscodes(
+        keeping quality: StreamQuality,
+        credential: HubDeviceCredential? = nil
+    ) async throws -> RemoteTranscodeCleanupResponse {
+        try await postAuthenticated(
+            "v1/transcode/cleanup",
+            body: RemoteTranscodeCleanupRequest(keep: quality.rawValue),
+            credential: credential
+        )
+    }
+
+    func transcodeUsage(
+        credential: HubDeviceCredential? = nil
+    ) async throws -> [RemoteTranscodeUsage] {
+        try await getAuthenticated("v1/transcode/usage", credential: credential)
+    }
+
     /// Covers the hub found for this track: every pressing of its album, plus one from
     /// each of the artist's other albums. Only thumbnails come back — see
     /// `resolveArtwork(imageURL:)` for the full-resolution fetch, which happens once a

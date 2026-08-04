@@ -14,6 +14,49 @@ final class LibraryStore {
     private(set) var serverCatalogSongs: [Song] = []
     private(set) var serverSongsBySource: [UUID: [Song]] = [:]
     private(set) var usesServerCatalog = false
+    /// Quality streamed playback asks the hub for. Held here rather than passed through
+    /// every call site because it changes independently of the catalog — switching quality
+    /// must re-point existing songs, not wait for the next catalog refresh.
+    var streamQuality: StreamQuality = .original {
+        didSet {
+            guard streamQuality != oldValue, usesServerCatalog else { return }
+            guard let baseURL = serverBaseURL else { return }
+            serverCatalogSongs = serverCatalogSongs.map { song in
+                var updated = song
+                updated.url = Self.mediaURL(
+                    for: song.contentHash,
+                    baseURL: baseURL,
+                    quality: streamQuality
+                )
+                return updated
+            }
+        }
+    }
+    @ObservationIgnored private var serverBaseURL: URL?
+
+    /// Where a track's audio is fetched from.
+    ///
+    /// `original` uses the plain blob endpoint. Every other tier goes through the streaming
+    /// endpoint, which serves a cached encode when the hub has one and encodes on the fly
+    /// when it doesn't — so choosing a quality never leaves a newly-imported track
+    /// unplayable while it waits for a conversion pass.
+    static func mediaURL(
+        for contentHash: String?,
+        baseURL: URL,
+        quality: StreamQuality
+    ) -> URL {
+        guard let contentHash else { return baseURL }
+        guard quality != .original else {
+            return baseURL.appendingPathComponent("v1/blobs/\(contentHash)")
+        }
+        var components = URLComponents(
+            url: baseURL.appendingPathComponent("v1/blobs/\(contentHash)/stream"),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = [URLQueryItem(name: "quality", value: quality.rawValue)]
+        return components?.url
+            ?? baseURL.appendingPathComponent("v1/blobs/\(contentHash)")
+    }
     @ObservationIgnored private var serverArtworkByHash: [String: Data] = [:]
 
     @ObservationIgnored private let manageFolders: ManageWatchedFolders
@@ -79,10 +122,13 @@ final class LibraryStore {
         pendingArtwork: [UUID: ManualArtworkEdit] = [:]
     ) {
         serverArtworkByHash.merge(artworkByHash) { _, newest in newest }
+        serverBaseURL = baseURL
         serverCatalogSongs = tracks.map { track in
-            let mediaURL = track.contentHash.flatMap {
-                baseURL.appendingPathComponent("v1/blobs/\($0)")
-            } ?? baseURL
+            let mediaURL = Self.mediaURL(
+                for: track.contentHash,
+                baseURL: baseURL,
+                quality: streamQuality
+            )
             let song = Song(
                 libraryID: track.trackID,
                 url: mediaURL,

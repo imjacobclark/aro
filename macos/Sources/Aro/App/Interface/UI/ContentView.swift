@@ -210,7 +210,41 @@ struct ContentView: View {
                 libraryFiles: libraryFiles,
                 activateProfile: activateProfile,
                 forgetProfile: forgetProfile,
-                completeRemoteConnection: completeRemoteConnection
+                completeRemoteConnection: completeRemoteConnection,
+                planTranscode: { quality in
+                    guard let remote = await remoteSyncContext else { return nil }
+                    return try? await remote.client.transcodePlan(
+                        quality: quality,
+                        credential: remote.credential
+                    )
+                },
+                startTranscode: { quality in
+                    guard let remote = await remoteSyncContext else { return nil }
+                    return try? await remote.client.startTranscode(
+                        quality: quality,
+                        credential: remote.credential
+                    )
+                },
+                transcodeProgress: { jobID in
+                    guard let remote = await remoteSyncContext else { return nil }
+                    return try? await remote.client.jobStatus(
+                        jobID: jobID,
+                        credential: remote.credential
+                    )
+                },
+                cleanupTranscodes: { quality in
+                    guard let remote = await remoteSyncContext else { return nil }
+                    return try? await remote.client.cleanupTranscodes(
+                        keeping: quality,
+                        credential: remote.credential
+                    )
+                },
+                transcodeUsage: {
+                    guard let remote = await remoteSyncContext else { return [] }
+                    return (try? await remote.client.transcodeUsage(
+                        credential: remote.credential
+                    )) ?? []
+                }
             )
         } else if store.selection == .metadata {
             MetadataView(
@@ -417,6 +451,10 @@ struct ContentView: View {
         }
         .onAppear {
             installSpacebarMonitor()
+            store.streamQuality = syncPreferences.streamQuality
+        }
+        .onChange(of: syncPreferences.streamQuality) { _, quality in
+            store.streamQuality = quality
         }
         .onDisappear {
             removeSpacebarMonitor()

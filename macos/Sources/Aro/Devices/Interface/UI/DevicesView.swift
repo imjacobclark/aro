@@ -17,6 +17,13 @@ struct LibrarySettingsView: View {
         String,
         OfflineDownloadPolicy
     ) -> Void
+    /// Low data mode needs a hub to do the converting, so these are absent for a local
+    /// library and the section hides itself rather than offering something that can't work.
+    var planTranscode: ((StreamQuality) async -> RemoteTranscodePlan?)?
+    var startTranscode: ((StreamQuality) async -> RemoteSyncJob?)?
+    var transcodeProgress: ((UUID) async -> RemoteSyncJob?)?
+    var cleanupTranscodes: ((StreamQuality) async -> RemoteTranscodeCleanupResponse?)?
+    var transcodeUsage: (() async -> [RemoteTranscodeUsage])?
 
     @State private var localServers = LocalAroServerMonitor()
     @State private var pairedDevices: [ControlledHubDevice] = []
@@ -27,6 +34,7 @@ struct LibrarySettingsView: View {
     @State private var showingCreateLibrary = false
     @State private var connectionInitialAddress = ""
     @State private var showingOfflineSettings = false
+    @State private var showingLowDataSettings = false
     @State private var deviceToRemove: ControlledHubDevice?
     @State private var profileToForget: LibraryProfile?
     @State private var statusMessage: String?
@@ -81,6 +89,25 @@ struct LibrarySettingsView: View {
                 onFinished: { showingCreateLibrary = false }
             )
             .frame(minWidth: 760, minHeight: 560)
+        }
+        .sheet(isPresented: $showingLowDataSettings) {
+            NavigationStack {
+                LowDataSettingsView(
+                    preferences: preferences,
+                    plan: planTranscode,
+                    start: startTranscode,
+                    progress: transcodeProgress,
+                    cleanup: cleanupTranscodes,
+                    usage: transcodeUsage
+                )
+                .navigationTitle("Low Data Mode")
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { showingLowDataSettings = false }
+                    }
+                }
+            }
+            .frame(minWidth: 460, minHeight: 420)
         }
         .sheet(isPresented: $showingOfflineSettings) {
             if let profile = registry.activeProfile {
@@ -500,6 +527,21 @@ struct LibrarySettingsView: View {
                         Spacer()
                         Button("Manage Storage") {
                             showingOfflineSettings = true
+                        }
+                    }
+                    if planTranscode != nil {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Low Data Mode")
+                                Text(
+                                    "Streaming \(preferences.streamQuality.title) · "
+                                    + "Downloads \(preferences.downloadQuality.title)"
+                                )
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("Quality") { showingLowDataSettings = true }
                         }
                     }
                     HStack(spacing: 16) {

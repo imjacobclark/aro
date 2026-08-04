@@ -85,7 +85,7 @@ public struct AudioFileProperties: Hashable, Codable, Sendable {
 
 public struct Song: Identifiable, Hashable, Sendable {
     public let libraryID: UUID
-    public let url: URL
+    public var url: URL
     public let title: String
     public let artist: String
     public let album: String?

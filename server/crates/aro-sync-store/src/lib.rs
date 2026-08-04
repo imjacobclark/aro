@@ -3238,8 +3238,15 @@ impl HubStore {
         let connection = self.connection.lock();
         let mut statement = connection.prepare(
             r#"
+            -- The field is `duration`; `duration_seconds` is the *catalog* projection's
+            -- name for it. Reading the wrong one yields NULL rather than an error, which
+            -- silently quotes every conversion as taking no time at all.
             SELECT tracks.content_hash,
-                   COALESCE(json_extract(tracks.metadata, '$.duration_seconds'), 0)
+                   COALESCE(
+                       json_extract(tracks.metadata, '$.duration'),
+                       json_extract(tracks.metadata, '$.duration_seconds'),
+                       0
+                   )
             FROM tracks
             WHERE tracks.tombstoned_at IS NULL
               AND tracks.purged_at IS NULL
@@ -5652,6 +5659,58 @@ mod tests {
 
         // No source_files row exists for this track, so it isn't reachable on disk.
         assert!(store.live_path_for_track(track_id).unwrap().is_none());
+    }
+
+    /// The whole point of planning a conversion is telling someone how long it will take,
+    /// and that number is derived from track durations. Reading the wrong metadata key
+    /// returns NULL rather than failing, which quotes every conversion as instant — so the
+    /// duration actually has to be asserted, not just the track count.
+    #[test]
+    fn pending_transcodes_carry_real_durations_for_the_estimate() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let device_id = Uuid::new_v4();
+        let timestamp = HybridTimestamp {
+            physical_millis: 1,
+            logical: 0,
+            device_id,
+        };
+        let mut field_versions = BTreeMap::new();
+        for field in ["content_hash", "title", "duration"] {
+            field_versions.insert(field.to_owned(), timestamp.clone());
+        }
+        store
+            .append_operations(&[Operation {
+                operation_id: Uuid::new_v4(),
+                device_id,
+                entity_type: "track".into(),
+                entity_id: Uuid::new_v4().to_string(),
+                kind: "upsert".into(),
+                payload: serde_json::json!({
+                    "content_hash": "abc123",
+                    "title": "Song",
+                    "duration": 202.773,
+                }),
+                field_versions,
+            }])
+            .unwrap();
+
+        let pending = store.tracks_missing_transcode("saver").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, "abc123");
+        assert!(
+            (pending[0].1 - 202.773).abs() < 0.001,
+            "duration must survive into the estimate, got {}",
+            pending[0].1
+        );
+
+        // Once an encode exists the track drops out, so a second run doesn't re-quote work
+        // already paid for.
+        store
+            .record_transcoded_blob("abc123", "saver", "blob-hash", 1_000)
+            .unwrap();
+        assert!(store.tracks_missing_transcode("saver").unwrap().is_empty());
+        assert_eq!(store.tracks_missing_transcode("minimum").unwrap().len(), 1);
     }
 
     /// A generated encode is real work — minutes of CPU on a slow hub — and lives in the
