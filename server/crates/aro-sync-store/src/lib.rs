@@ -613,7 +613,8 @@ impl HubStore {
              COALESCE((SELECT b.size FROM blobs b WHERE b.hash = t.content_hash),\
                       (SELECT rb.size FROM referenced_blobs rb WHERE rb.hash = t.content_hash AND rb.available = 1)),\
              EXISTS(SELECT 1 FROM blobs b WHERE b.hash = t.content_hash)\
-             OR EXISTS(SELECT 1 FROM referenced_blobs rb WHERE rb.hash = t.content_hash AND rb.available = 1),\
+             OR EXISTS(SELECT 1 FROM referenced_blobs rb WHERE rb.hash = t.content_hash AND rb.available = 1)\
+             OR EXISTS(SELECT 1 FROM source_files sf WHERE sf.content_hash = t.content_hash AND sf.available = 1),\
              (SELECT l.payload FROM loudness l WHERE l.content_hash = t.content_hash \
               ORDER BY l.algorithm_version DESC LIMIT 1) \
              FROM tracks t WHERE t.purged_at IS NULL AND t.tombstoned_at IS NULL \
@@ -2326,6 +2327,37 @@ impl HubStore {
                 params![source_id.to_string(), path],
             )?;
         }
+        // A scan is the only thing that actually looks at the disk, so its verdict is the
+        // freshest available. Without this, `referenced_blobs.available` was only ever
+        // cleared lazily by a failed download and only ever restored by a re-import — so a
+        // file that failed one verify for a transient reason (an unmounted volume, a
+        // permissions blip) stayed marked unavailable until its size or mtime happened to
+        // change, even while sitting right there on disk.
+        transaction.execute(
+            r#"
+            UPDATE referenced_blobs SET available = 1
+            WHERE hash IN (
+                SELECT content_hash FROM source_files
+                WHERE source_id = ?1 AND available = 1
+            )
+            "#,
+            [source_id.to_string()],
+        )?;
+        transaction.execute(
+            r#"
+            UPDATE referenced_blobs SET available = 0
+            WHERE hash IN (
+                SELECT content_hash FROM source_files
+                WHERE source_id = ?1 AND available = 0
+            )
+            AND hash NOT IN (
+                -- Still reachable through another folder: one source losing a file says
+                -- nothing about a copy that lives somewhere else.
+                SELECT content_hash FROM source_files WHERE available = 1
+            )
+            "#,
+            [source_id.to_string()],
+        )?;
         transaction.execute(
             r#"
             UPDATE sources SET available = ?1, warning = ?2, last_error = ?2,
@@ -5955,6 +5987,79 @@ mod tests {
 
         // No source_files row exists for this track, so it isn't reachable on disk.
         assert!(store.live_path_for_track(track_id).unwrap().is_none());
+    }
+
+    /// A referenced original is marked unavailable when a download fails to verify, but
+    /// nothing restored it: re-import only runs when size or mtime changes, so a file that
+    /// failed once for a transient reason stayed unavailable while sitting on disk. The
+    /// scan is the only thing that actually looks, so its verdict has to propagate.
+    #[test]
+    fn a_scan_restores_a_referenced_file_that_came_back() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let source_id = Uuid::new_v4();
+        let hash = "e".repeat(64);
+        {
+            let connection = store.connection.lock();
+            connection
+                .execute(
+                    "INSERT INTO sources(source_id, mode, path, available, name) \
+                     VALUES (?1, 'referenced', '/music', 1, 'Music')",
+                    params![source_id.to_string()],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO source_files(source_id, relative_path, hub_track_id, \
+                     content_hash, size, modified_millis, available, last_seen_at) \
+                     VALUES (?1, 'a.flac', ?2, ?3, 1, 1, 1, 'now')",
+                    params![source_id.to_string(), Uuid::new_v4().to_string(), hash],
+                )
+                .unwrap();
+            // Marked unavailable by a failed verify, exactly as `blob_path_for_download` does.
+            connection
+                .execute(
+                    "INSERT INTO referenced_blobs(hash, path, size, available, verified_at) \
+                     VALUES (?1, '/music/a.flac', 1, 0, 1)",
+                    [&hash],
+                )
+                .unwrap();
+        }
+
+        let seen = HashSet::from(["a.flac".to_string()]);
+        store.finish_source_scan(source_id, &seen, None).unwrap();
+
+        let available: i64 = store
+            .connection
+            .lock()
+            .query_row(
+                "SELECT available FROM referenced_blobs WHERE hash = ?1",
+                [&hash],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            available, 1,
+            "a file the scan found should be available again"
+        );
+
+        // And a scan that no longer sees it marks it gone.
+        store
+            .finish_source_scan(source_id, &HashSet::new(), None)
+            .unwrap();
+        let available: i64 = store
+            .connection
+            .lock()
+            .query_row(
+                "SELECT available FROM referenced_blobs WHERE hash = ?1",
+                [&hash],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            available, 0,
+            "a file the scan no longer sees is unavailable"
+        );
     }
 
     /// Writing corrected tags into a file changes its bytes, and therefore the SHA-256 that
