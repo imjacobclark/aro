@@ -127,9 +127,6 @@ pub enum PlaylistKind {
     HitsByYear,
     ReplayMonth,
     ReplayAllTime,
-    /// An album the listener owns but hasn't played in a while (or ever) —
-    /// "Lost Albums".
-    LostAlbum,
     /// Tracks with meaningful lifetime plays that have gone dormant for at least
     /// [`TIME_CAPSULE_MIN_YEARS_AGO`] years — "Time Capsule".
     TimeCapsule,
@@ -300,7 +297,7 @@ pub fn generate(
         PlaylistKind::ForYou,
         "deep-cuts",
         "Deep Cuts",
-        "Rarely played",
+        "Individual tracks you've passed over",
         deep_cuts,
     );
 
@@ -549,18 +546,42 @@ fn push_lost_albums(
             .then_with(|| b.content_hashes.len().cmp(&a.content_hashes.len()))
             .then_with(|| a.album.cmp(&b.album))
     });
-    for (index, album) in lost.into_iter().take(8).enumerate() {
-        push(
-            playlists,
-            seeds,
-            PlaylistKind::LostAlbum,
-            &format!("lost-album-{index}-{}", slugify(&album.album)),
-            &album.album,
-            "Haven't visited this one in a while",
-            album.content_hashes,
-        );
+    // One shelf, not one per album. Eight cards all captioned "Haven't visited this one
+    // in a while" read as a row of near-identical tiles, and sat beside Deep Cuts — which
+    // is also "rarely played" — the difference between them was invisible. Deep Cuts is
+    // about individual *tracks* passed over; this is about whole *albums* not returned to.
+    let lost: Vec<AlbumAggregate> = lost.into_iter().take(LOST_ALBUM_MAX_ALBUMS).collect();
+    if lost.is_empty() {
+        return;
     }
+    let subtitle = match lost.as_slice() {
+        [only] => format!("{} hasn't been played in a while", only.album),
+        [first, second] => format!("{} and {}", first.album, second.album),
+        [first, second, rest @ ..] => {
+            format!("{}, {} and {} more", first.album, second.album, rest.len())
+        }
+        [] => unreachable!("emptiness is handled above"),
+    };
+    // Album by album rather than interleaved: these are records worth hearing as records,
+    // which is the reason for grouping them by album in the first place.
+    let content_hashes: Vec<String> = lost
+        .into_iter()
+        .flat_map(|album| album.content_hashes)
+        .collect();
+    push(
+        playlists,
+        seeds,
+        PlaylistKind::ForYou,
+        "lost-albums",
+        "Lost Albums",
+        &subtitle,
+        content_hashes,
+    );
 }
+
+/// Albums drawn into the "Lost Albums" shelf. Enough to feel like a real backlog without
+/// the playlist becoming the library.
+const LOST_ALBUM_MAX_ALBUMS: usize = 6;
 
 /// "Time Capsule" — tracks with meaningful lifetime plays whose *most recent* play
 /// was at least [`TIME_CAPSULE_MIN_YEARS_AGO`] years ago: genuinely loved once,
@@ -2214,18 +2235,34 @@ mod tests {
         };
         let playlists = generate(&seeds, now, 0);
 
-        let lost: Vec<&GeneratedPlaylist> = playlists
+        // One shelf covering the dormant albums, rather than a card each: a row of
+        // near-identical album tiles was indistinguishable from Deep Cuts beside it.
+        let lost = playlists
             .iter()
-            .filter(|p| p.kind == PlaylistKind::LostAlbum)
-            .collect();
-        assert_eq!(lost.len(), 2);
-        // Never-played ranks ahead of long-dormant — the most "lost" first.
-        assert_eq!(lost[0].title, "Never Played Album");
-        assert_eq!(lost[1].title, "Dormant Album");
+            .find(|playlist| playlist.id == "lost-albums")
+            .expect("a lost albums shelf");
         assert!(
-            !playlists
+            lost.subtitle.contains("Never Played Album") && lost.subtitle.contains("Dormant Album"),
+            "the shelf should name the albums it covers, got {:?}",
+            lost.subtitle
+        );
+        // Never-played ranks ahead of long-dormant — the most "lost" leads.
+        assert!(
+            lost.content_hashes
                 .iter()
-                .any(|p| { p.kind == PlaylistKind::LostAlbum && p.title == "Recent Album" })
+                .position(|hash| hash.starts_with("never-"))
+                < lost
+                    .content_hashes
+                    .iter()
+                    .position(|hash| hash.starts_with("dormant-")),
+            "never-played albums should lead"
+        );
+        assert!(
+            !lost
+                .content_hashes
+                .iter()
+                .any(|hash| hash.starts_with("recent-")),
+            "a recently played album is not lost"
         );
     }
 

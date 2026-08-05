@@ -44,7 +44,12 @@ struct HomeView: View {
     /// The two `forYou`-kind recipes explicitly reserved for "Made For Your Library"
     /// (Favorites Mix, Deep Cuts) — excluded from the Hero row so they don't render
     /// twice.
-    private static let madeForLibraryForYouIDs: Set<String> = ["recently-loved", "deep-cuts"]
+    /// `lost-albums` is a `forYou` playlist rather than an album card: it spans several
+    /// albums, and a hub that still sends one `lostAlbum` card per album is handled by the
+    /// kind filter below.
+    private static let madeForLibraryForYouIDs: Set<String> = [
+        "recently-loved", "deep-cuts", "lost-albums"
+    ]
 
     var body: some View {
         Group {
