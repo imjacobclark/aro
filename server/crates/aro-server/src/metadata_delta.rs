@@ -213,6 +213,115 @@ fn stringify(value: &Value) -> Option<String> {
     }
 }
 
+/// Aro's effective value for each comparable field — the manual override where one exists,
+/// otherwise whatever identification or the original scan left. This is what the listener
+/// sees, and therefore what gets written into the file.
+pub fn effective_fields(metadata: &Value) -> serde_json::Map<String, Value> {
+    let mut fields = serde_json::Map::new();
+    let Some(map) = metadata.as_object() else {
+        return fields;
+    };
+    for field in COMPARED_FIELDS {
+        let manual_set = map
+            .get(&format!("manual_{field}_set"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let value = if manual_set {
+            map.get(&format!("manual_{field}"))
+        } else {
+            map.get(field)
+        };
+        if let Some(value) = value.filter(|value| !value.is_null()) {
+            fields.insert(field.to_string(), value.clone());
+        }
+    }
+    fields
+}
+
+/// What happened when Aro tried to write its metadata into one file.
+#[derive(Debug, Clone, Serialize)]
+pub struct WriteBackOutcome {
+    pub content_hash: String,
+    /// The hash after writing — the file's identity changes with its bytes.
+    pub new_content_hash: Option<String>,
+    pub written: bool,
+    pub error: Option<String>,
+}
+
+/// Writes Aro's metadata into a track's own file, then moves the track's identity to match.
+///
+/// The file's SHA-256 is what identifies a track everywhere in Aro, and it covers the tags,
+/// so a successful write always changes it. That migration is the dangerous half — see
+/// [`HubStore::rekey_content_hash`] — and it happens in the same call so a written file can
+/// never be left orphaned from its own history.
+///
+/// Refuses to touch a file whose bytes no longer match what Aro recorded. Writing tags into
+/// a file that has already drifted would silently discard whatever changed it, and Aro has
+/// no way to know what that was.
+pub fn write_back_track(
+    store: &HubStore,
+    track: &MetadataScopeTrack,
+    managed: bool,
+) -> WriteBackOutcome {
+    let mut outcome = WriteBackOutcome {
+        content_hash: track.content_hash.clone(),
+        new_content_hash: None,
+        written: false,
+        error: None,
+    };
+    let Some(path) = track.original_path.as_deref().map(std::path::Path::new) else {
+        outcome.error = Some("no reachable original file".into());
+        return outcome;
+    };
+    if !path.is_file() {
+        outcome.error = Some("the original file is no longer there".into());
+        return outcome;
+    }
+    if let Err(error) = aro_sync_core::verify_file(path, &track.content_hash) {
+        outcome.error = Some(format!(
+            "the file has changed since Aro last read it, so it was left alone: {error}"
+        ));
+        return outcome;
+    }
+
+    let fields = effective_fields(&track.metadata);
+    if fields.is_empty() {
+        outcome.error = Some("nothing to write".into());
+        return outcome;
+    }
+    if let Err(error) = aro_track_id::tags::write_back(path, &fields) {
+        outcome.error = Some(error.to_string());
+        return outcome;
+    }
+
+    let (new_hash, _size) = match aro_sync_core::hash_file(path) {
+        Ok(hashed) => hashed,
+        Err(error) => {
+            outcome.error = Some(format!("could not re-read the file after writing: {error}"));
+            return outcome;
+        }
+    };
+    if let Err(error) = store.rekey_content_hash(&track.content_hash, &new_hash) {
+        outcome.error = Some(format!("wrote the file but could not move its history: {error}"));
+        return outcome;
+    }
+    // A managed hub keeps its own copy, and playback serves that copy rather than the
+    // original. Without re-importing, the file would show corrected tags in Finder while
+    // Aro went on serving the bytes from before the edit — a divergence nothing would
+    // surface.
+    if managed
+        && let Err(error) = store.import_managed(path)
+    {
+        outcome.error = Some(format!(
+            "wrote the file, but Aro's own copy could not be refreshed: {error}"
+        ));
+    }
+
+    outcome.new_content_hash = Some(new_hash);
+    outcome.written = true;
+    outcome
+}
+
 /// Resolves a scope and compares it, in one call.
 pub fn for_scope(
     store: &HubStore,

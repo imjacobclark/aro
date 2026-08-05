@@ -253,7 +253,8 @@ struct ContentView: View {
                 profileRegistry: profileRegistry,
                 syncStore: syncStore,
                 status: $cachedIdentificationStatus,
-                remoteHubInfo: $cachedRemoteHubInfo
+                remoteHubInfo: $cachedRemoteHubInfo,
+                loadDeltas: metadataDeltaLoader
             )
         } else if case .folder(let folderID) = store.selection,
                   let folder = store.folders.first(where: { $0.id == folderID }),
