@@ -824,6 +824,22 @@ struct ContentView: View {
         }
     }
 
+    /// Asks the hub how its metadata differs from the files it came from.
+    ///
+    /// `nil` when there is no hub to ask — a local library reads its own files directly and
+    /// has no second opinion to compare against, so the Differences view hides rather than
+    /// offering something that cannot work.
+    private var metadataDeltaLoader: ((String?) async -> [RemoteTrackMetadataDelta]?)? {
+        guard profileRegistry.activeProfile?.kind == .remote else { return nil }
+        return { album in
+            guard let remote = await remoteSyncContext else { return nil }
+            return try? await remote.client.metadataDeltas(
+                album: album,
+                credential: remote.credential
+            )
+        }
+    }
+
     private func resolveHubArtwork(
         _ candidate: HubArtworkCandidate
     ) async -> Data? {

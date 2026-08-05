@@ -5,6 +5,7 @@ mod control;
 mod dashboard;
 mod dlna;
 mod http;
+mod metadata_delta;
 mod playlists;
 mod sources;
 

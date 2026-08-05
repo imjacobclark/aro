@@ -780,6 +780,33 @@ actor AroSyncClient {
         try await getAuthenticated("v1/topology", credential: credential)
     }
 
+    /// How Aro's metadata differs from what the files themselves say, for a scope.
+    ///
+    /// Scope is resolved on the hub rather than by sending it a list of hashes: the hub
+    /// holds the catalogue, and enumerating an artist's tracks client-side means shipping
+    /// the library over the wire to ask a question about it.
+    func metadataDeltas(
+        artist: String? = nil,
+        album: String? = nil,
+        contentHash: String? = nil,
+        limit: Int = 500,
+        credential: HubDeviceCredential? = nil
+    ) async throws -> [RemoteTrackMetadataDelta] {
+        var items = [URLQueryItem(name: "limit", value: String(limit))]
+        if let artist { items.append(URLQueryItem(name: "artist", value: artist)) }
+        if let album { items.append(URLQueryItem(name: "album", value: album)) }
+        if let contentHash {
+            items.append(URLQueryItem(name: "content_hash", value: contentHash))
+        }
+        var components = URLComponents()
+        components.queryItems = items
+        let query = components.percentEncodedQuery ?? ""
+        return try await getAuthenticated(
+            "v1/metadata/deltas?\(query)",
+            credential: credential
+        )
+    }
+
     /// What converting the library to `quality` would cost on this hub. Asked before any
     /// conversion is agreed to: the same library is minutes of work on a fast machine and
     /// hours on a slow one, so the number has to come from the hub itself.

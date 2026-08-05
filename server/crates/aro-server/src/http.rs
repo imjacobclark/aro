@@ -261,6 +261,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/artwork/discover", post(discover_artwork))
         .route("/v1/artwork/resolve", post(resolve_artwork))
         .route("/v1/metadata-overrides", post(set_manual_metadata))
+        .route("/v1/metadata/deltas", get(metadata_deltas))
         .route("/v1/library/tracks/remove", post(remove_track))
         .route("/v1/imports", post(create_import))
         .route("/v1/imports/{id}/files", post(register_import_file))
@@ -1846,6 +1847,54 @@ async fn resolve_artwork(
     .await
     .ok_or_else(|| ApiError::not_found("artwork_unavailable"))?;
     Ok(Json(ResolveArtworkResponse { blob }))
+}
+
+#[derive(Deserialize)]
+struct MetadataDeltaQuery {
+    #[serde(default)]
+    artist: Option<String>,
+    #[serde(default)]
+    album: Option<String>,
+    #[serde(default)]
+    content_hash: Option<String>,
+    #[serde(default = "default_delta_limit")]
+    limit: u32,
+}
+
+fn default_delta_limit() -> u32 {
+    500
+}
+
+/// How Aro's metadata differs from what the files themselves say.
+///
+/// Aro deliberately never lets identification overwrite a file's tags, so the two drift and
+/// nothing surfaced it — playing a track shows Aro's value and gives no hint the file
+/// disagrees. Each field is reported from both sides with a verdict, alongside whether the
+/// original file can still be reached, since a difference nobody can act on is just noise.
+///
+/// Scope is resolved on the hub because the hub holds the catalogue: asking a client to
+/// enumerate an artist's tracks means shipping the library over the wire to ask a question
+/// about it.
+async fn metadata_deltas(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<MetadataDeltaQuery>,
+) -> Result<Json<Vec<crate::metadata_delta::TrackDelta>>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    let store = state.store.clone();
+    // One file opened per track, so this belongs off the async runtime and stays bounded.
+    let deltas = tokio::task::spawn_blocking(move || {
+        crate::metadata_delta::for_scope(
+            &store,
+            query.artist.as_deref(),
+            query.album.as_deref(),
+            query.content_hash.as_deref(),
+            query.limit,
+        )
+    })
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))??;
+    Ok(Json(deltas))
 }
 
 async fn set_manual_metadata(

@@ -623,3 +623,90 @@ public struct RemoteArtworkDiscoverRequest: Codable, Sendable {
         self.contentHash = contentHash
     }
 }
+
+/// How one metadata field compares between Aro's library and the file on disk.
+public enum MetadataFieldVerdict: String, Codable, Sendable {
+    case agrees
+    case differs
+    /// Aro knows a value the file doesn't carry.
+    case missingInFile = "missing_in_file"
+    /// The file carries a value Aro doesn't hold.
+    case missingInAro = "missing_in_aro"
+    case absent
+
+    /// Whether this is worth drawing attention to. Agreement and mutual absence are the
+    /// quiet majority; showing them as loudly as a real difference buries the difference.
+    public var isDifference: Bool {
+        switch self {
+        case .differs, .missingInFile, .missingInAro: true
+        case .agrees, .absent: false
+        }
+    }
+}
+
+public struct RemoteMetadataFieldDelta: Codable, Sendable, Identifiable {
+    public let field: String
+    public let aro: String?
+    public let file: String?
+    public let verdict: MetadataFieldVerdict
+
+    public var id: String { field }
+
+    /// Title-cased field name for display — the wire uses snake_case keys.
+    public var label: String {
+        field
+            .split(separator: "_")
+            .map { $0.prefix(1).uppercased() + $0.dropFirst() }
+            .joined(separator: " ")
+    }
+}
+
+/// Where a track's audio actually is.
+///
+/// Three states rather than a boolean because they mean different things: Aro holding a
+/// copy keeps the track playable, while only a reachable original can have corrected tags
+/// written into it.
+public enum RemoteTrackAvailability: String, Codable, Sendable {
+    case originalAndCopy = "original_and_copy"
+    case originalOnly = "original_only"
+    case copyOnly = "copy_only"
+    case missing
+
+    public var label: String {
+        switch self {
+        case .originalAndCopy: "Original file and Aro copy"
+        case .originalOnly: "Original file only"
+        case .copyOnly: "Aro copy only"
+        case .missing: "No file available"
+        }
+    }
+
+    public var detail: String {
+        switch self {
+        case .originalAndCopy: "Your file is reachable and Aro holds its own copy."
+        case .originalOnly: "Only your original file — if it goes, the track goes."
+        case .copyOnly: "Aro's copy plays, but your original isn't reachable from the library."
+        case .missing: "Catalogued, but nothing can play it."
+        }
+    }
+}
+
+public struct RemoteTrackMetadataDelta: Codable, Sendable, Identifiable {
+    public let contentHash: String
+    public let trackID: String
+    public let title: String?
+    public let artist: String?
+    public let album: String?
+    public let availability: RemoteTrackAvailability
+    /// Only a reachable original can be written to.
+    public let writable: Bool
+    public let originalPath: String?
+    public let fields: [RemoteMetadataFieldDelta]
+    public let differenceCount: Int
+
+    public var id: String { contentHash }
+
+    public var differingFields: [RemoteMetadataFieldDelta] {
+        fields.filter(\.verdict.isDifference)
+    }
+}

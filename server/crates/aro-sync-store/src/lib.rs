@@ -344,6 +344,27 @@ fn is_lossless(codec: &str, metadata: &serde_json::Map<String, Value>) -> bool {
     uncompressed > 0.0 && bitrate / uncompressed >= LOSSLESS_MIN_BITRATE_RATIO
 }
 
+/// One track's metadata as Aro holds it, together with where its file is and whether that
+/// file can still be reached.
+///
+/// Availability is deliberately three states rather than a boolean, because the difference
+/// matters to the listener and to what Aro is allowed to do. Aro holding a copy means the
+/// track plays; the *original* being reachable is a separate question, and only that
+/// permits writing corrected tags back.
+#[derive(Clone, Debug)]
+pub struct MetadataScopeTrack {
+    pub track_id: Uuid,
+    pub content_hash: String,
+    /// The full CRDT metadata map, so callers can apply the manual-override rule
+    /// themselves rather than this returning seven separate resolved fields.
+    pub metadata: Value,
+    /// Absolute path to the user's own file, if a scan currently says it is there.
+    pub original_path: Option<String>,
+    /// Whether the hub holds its own copy, which is what keeps a track playable when the
+    /// original goes away.
+    pub hub_copy: bool,
+}
+
 impl HubStore {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, StoreError> {
         let root = root.as_ref().to_path_buf();
@@ -2703,6 +2724,89 @@ impl HubStore {
     /// The absolute on-disk path for a track's source file, if it still belongs to a
     /// watched, available source. Used to gate tag write-back: we only ever attempt to
     /// mutate a file aro can currently reach.
+    /// Tracks in a metadata scope, with enough context to compare them against their files.
+    ///
+    /// Scope is resolved here rather than by the caller sending a list of hashes: the hub
+    /// holds the catalogue, and asking a client to enumerate an artist's tracks means
+    /// shipping the library over the wire to ask a question about it.
+    pub fn metadata_scope_tracks(
+        &self,
+        artist: Option<&str>,
+        album: Option<&str>,
+        content_hash: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<MetadataScopeTrack>, StoreError> {
+        let connection = self.connection.lock();
+        // The manual-override rule is applied in SQL so filtering matches what the listener
+        // actually sees, not the value underneath a correction they have already made.
+        let effective = |field: &str| {
+            format!(
+                "CASE WHEN json_extract(t.metadata, '$.manual_{field}_set') = 1 \
+                 THEN json_extract(t.metadata, '$.manual_{field}') \
+                 ELSE json_extract(t.metadata, '$.{field}') END"
+            )
+        };
+        let mut clauses = vec![
+            "t.tombstoned_at IS NULL".to_string(),
+            "t.purged_at IS NULL".to_string(),
+            "t.content_hash IS NOT NULL".to_string(),
+        ];
+        if artist.is_some() {
+            clauses.push(format!("LOWER({}) = LOWER(?1)", effective("artist")));
+        }
+        if album.is_some() {
+            clauses.push(format!("LOWER({}) = LOWER(?2)", effective("album")));
+        }
+        if content_hash.is_some() {
+            clauses.push("t.content_hash = ?3".to_string());
+        }
+        let sql = format!(
+            r#"
+            SELECT t.hub_track_id, t.content_hash, t.metadata,
+                   (SELECT sources.path || '/' || source_files.relative_path
+                    FROM source_files
+                    JOIN sources ON sources.source_id = source_files.source_id
+                    WHERE source_files.hub_track_id = t.hub_track_id
+                      AND source_files.available = 1
+                      AND sources.available = 1
+                      AND sources.detached_at IS NULL
+                      AND sources.path IS NOT NULL
+                    LIMIT 1),
+                   EXISTS(SELECT 1 FROM blobs b WHERE b.hash = t.content_hash)
+            FROM tracks t
+            WHERE {}
+            ORDER BY t.hub_track_id
+            LIMIT ?4
+            "#,
+            clauses.join(" AND ")
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement
+            .query_map(
+                params![
+                    artist.unwrap_or_default(),
+                    album.unwrap_or_default(),
+                    content_hash.unwrap_or_default(),
+                    limit.clamp(1, 2_000)
+                ],
+                |row| {
+                    Ok(MetadataScopeTrack {
+                        track_id: row
+                            .get::<_, String>(0)?
+                            .parse()
+                            .unwrap_or_else(|_| Uuid::nil()),
+                        content_hash: row.get(1)?,
+                        metadata: serde_json::from_str(&row.get::<_, String>(2)?)
+                            .unwrap_or(Value::Null),
+                        original_path: row.get(3)?,
+                        hub_copy: row.get(4)?,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn live_path_for_track(&self, track_id: Uuid) -> Result<Option<PathBuf>, StoreError> {
         let row: Option<(String, String)> = self
             .connection

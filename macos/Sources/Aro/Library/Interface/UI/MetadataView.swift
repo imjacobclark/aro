@@ -1,9 +1,14 @@
 import AroCommon
 import SwiftUI
 
-/// "Metadata": shows the background AcoustID/MusicBrainz identification queue, lets
-/// the user kick off identification for the whole library at once, and lists albums
-/// so a specific one can be (re-)synced without touching the rest of the library.
+/// "Metadata": the identification queue, and what Aro's metadata actually looks like
+/// against the files it came from.
+///
+/// Two modes, because they answer different questions. **Sync** is about running
+/// identification — everything at once, or one album. **Differences** is about the result:
+/// Aro deliberately never lets identification overwrite a file's tags, so the two drift,
+/// and until now nothing surfaced that. Playing a track shows Aro's value and gives no hint
+/// the file disagrees.
 struct MetadataView: View {
     let songs: [Song]
     @Bindable var preferences: SyncPreferences
@@ -25,6 +30,23 @@ struct MetadataView: View {
     @State private var searchText = ""
     @State private var pollTask: Task<Void, Never>?
     @State private var showingIdentificationSettings = false
+    @State private var mode: Mode = .sync
+    @State private var deltas: [RemoteTrackMetadataDelta] = []
+    @State private var loadingDeltas = false
+    @State private var deltaError: String?
+    @State private var expanded: Set<String> = []
+    @State private var onlyDifferences = true
+
+    /// Loads metadata differences from the hub. `nil` when there is no hub to ask, which
+    /// hides the Differences mode rather than offering something that cannot work.
+    var loadDeltas: ((String?) async -> [RemoteTrackMetadataDelta]?)?
+
+    enum Mode: String, CaseIterable, Identifiable {
+        case sync = "Sync"
+        case differences = "Differences"
+
+        var id: String { rawValue }
+    }
 
     /// AcoustID configuration lives on whichever machine is actually running
     /// the hub. For a `.local` profile that's `preferences.acoustidApiKey`
@@ -82,32 +104,30 @@ struct MetadataView: View {
             } else {
                 queueSummary
 
+                if loadDeltas != nil {
+                    Picker("View", selection: $mode) {
+                        ForEach(Mode.allCases) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 12)
+                }
+
                 Divider()
 
-                List(filteredAlbums) { album in
-                    HStack(spacing: 12) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(album.name)
-                                .font(AroFont.headline)
-                                .lineLimit(1)
-                            Text(album.artistName)
-                                .font(AroFont.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-
-                        Spacer(minLength: 8)
-
-                        Button("Sync Album Data") {
-                            Task { await syncAlbumData(album.songs) }
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
-                    .padding(.vertical, 7)
+                if mode == .differences, loadDeltas != nil {
+                    differencesList
+                } else {
+                    albumSyncList
                 }
-                .searchable(text: $searchText, prompt: "Search Albums")
             }
+        }
+        .task(id: mode) {
+            guard mode == .differences, deltas.isEmpty else { return }
+            await refreshDeltas()
         }
         .task {
             localServers.refresh()
@@ -130,6 +150,234 @@ struct MetadataView: View {
                 remoteHubInfo: remoteHubInfo
             )
         }
+    }
+
+    /// Running identification, album by album. Unchanged in intent from before — this is
+    /// still where you ask the hub to go and look something up.
+    private var albumSyncList: some View {
+        List(filteredAlbums) { album in
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(album.name)
+                        .font(AroFont.headline)
+                        .lineLimit(1)
+                    Text(album.artistName)
+                        .font(AroFont.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 8)
+
+                Button("Sync Album Data") {
+                    Task { await syncAlbumData(album.songs) }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            .padding(.vertical, 7)
+        }
+        .searchable(text: $searchText, prompt: "Search Albums")
+    }
+
+    private var visibleDeltas: [RemoteTrackMetadataDelta] {
+        deltas
+            .filter { !onlyDifferences || $0.differenceCount > 0 }
+            .filter {
+                FuzzySearch.matches(
+                    searchText,
+                    in: [$0.title, $0.artist, $0.album].compactMap { $0 }.joined(separator: " ")
+                )
+            }
+    }
+
+    /// What Aro holds against what the files say, grouped by album and expandable to the
+    /// fields that actually disagree.
+    ///
+    /// Defaults to showing only tracks with a difference: on a healthy library most tracks
+    /// agree, and listing them all at equal weight buries the handful that don't.
+    @ViewBuilder
+    private var differencesList: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Toggle("Only show differences", isOn: $onlyDifferences)
+                    .toggleStyle(.checkbox)
+                Spacer()
+                if loadingDeltas {
+                    ProgressView().controlSize(.small)
+                }
+                Button("Refresh") { Task { await refreshDeltas() } }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(loadingDeltas)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+
+            Divider()
+
+            if let deltaError {
+                ContentUnavailableView(
+                    "Couldn't compare metadata",
+                    systemImage: "exclamationmark.triangle",
+                    description: Text(deltaError)
+                )
+            } else if loadingDeltas && deltas.isEmpty {
+                ProgressView("Reading your files…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if visibleDeltas.isEmpty {
+                ContentUnavailableView(
+                    onlyDifferences ? "Everything matches" : "Nothing to compare",
+                    systemImage: onlyDifferences
+                        ? "checkmark.seal"
+                        : "questionmark.folder",
+                    description: Text(
+                        onlyDifferences
+                            ? "Aro's metadata agrees with every file it can read."
+                            : "No tracks in this library have readable files to compare."
+                    )
+                )
+            } else {
+                List(visibleDeltas) { delta in
+                    deltaRow(delta)
+                }
+                .searchable(text: $searchText, prompt: "Search Tracks")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func deltaRow(_ delta: RemoteTrackMetadataDelta) -> some View {
+        let isExpanded = expanded.contains(delta.id)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(delta.title ?? "Unknown Track")
+                        .font(AroFont.headline)
+                        .lineLimit(1)
+                    Text(
+                        [delta.artist, delta.album]
+                            .compactMap { $0 }
+                            .joined(separator: " — ")
+                    )
+                    .font(AroFont.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                }
+
+                Spacer(minLength: 8)
+
+                availabilityBadge(delta)
+
+                if delta.differenceCount > 0 {
+                    Text("\(delta.differenceCount) differ")
+                        .font(.caption.weight(.medium))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(.orange.opacity(0.18), in: Capsule())
+                        .foregroundStyle(.orange)
+                }
+
+                Button(isExpanded ? "Hide" : "Compare") {
+                    if isExpanded {
+                        expanded.remove(delta.id)
+                    } else {
+                        expanded.insert(delta.id)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+            if isExpanded {
+                fieldComparison(delta)
+            }
+        }
+        .padding(.vertical, 7)
+    }
+
+    /// The three availability states, distinguished because they mean different things:
+    /// Aro holding a copy keeps a track playable, but only a reachable original could ever
+    /// have corrected tags written into it.
+    private func availabilityBadge(_ delta: RemoteTrackMetadataDelta) -> some View {
+        let symbol: String
+        let tint: Color
+        switch delta.availability {
+        case .originalAndCopy:
+            symbol = "externaldrive.badge.checkmark"
+            tint = .secondary
+        case .originalOnly:
+            symbol = "doc"
+            tint = .secondary
+        case .copyOnly:
+            symbol = "externaldrive"
+            tint = .orange
+        case .missing:
+            symbol = "exclamationmark.triangle"
+            tint = .red
+        }
+        return Image(systemName: symbol)
+            .foregroundStyle(tint)
+            .help(delta.availability.label + " — " + delta.availability.detail)
+    }
+
+    private func fieldComparison(_ delta: RemoteTrackMetadataDelta) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(delta.fields.filter { !onlyDifferences || $0.verdict.isDifference }) { field in
+                HStack(alignment: .top, spacing: 10) {
+                    Text(field.label)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 96, alignment: .leading)
+                    // Aro's value leads because it is what the listener sees; the file's
+                    // value is the thing that might need correcting.
+                    Text(field.aro ?? "—")
+                        .font(.caption)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Image(systemName: field.verdict.isDifference ? "arrow.left.arrow.right" : "equal")
+                        .font(.caption2)
+                        .foregroundStyle(field.verdict.isDifference ? .orange : .secondary)
+                    Text(field.file ?? "—")
+                        .font(.caption)
+                        .foregroundStyle(field.verdict.isDifference ? .primary : .secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
+            HStack(spacing: 6) {
+                Text("Aro").font(.caption2).foregroundStyle(.secondary)
+                    .frame(width: 96, alignment: .leading)
+                Text("library value").font(.caption2).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text("").frame(width: 14)
+                Text("file on disk").font(.caption2).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.top, 2)
+
+            if let path = delta.originalPath {
+                Text(path)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.head)
+            }
+        }
+        .padding(.leading, 4)
+        .padding(.top, 2)
+    }
+
+    private func refreshDeltas() async {
+        guard let loadDeltas else { return }
+        loadingDeltas = true
+        deltaError = nil
+        let loaded = await loadDeltas(nil)
+        loadingDeltas = false
+        guard let loaded else {
+            deltaError = "The library didn't answer. Check the connection and try again."
+            return
+        }
+        deltas = loaded
     }
 
     private func refreshRemoteHubInfo() async {
