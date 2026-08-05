@@ -135,6 +135,23 @@ pub enum PlaylistKind {
     TimeCapsule,
 }
 
+impl PlaylistKind {
+    /// Whether this shelf reports what the listener actually did, as opposed to suggesting
+    /// what they might like. History must stay truthful — dropping a track from "Recently
+    /// Played" because it was abandoned would be rewriting the past — while a suggestion
+    /// has no business offering something repeatedly walked out on.
+    fn is_history(self) -> bool {
+        matches!(
+            self,
+            Self::RecentlyPlayedTrack
+                | Self::RecentlyPlayedAlbum
+                | Self::ReplayMonth
+                | Self::ReplayAllTime
+                | Self::TimeCapsule
+        )
+    }
+}
+
 /// One generated playlist. `content_hashes` (not track ids) because content hash is the
 /// only identifier client libraries share with the hub — a client maps them onto its own
 /// catalog and simply drops hashes it doesn't hold locally.
@@ -292,6 +309,9 @@ pub fn generate(
     push_hits_by_year(&mut playlists, seeds);
     push_replay(&mut playlists, seeds, now);
     push_measured_mixes(&mut playlists, seeds);
+    push_genre_shelves(&mut playlists, seeds);
+    push_harmonic_mix(&mut playlists, seeds);
+    push_dynamic_range_shelf(&mut playlists, seeds);
     push_daily_mixes(&mut playlists, seeds, seed);
     push_lost_albums(&mut playlists, seeds, now);
     push_time_capsule(&mut playlists, seeds, now);
@@ -758,6 +778,250 @@ fn push_measured_mixes(playlists: &mut Vec<GeneratedPlaylist>, seeds: &PlaylistS
     );
 }
 
+/// Genres that name a whole scene rather than a sound. They cover so much of a rock
+/// library that a shelf built from them is indistinguishable from the library itself, so
+/// they only stand in when nothing more specific applies.
+const BROAD_GENRES: [&str; 4] = ["rock", "pop", "alternative rock", "pop rock"];
+
+/// Shelves built from MusicBrainz's curated genres.
+///
+/// Much denser than the mood shelves this sits beside: moods exist only where a folksonomy
+/// tag happened to match a small keyword table (26 tracks on the reference library), while
+/// genres are curated and cover 215 across 105 distinct names. They also need no listening
+/// history at all, so they work on a library nobody has played yet — which is exactly when
+/// Home has least else to offer.
+///
+/// The most specific genres lead. "Rock" describes most of a rock library and so
+/// distinguishes nothing; "shoegaze" is a shelf worth having.
+fn push_genre_shelves(playlists: &mut Vec<GeneratedPlaylist>, seeds: &PlaylistSeeds) {
+    let mut by_genre: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
+    for track in &seeds.tracks {
+        for genre in &track.genres {
+            by_genre
+                .entry(genre.as_str())
+                .or_default()
+                .push(track.content_hash.as_str());
+        }
+    }
+
+    let mut ranked: Vec<(&str, Vec<&str>)> = by_genre
+        .into_iter()
+        .filter(|(_, hashes)| hashes.len() >= MINIMUM_TRACK_COUNT)
+        .collect();
+    // Specific before broad, then larger before smaller, then by name so repeated
+    // generation is byte-identical.
+    ranked.sort_by(|a, b| {
+        let a_broad = BROAD_GENRES.contains(&a.0);
+        let b_broad = BROAD_GENRES.contains(&b.0);
+        a_broad
+            .cmp(&b_broad)
+            .then_with(|| b.1.len().cmp(&a.1.len()))
+            .then_with(|| a.0.cmp(b.0))
+    });
+
+    for (genre, hashes) in ranked.into_iter().take(MAX_GENRE_SHELVES) {
+        let mut hashes: Vec<String> = hashes.into_iter().map(str::to_owned).collect();
+        hashes.sort();
+        push(
+            playlists,
+            seeds,
+            PlaylistKind::ForYou,
+            &format!("genre-{}", genre.replace(' ', "-")),
+            &title_case(genre),
+            "From your library's genres",
+            hashes,
+        );
+    }
+}
+
+/// How many genre shelves to offer. A library can carry a hundred distinct genres; Home is
+/// a front page, not a directory.
+const MAX_GENRE_SHELVES: usize = 4;
+
+fn title_case(value: &str) -> String {
+    value
+        .split(' ')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The twelve pitch classes, in the order the chroma vector reports them.
+const PITCH_CLASSES: [&str; 12] = [
+    "C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B",
+];
+
+/// Krumhansl–Kessler major and minor key profiles: how strongly each scale degree is
+/// expected to sound in a key. Correlating a track's average chroma against all twelve
+/// rotations of these is the standard way to estimate key, and needs nothing beyond the
+/// chroma already computed for similarity.
+const MAJOR_PROFILE: [f64; 12] = [
+    6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88,
+];
+const MINOR_PROFILE: [f64; 12] = [
+    6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17,
+];
+
+/// Estimated musical key, as `(pitch class index, is_major)`.
+fn estimate_key(chroma: &[f64]) -> Option<(usize, bool)> {
+    if chroma.len() < 12 || chroma.iter().all(|value| *value <= 0.0) {
+        return None;
+    }
+    let correlate = |profile: &[f64; 12], rotation: usize| -> f64 {
+        (0..12)
+            .map(|index| chroma[(index + rotation) % 12] * profile[index])
+            .sum()
+    };
+    (0..12)
+        .flat_map(|rotation| {
+            [
+                (rotation, true, correlate(&MAJOR_PROFILE, rotation)),
+                (rotation, false, correlate(&MINOR_PROFILE, rotation)),
+            ]
+        })
+        .max_by(|a, b| a.2.total_cmp(&b.2))
+        .map(|(rotation, is_major, _)| (rotation, is_major))
+}
+
+/// Distance between two keys around the circle of fifths, `0..=6`. Adjacent keys share
+/// most of their notes, which is what makes one track follow another without a jolt.
+fn fifths_distance(a: usize, b: usize) -> usize {
+    // Seven semitones is a fifth, so stepping by 7 walks the circle.
+    let position = |pitch: usize| (pitch * 7) % 12;
+    let difference = (position(a) as i32 - position(b) as i32).rem_euclid(12) as usize;
+    difference.min(12 - difference)
+}
+
+/// A set sequenced so consecutive tracks sit close on the circle of fifths.
+///
+/// A different axis from the tempo and energy mixes beside it: those pick tracks that feel
+/// alike, this orders them so each transition is harmonically easy. Uses the chroma already
+/// computed for similarity, so it costs nothing extra and needs no listening history.
+fn push_harmonic_mix(playlists: &mut Vec<GeneratedPlaylist>, seeds: &PlaylistSeeds) {
+    let mut keyed: Vec<(&str, usize, bool)> = seeds
+        .tracks
+        .iter()
+        .filter_map(|track| {
+            let features = decoded_features(track)?;
+            let (pitch, is_major) = estimate_key(&features.chroma)?;
+            Some((track.content_hash.as_str(), pitch, is_major))
+        })
+        .collect();
+    if keyed.len() < MINIMUM_TRACK_COUNT {
+        return;
+    }
+    // Deterministic starting point, then repeatedly take the nearest unused key. Greedy
+    // rather than optimal: this is an open travelling-salesman problem, and the difference
+    // is inaudible for something whose only job is avoiding a jarring transition.
+    keyed.sort_by(|a, b| (a.1, a.2, a.0).cmp(&(b.1, b.2, b.0)));
+    let mut ordered = vec![keyed.remove(0)];
+    while !keyed.is_empty() {
+        let current = *ordered.last().expect("ordered is never empty");
+        let (index, _) = keyed
+            .iter()
+            .enumerate()
+            .min_by_key(|(index, candidate)| {
+                (
+                    fifths_distance(current.1, candidate.1),
+                    // Prefer staying in the same mode; a relative major/minor swap is a
+                    // bigger colour change than a step around the circle.
+                    usize::from(current.2 != candidate.2),
+                    *index,
+                )
+            })
+            .expect("keyed is non-empty");
+        ordered.push(keyed.remove(index));
+    }
+
+    let opening = ordered
+        .first()
+        .map(|(_, pitch, is_major)| {
+            format!(
+                "Starting in {}{}",
+                PITCH_CLASSES[*pitch],
+                if *is_major { " major" } else { " minor" }
+            )
+        })
+        .unwrap_or_else(|| "Sequenced by key".to_string());
+    push(
+        playlists,
+        seeds,
+        PlaylistKind::ForYou,
+        "harmonic-flow",
+        "Harmonic Flow",
+        &opening,
+        ordered
+            .into_iter()
+            .map(|(hash, _, _)| hash.to_string())
+            .collect(),
+    );
+}
+
+/// Crest factor (dB) at or above which a track counts as genuinely dynamic rather than
+/// compressed flat. Peaks well above the average level are what survived mastering.
+const DYNAMIC_MIN_CREST_DB: f64 = 14.0;
+
+/// The least-compressed recordings in the library.
+///
+/// Uses the crest factor already measured for every analyzed track. For a library ripped
+/// losslessly this is the statistic that actually distinguishes pressings — two copies of
+/// the same album can differ by more than any other measure here.
+fn push_dynamic_range_shelf(playlists: &mut Vec<GeneratedPlaylist>, seeds: &PlaylistSeeds) {
+    let mut candidates: Vec<(&str, f64)> = seeds
+        .tracks
+        .iter()
+        .filter_map(|track| {
+            let features = decoded_features(track)?;
+            (features.dynamic_range >= DYNAMIC_MIN_CREST_DB)
+                .then_some((track.content_hash.as_str(), features.dynamic_range))
+        })
+        .collect();
+    candidates.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    push(
+        playlists,
+        seeds,
+        PlaylistKind::ForYou,
+        "dynamic-range",
+        "Room to Breathe",
+        "Your least-compressed recordings, by measured dynamic range",
+        candidates
+            .into_iter()
+            .map(|(hash, _)| hash.to_string())
+            .collect(),
+    );
+}
+
+/// Sessions before abandonment is treated as a verdict rather than an accident — someone
+/// walking away from one play says nothing about the track.
+const ABANDON_MIN_SESSIONS: i64 = 2;
+/// Completion rate at or below which a track is dropped from suggestions.
+const ABANDON_MAX_COMPLETION_RATE: f64 = 0.34;
+
+/// Tracks the listener keeps abandoning part-way.
+///
+/// A play count says a track was started; heartbeats say whether it was listened to. A
+/// track begun five times and left after a quarter of it is not a track to keep
+/// suggesting, and nothing in the event log can express that.
+fn repeatedly_abandoned(seeds: &PlaylistSeeds) -> std::collections::HashSet<&str> {
+    seeds
+        .engagement
+        .iter()
+        .filter(|(_, summary)| {
+            summary.sessions >= ABANDON_MIN_SESSIONS
+                && summary
+                    .completion_rate()
+                    .is_some_and(|rate| rate <= ABANDON_MAX_COMPLETION_RATE)
+        })
+        .map(|(hash, _)| hash.as_str())
+        .collect()
+}
+
 fn measured_mix(
     seeds: &PlaylistSeeds,
     matches: impl Fn(&aro_track_id::audio_features::AudioFeatures) -> bool,
@@ -1197,6 +1461,14 @@ fn push(
     subtitle: &str,
     mut content_hashes: Vec<String>,
 ) {
+    // Suggestions drop what the listener keeps abandoning. Applied here, at the single
+    // point every shelf passes through, so no shelf can forget to do it.
+    if !kind.is_history() {
+        let abandoned = repeatedly_abandoned(seeds);
+        if !abandoned.is_empty() {
+            content_hashes.retain(|hash| !abandoned.contains(hash.as_str()));
+        }
+    }
     if content_hashes.len() < MINIMUM_TRACK_COUNT {
         return;
     }
@@ -1282,6 +1554,7 @@ mod tests {
             content_hash: hash.to_string(),
             favourite,
             mood_tags: moods.iter().map(|mood| mood.to_string()).collect(),
+            genres: Vec::new(),
             first_seen_at_millis: None,
             artist: None,
             album: None,
@@ -1318,6 +1591,134 @@ mod tests {
             first_played_year: None,
             last_played_year: None,
         }
+    }
+
+    /// A chroma dominated by one triad should resolve to that key. Estimation runs over
+    /// twelve rotations of two profiles, so an off-by-one in the rotation still produces a
+    /// plausible-looking key — asserting the actual pitch class is what catches it.
+    #[test]
+    fn key_estimation_finds_the_triad_a_chroma_is_built_from() {
+        // C major: C, E, G loud, everything else quiet.
+        let mut c_major = vec![0.1_f64; 12];
+        c_major[0] = 1.0;
+        c_major[4] = 0.8;
+        c_major[7] = 0.9;
+        assert_eq!(estimate_key(&c_major), Some((0, true)));
+
+        // A minor uses the same notes; the profile, not the note set, distinguishes them.
+        let mut a_minor = vec![0.1_f64; 12];
+        a_minor[9] = 1.0;
+        a_minor[0] = 0.8;
+        a_minor[4] = 0.9;
+        assert_eq!(estimate_key(&a_minor).map(|key| key.0), Some(9));
+
+        // Nothing to go on: silence and truncated vectors must not invent a key.
+        assert_eq!(estimate_key(&[0.0; 12]), None);
+        assert_eq!(estimate_key(&[1.0, 0.0]), None);
+    }
+
+    /// Circle-of-fifths adjacency is what makes the sequencing worth doing; if the metric
+    /// were plain semitone distance the shelf would be ordinary.
+    #[test]
+    fn fifths_distance_follows_the_circle_not_the_keyboard() {
+        assert_eq!(fifths_distance(0, 0), 0);
+        // C to G is one step around the circle, though seven semitones apart.
+        assert_eq!(fifths_distance(0, 7), 1);
+        // C to F, the other neighbour.
+        assert_eq!(fifths_distance(0, 5), 1);
+        // C to F♯ is the far side, and the maximum any pair can be.
+        assert_eq!(fifths_distance(0, 6), 6);
+        // A semitone is a long way round the circle, unlike on a keyboard.
+        assert_eq!(fifths_distance(0, 1), 5);
+    }
+
+    /// Suggestions must drop what the listener keeps walking out on, while history stays
+    /// truthful — removing a track from "Recently Played" because it was abandoned would
+    /// be rewriting what happened.
+    #[test]
+    fn abandoned_tracks_leave_suggestions_but_not_history() {
+        let mut seeds = PlaylistSeeds {
+            tracks: (0..6)
+                .map(|index| track(&format!("hash-{index}"), false, &[]))
+                .collect(),
+            ..Default::default()
+        };
+        seeds.engagement.insert(
+            "hash-0".to_string(),
+            aro_sync_store::EngagementSummary {
+                sessions: 5,
+                completed_sessions: 1,
+                abandoned_sessions: 4,
+                mean_fraction: 0.2,
+                last_observed_at: 0.0,
+            },
+        );
+        let hashes: Vec<String> = (0..6).map(|index| format!("hash-{index}")).collect();
+
+        let mut suggestions = Vec::new();
+        push(
+            &mut suggestions,
+            &seeds,
+            PlaylistKind::ForYou,
+            "suggestion",
+            "Suggestion",
+            "",
+            hashes.clone(),
+        );
+        assert!(
+            !suggestions[0]
+                .content_hashes
+                .contains(&"hash-0".to_string()),
+            "a repeatedly abandoned track should not be suggested"
+        );
+
+        let mut history = Vec::new();
+        push(
+            &mut history,
+            &seeds,
+            PlaylistKind::RecentlyPlayedTrack,
+            "history",
+            "History",
+            "",
+            hashes,
+        );
+        assert!(
+            history[0].content_hashes.contains(&"hash-0".to_string()),
+            "history must record what happened, abandoned or not"
+        );
+    }
+
+    /// Broad genres describe most of a rock library, so a shelf built from them
+    /// distinguishes nothing. The specific ones are the point.
+    #[test]
+    fn genre_shelves_prefer_specific_genres_over_scene_wide_ones() {
+        let mut tracks = Vec::new();
+        for index in 0..12 {
+            let mut seed = track(&format!("rock-{index}"), false, &[]);
+            seed.genres = vec!["rock".to_string()];
+            tracks.push(seed);
+        }
+        for index in 0..4 {
+            let mut seed = track(&format!("shoegaze-{index}"), false, &[]);
+            seed.genres = vec!["rock".to_string(), "shoegaze".to_string()];
+            tracks.push(seed);
+        }
+        let seeds = PlaylistSeeds {
+            tracks,
+            ..Default::default()
+        };
+
+        let mut playlists = Vec::new();
+        push_genre_shelves(&mut playlists, &seeds);
+        assert_eq!(
+            playlists.first().map(|playlist| playlist.title.as_str()),
+            Some("Shoegaze"),
+            "the specific genre should lead, got {:?}",
+            playlists
+                .iter()
+                .map(|playlist| &playlist.title)
+                .collect::<Vec<_>>()
+        );
     }
 
     /// The point of a relative threshold is that it means the same thing at any scale.
@@ -1639,6 +2040,7 @@ mod tests {
             content_hash: hash.to_string(),
             favourite: false,
             mood_tags: Vec::new(),
+            genres: Vec::new(),
             first_seen_at_millis: None,
             artist: artist.map(str::to_string),
             album: album.map(str::to_string),

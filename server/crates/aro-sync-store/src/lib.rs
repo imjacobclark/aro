@@ -111,6 +111,11 @@ pub struct PlaylistSeedTrack {
     /// Canonical mood vocabulary from `identification_results.mood_tags` — empty when the
     /// track hasn't been identified or no folksonomy tag matched a known mood.
     pub mood_tags: Vec<String>,
+    /// MusicBrainz's curated genres for this track. Far denser than [`Self::mood_tags`],
+    /// which only exist where a folksonomy tag happened to match a small keyword table —
+    /// on the reference library 215 tracks carry genres across 105 distinct names, against
+    /// 26 with any mood at all.
+    pub genres: Vec<String>,
     /// Milliseconds since epoch this track was first seen — the minimum
     /// `field_versions` timestamp across all its CRDT fields, since a freshly
     /// scanned track has every field written at (approximately) the same instant.
@@ -1422,7 +1427,8 @@ impl HubStore {
 
         let mut tracks = connection.prepare(
             r#"
-            SELECT t.content_hash, t.metadata, t.field_versions, ir.mood_tags
+            SELECT t.content_hash, t.metadata, t.field_versions, ir.mood_tags,
+                   ir.musicbrainz_genres
             FROM tracks t
             LEFT JOIN identification_results ir ON ir.content_hash = t.content_hash
             WHERE t.content_hash IS NOT NULL
@@ -1437,10 +1443,11 @@ impl HubStore {
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
             ))
         })?;
         for row in track_rows {
-            let (content_hash, metadata, field_versions, mood_tags) = row?;
+            let (content_hash, metadata, field_versions, mood_tags, genres) = row?;
             let metadata: serde_json::Map<String, Value> =
                 serde_json::from_str(&metadata).unwrap_or_default();
             let favourite = metadata
@@ -1450,6 +1457,13 @@ impl HubStore {
             let mood_tags: Vec<String> = mood_tags
                 .and_then(|json| serde_json::from_str(&json).ok())
                 .unwrap_or_default();
+            let genres: Vec<String> = genres
+                .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|genre| genre.trim().to_lowercase())
+                .filter(|genre| !genre.is_empty())
+                .collect();
             // A freshly scanned track writes every field at (approximately) the same
             // instant, so the earliest per-field timestamp is a good proxy for "when
             // this track was added" without needing a dedicated column.
@@ -1472,6 +1486,7 @@ impl HubStore {
                 content_hash,
                 favourite,
                 mood_tags,
+                genres,
                 first_seen_at_millis,
                 artist: text("artist"),
                 album: text("album"),
