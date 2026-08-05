@@ -645,7 +645,10 @@ struct ContentView: View {
             if let sources = try? await client.sourceHealth(
                 credential: connection.credential
             ) {
-                store.setServerSources(sources)
+                store.setServerSources(
+                    sources,
+                    libraryName: profileRegistry.activeProfile?.name
+                )
             }
             syncStore.recordSyncSucceeded(hubID: connection.hubID, result: result)
             canContributeToActiveRemote = result.canContribute

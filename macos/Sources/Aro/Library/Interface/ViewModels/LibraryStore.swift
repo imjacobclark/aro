@@ -33,6 +33,9 @@ final class LibraryStore {
         }
     }
     @ObservationIgnored private var serverBaseURL: URL?
+    /// Display name of the connected library, so the Syncs row can be named after the
+    /// library itself rather than a folder inside it.
+    @ObservationIgnored private var serverLibraryName: String?
 
     /// Where a track's audio is fetched from.
     ///
@@ -77,7 +80,7 @@ final class LibraryStore {
 
     var visibleSongs: [Song] {
         if usesServerCatalog {
-            if case .folder(let id) = selection {
+            if case .folder(let id) = selection, id != Self.serverLibraryFolderID {
                 return serverSongsBySource[id] ?? []
             }
             return serverCatalogSongs
@@ -177,51 +180,56 @@ final class LibraryStore {
                 serverSongsBySource[sourceID, default: []].append(song)
             }
         }
-        let existingSourceIDs = Set(folders.map(\.id))
-        let derivedSources = Dictionary(
-            grouping: tracks.compactMap { track in
-                track.sourceID.map { ($0, track.sourceName) }
-            },
-            by: { $0.0 }
-        )
-        for (sourceID, rows) in derivedSources
-        where !existingSourceIDs.contains(sourceID) {
-            folders.append(
+        // Deliberately does not add a row per hub source. Syncs lists connected
+        // libraries; `setServerSources` owns that single row, and the per-source rows
+        // this used to append are what overwrote the hub's own name.
+        if folders.isEmpty {
+            folders = [
                 serverFolder(
-                    id: sourceID,
-                    name: rows.compactMap { $0.1 }.first ?? "Imported Music",
+                    id: Self.serverLibraryFolderID,
+                    name: serverLibraryName ?? "Library",
                     available: true
                 )
-            )
+            ]
         }
         usesServerCatalog = true
     }
 
-    func setServerSources(_ sources: [SourceHealthReport]) {
-        let reportedIDs = Set(sources.map(\.sourceID))
-        let derived = folders.filter {
-            serverSongsBySource[$0.id] != nil && !reportedIDs.contains($0.id)
+    /// The sidebar row standing for a whole connected library.
+    ///
+    /// Fixed rather than derived from a source, because the row represents the library
+    /// itself. Syncs previously listed the hub's *internal* source folders, so connecting
+    /// to a hub called "mercury" whose folder is called "Library" showed a row named
+    /// "Library" — the hub's own name replaced by one of its implementation details.
+    static let serverLibraryFolderID = UUID(
+        uuidString: "A0000000-0000-4000-8000-00000000A0A0"
+    )!
+
+    func setServerSources(_ sources: [SourceHealthReport], libraryName: String?) {
+        if let libraryName, !libraryName.isEmpty {
+            serverLibraryName = libraryName
         }
-        folders = (sources.map { source in
+        // One row for the library, not one per folder inside it. Which folders a hub
+        // watches is the hub's business, and is managed in Settings.
+        folders = [
             serverFolder(
-                id: source.sourceID,
-                name: source.name,
-                available: source.available
+                id: Self.serverLibraryFolderID,
+                name: libraryName ?? "Library",
+                available: sources.isEmpty || sources.contains { $0.available }
             )
-        } + derived).sorted {
-            $0.displayName.localizedStandardCompare($1.displayName)
-                == .orderedAscending
-        }
-        scanStates = Dictionary(uniqueKeysWithValues: sources.map { source in
-            (
-                source.sourceID,
-                source.available
-                    ? FolderScanState.idle
-                    : FolderScanState.warning(
-                        source.warning ?? "The server cannot reach this source."
-                    )
-            )
-        })
+        ]
+        // The library's health is the worst of its sources': one unreachable folder is
+        // something the listener should see, even though the folders themselves are no
+        // longer listed individually.
+        let unavailable = sources.first { !$0.available }
+        scanStates = [
+            Self.serverLibraryFolderID: unavailable.map { source in
+                FolderScanState.warning(
+                    source.warning
+                        ?? "The library cannot reach \(source.name)."
+                )
+            } ?? .idle
+        ]
     }
 
     private func serverFolder(
