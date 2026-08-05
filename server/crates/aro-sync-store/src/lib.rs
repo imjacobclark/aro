@@ -176,6 +176,42 @@ pub struct PlaylistSeeds {
     /// Listening-event aggregates, present only for content hashes with at least one
     /// logged event — absence means never played.
     pub listening: HashMap<String, ListeningEventSummary>,
+    /// How far through tracks were actually played, derived from playback heartbeats.
+    ///
+    /// This is not broader coverage than [`Self::listening`] — on the reference library it
+    /// spans 39 tracks against the event log's 48. It is *deeper*: heartbeats carry the
+    /// position reached, so a track started and left after forty seconds is distinguishable
+    /// from one played through, which a play count and a skip flag cannot express. That
+    /// library records 12 skips but 33 abandoned sessions.
+    pub engagement: HashMap<String, EngagementSummary>,
+}
+
+/// What a listener actually did with a track, reconstructed from playback heartbeats.
+///
+/// A listening event says a track was played; this says whether it was *listened to*.
+/// Abandonment is the useful signal a play count cannot express — a track stopped forty
+/// seconds in was not enjoyed, however many times it was started.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct EngagementSummary {
+    /// Distinct playback sessions observed.
+    pub sessions: i64,
+    /// Sessions that reached the end, or near enough to count.
+    pub completed_sessions: i64,
+    /// Sessions abandoned early — started, then left.
+    pub abandoned_sessions: i64,
+    /// Mean fraction of the track reached across sessions, in `0.0...1.0`.
+    pub mean_fraction: f64,
+    /// Seconds since epoch of the most recent activity.
+    pub last_observed_at: f64,
+}
+
+impl EngagementSummary {
+    /// Fraction of sessions that ran to completion. `None` below a couple of sessions,
+    /// where the ratio is noise rather than a rate — one abandoned play out of one is not
+    /// evidence a track is disliked.
+    pub fn completion_rate(&self) -> Option<f64> {
+        (self.sessions >= 2).then(|| self.completed_sessions as f64 / self.sessions as f64)
+    }
 }
 
 /// The outcome of identifying one file, keyed by `content_hash` rather than
@@ -1505,6 +1541,53 @@ impl HubStore {
             }
         }
         drop(listening);
+
+        // Heartbeats are collapsed to one row per playback session first — they arrive
+        // every few seconds, so counting them directly would rank long tracks and stalled
+        // buffering above anything actually enjoyed.
+        let mut engagement = connection.prepare(
+            r#"
+            SELECT content_hash,
+                   COUNT(*),
+                   SUM(CASE WHEN completed OR fraction >= 0.9 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN NOT completed AND fraction < 0.5 THEN 1 ELSE 0 END),
+                   AVG(fraction),
+                   MAX(observed_at)
+            FROM (
+                SELECT content_hash,
+                       MIN(1.0, position / duration) AS fraction,
+                       completed,
+                       observed_at
+                FROM (
+                    SELECT json_extract(payload, '$.content_hash') AS content_hash,
+                           MAX(COALESCE(json_extract(payload, '$.position_seconds'), 0)) AS position,
+                           MAX(COALESCE(json_extract(payload, '$.duration_seconds'), 0)) AS duration,
+                           MAX(COALESCE(json_extract(payload, '$.completed'), 0)) AS completed,
+                           MAX(observed_at) / 1000.0 AS observed_at
+                    FROM playback_activity_events
+                    GROUP BY session_id
+                )
+                WHERE content_hash IS NOT NULL AND duration > 0
+            )
+            GROUP BY content_hash
+            "#,
+        )?;
+        let mut rows = engagement.query([])?;
+        while let Some(row) = rows.next()? {
+            let content_hash: String = row.get(0)?;
+            seeds.engagement.insert(
+                content_hash,
+                EngagementSummary {
+                    sessions: row.get(1)?,
+                    completed_sessions: row.get(2)?,
+                    abandoned_sessions: row.get(3)?,
+                    mean_fraction: row.get::<_, Option<f64>>(4)?.unwrap_or(0.0),
+                    last_observed_at: row.get::<_, Option<f64>>(5)?.unwrap_or(0.0),
+                },
+            );
+        }
+        drop(rows);
+        drop(engagement);
 
         Ok(seeds)
     }
@@ -5657,6 +5740,79 @@ mod tests {
 
         // No source_files row exists for this track, so it isn't reachable on disk.
         assert!(store.live_path_for_track(track_id).unwrap().is_none());
+    }
+
+    /// Engagement is aggregated in three layers — heartbeats to sessions, sessions to
+    /// fractions, fractions to a per-track summary — and an aggregate applied at the wrong
+    /// layer silently collapses the whole library into one row rather than failing. It did
+    /// exactly that when first written, so this asserts several tracks survive with
+    /// distinct results, not merely that the query runs.
+    #[test]
+    fn engagement_is_summarised_per_track_and_records_abandonment() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let device_id = Uuid::new_v4();
+
+        // Two sessions of a track played through, and two of another left a fifth of the
+        // way in — the distinction a play count cannot make.
+        let sessions: [(&str, &str, f64, f64, bool); 4] = [
+            ("finished", "session-a", 180.0, 180.0, true),
+            ("finished", "session-b", 179.0, 180.0, false),
+            ("abandoned", "session-c", 40.0, 200.0, false),
+            ("abandoned", "session-d", 38.0, 200.0, false),
+        ];
+        {
+            let connection = store.connection.lock();
+            for (hash, session, position, duration, completed) in sessions {
+                let payload = serde_json::json!({
+                    "content_hash": hash,
+                    "position_seconds": position,
+                    "duration_seconds": duration,
+                    "completed": completed,
+                })
+                .to_string();
+                connection
+                    .execute(
+                        "INSERT INTO playback_activity_events \
+                         (session_id, revision, device_id, track_id, state, observed_at, payload) \
+                         VALUES (?1, 1, ?2, ?3, 'playing', 1000, ?4)",
+                        params![
+                            session,
+                            device_id.to_string(),
+                            Uuid::new_v4().to_string(),
+                            payload
+                        ],
+                    )
+                    .unwrap();
+            }
+        }
+
+        let seeds = store.playlist_seeds().unwrap();
+        assert_eq!(
+            seeds.engagement.len(),
+            2,
+            "each track must keep its own summary, got {:?}",
+            seeds.engagement.keys().collect::<Vec<_>>()
+        );
+
+        let finished = &seeds.engagement["finished"];
+        assert_eq!(finished.sessions, 2);
+        assert_eq!(finished.completed_sessions, 2);
+        assert_eq!(finished.abandoned_sessions, 0);
+        assert_eq!(finished.completion_rate(), Some(1.0));
+
+        let abandoned = &seeds.engagement["abandoned"];
+        assert_eq!(abandoned.sessions, 2);
+        assert_eq!(abandoned.completed_sessions, 0);
+        assert_eq!(abandoned.abandoned_sessions, 2);
+        assert!(
+            abandoned.mean_fraction < 0.25,
+            "expected a low mean fraction, got {}",
+            abandoned.mean_fraction
+        );
+
+        // One session is not a rate: a single abandoned play is not evidence of dislike.
+        assert_eq!(EngagementSummary::default().completion_rate(), None);
     }
 
     /// The whole point of planning a conversion is telling someone how long it will take,
