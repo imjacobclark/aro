@@ -825,16 +825,32 @@ actor AroSyncClient {
     /// each of the artist's other albums. Only thumbnails come back — see
     /// `resolveArtwork(imageURL:)` for the full-resolution fetch, which happens once a
     /// listener actually chooses an image.
+    /// Covers the hub has already found for this track. A cache read, so it returns
+    /// immediately; an empty list means nothing has been searched for yet, not that nothing
+    /// exists. Use `startArtworkDiscovery` to go and look.
     func artworkCandidates(
         contentHash: String,
-        refresh: Bool = false,
         credential: HubDeviceCredential? = nil
     ) async throws -> [RemoteArtworkCandidate] {
         let escaped = contentHash.addingPercentEncoding(
             withAllowedCharacters: .urlQueryAllowed
         ) ?? contentHash
         return try await getAuthenticated(
-            "v1/artwork/candidates?content_hash=\(escaped)&refresh=\(refresh)",
+            "v1/artwork/candidates?content_hash=\(escaped)",
+            credential: credential
+        )
+    }
+
+    /// Asks the hub to search the Cover Art Archive. This runs for a minute or more —
+    /// MusicBrainz allows roughly one request a second — so it is a job to poll rather than
+    /// a request to wait on.
+    func startArtworkDiscovery(
+        contentHash: String,
+        credential: HubDeviceCredential? = nil
+    ) async throws -> RemoteSyncJob {
+        try await postAuthenticated(
+            "v1/artwork/discover",
+            body: RemoteArtworkDiscoverRequest(contentHash: contentHash),
             credential: credential
         )
     }

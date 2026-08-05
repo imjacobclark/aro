@@ -5,6 +5,11 @@ import AroCommon
 protocol AudioDeviceManaging: AnyObject {
     var devices: [AudioOutputDevice] { get }
     var lastWarning: String? { get }
+    /// The device macOS is sending audio to. Aro follows this rather than keeping a private
+    /// route, so it is the one authority on where sound comes out.
+    var defaultDevice: AudioOutputDevice? { get }
+    /// Invoked when macOS switches output, so playback can re-route mid-track.
+    var defaultDeviceDidChange: ((AudioOutputDevice?) -> Void)? { get set }
 
     func refresh()
     func selectedDevice(for uid: String?) -> AudioOutputDevice?
@@ -16,4 +21,6 @@ protocol AudioDeviceManaging: AnyObject {
         acquireHogMode: Bool
     ) throws -> Bool
     func releaseHogMode(for device: AudioOutputDevice?)
+    @discardableResult
+    func setSystemDefaultOutputDevice(_ device: AudioOutputDevice) -> Bool
 }

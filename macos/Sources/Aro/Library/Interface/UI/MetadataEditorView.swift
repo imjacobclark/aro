@@ -6,9 +6,12 @@ struct MetadataEditorView: View {
     let snapshot: TrackMetadataSnapshot
     let save: ([ManualMetadataEdit], ManualArtworkEdit?) -> Void
     let reset: () -> Void
-    /// Asks the hub what artwork exists for this track. `nil` on a library with no hub to
-    /// ask, in which case the picker simply shows what's held locally.
+    /// Covers the hub has already found. A cache read, so this is immediate. `nil` on a
+    /// library with no hub to ask, in which case the picker shows only what's held locally.
     let loadHubArtwork: (() async -> [HubArtworkCandidate])?
+    /// Searches the Cover Art Archive. Runs for a minute or more, so it reports through a
+    /// job rather than blocking; returns true once the search has finished.
+    let searchHubArtwork: (() async -> Bool)?
     /// Pulls the full-resolution image for a chosen candidate; `nil` leaves the thumbnail
     /// in place rather than failing the selection outright.
     let resolveHubArtwork: ((HubArtworkCandidate) async -> Data?)?
@@ -19,6 +22,11 @@ struct MetadataEditorView: View {
     @State private var showResetConfirmation = false
     @State private var hubArtwork: [HubArtworkCandidate] = []
     @State private var hubArtworkLoading = false
+    @State private var hubArtworkSearching = false
+    /// Set once a search has completed, so an empty result can be reported as "nothing is
+    /// archived for this album" rather than "not looked yet".
+    @State private var hubArtworkSearched = false
+    @State private var hubArtworkError: String?
     @State private var resolvingArtwork: HubArtworkCandidate?
 
     init(
@@ -27,6 +35,7 @@ struct MetadataEditorView: View {
         save: @escaping ([ManualMetadataEdit], ManualArtworkEdit?) -> Void,
         reset: @escaping () -> Void,
         loadHubArtwork: (() async -> [HubArtworkCandidate])? = nil,
+        searchHubArtwork: (() async -> Bool)? = nil,
         resolveHubArtwork: ((HubArtworkCandidate) async -> Data?)? = nil
     ) {
         self.context = context
@@ -34,6 +43,7 @@ struct MetadataEditorView: View {
         self.save = save
         self.reset = reset
         self.loadHubArtwork = loadHubArtwork
+        self.searchHubArtwork = searchHubArtwork
         self.resolveHubArtwork = resolveHubArtwork
         _values = State(initialValue: snapshot.effectiveValues)
         _artworkEdit = State(initialValue: nil)
@@ -273,6 +283,7 @@ struct MetadataEditorView: View {
                 origin: .artistCatalogue,
                 empty: "No cover art is archived for this artist's other albums."
             )
+            hubArtworkSearchControl
         }
         .task(id: snapshot.song.libraryID) {
             guard let loadHubArtwork, hubArtwork.isEmpty else { return }
@@ -290,6 +301,11 @@ struct MetadataEditorView: View {
     /// Covers the hub found, split by where they came from. Kept separate from the local
     /// candidates above because they mean different things: those are images this Mac
     /// already holds, these are what exists in the archive but hasn't been chosen.
+    ///
+    /// The section always renders and always states which of the four situations it is in.
+    /// It previously hid itself whenever it had nothing to show, so a failed search looked
+    /// identical to an album with no artwork — a spinner, and then the section silently
+    /// disappearing.
     @ViewBuilder
     private func hubArtworkSection(
         title: String,
@@ -297,37 +313,82 @@ struct MetadataEditorView: View {
         empty: String
     ) -> some View {
         let candidates = hubArtwork.filter { $0.origin == origin }
-        if hubArtworkLoading || !candidates.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) {
-                    Text(title)
-                        .font(.subheadline.weight(.medium))
-                    if hubArtworkLoading {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                }
-                .padding(.top, 4)
-
-                if candidates.isEmpty {
-                    if !hubArtworkLoading {
-                        Text(empty)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    ScrollView(.horizontal) {
-                        HStack(spacing: 12) {
-                            ForEach(candidates) { candidate in
-                                hubArtworkButton(candidate)
-                            }
-                        }
-                        .padding(.vertical, 2)
-                    }
-                    .scrollIndicators(.hidden)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.subheadline.weight(.medium))
+                if hubArtworkLoading || hubArtworkSearching {
+                    ProgressView()
+                        .controlSize(.small)
                 }
             }
+            .padding(.top, 4)
+
+            if !candidates.isEmpty {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 12) {
+                        ForEach(candidates) { candidate in
+                            hubArtworkButton(candidate)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+                .scrollIndicators(.hidden)
+            } else if hubArtworkSearching {
+                Text("Searching the Cover Art Archive… this can take a minute or two.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if let hubArtworkError {
+                Text(hubArtworkError)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            } else if hubArtworkSearched {
+                Text(empty)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if !hubArtworkLoading {
+                Text("Not searched yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
+    }
+
+    /// Searching is explicit rather than automatic. A cold search walks up to twelve
+    /// pressings and twenty-five release-groups at MusicBrainz's ~1 request/second, so
+    /// running it every time the editor opened would cost minutes of somebody else's rate
+    /// limit for a window that is usually opened to correct a typo.
+    @ViewBuilder
+    private var hubArtworkSearchControl: some View {
+        if searchHubArtwork != nil {
+            HStack(spacing: 8) {
+                Button(hubArtworkSearched ? "Search Again" : "Find More Artwork") {
+                    Task { await runArtworkSearch() }
+                }
+                .disabled(hubArtworkSearching)
+                if hubArtworkSearching {
+                    ProgressView().controlSize(.small)
+                }
+                Text("Looks for other pressings and albums in the Cover Art Archive.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    private func runArtworkSearch() async {
+        guard let searchHubArtwork, let loadHubArtwork else { return }
+        hubArtworkSearching = true
+        hubArtworkError = nil
+        let finished = await searchHubArtwork()
+        hubArtworkSearching = false
+        guard finished else {
+            hubArtworkError = "Couldn't search the archive. Check the library connection and try again."
+            return
+        }
+        hubArtworkSearched = true
+        hubArtwork = await loadHubArtwork()
     }
 
     private func hubArtworkButton(_ candidate: HubArtworkCandidate) -> some View {

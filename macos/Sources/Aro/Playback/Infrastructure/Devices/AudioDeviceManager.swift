@@ -8,11 +8,18 @@ import Observation
 final class AudioDeviceManager: AudioDeviceManaging {
     private(set) var devices: [AudioOutputDevice] = []
     private(set) var lastWarning: String?
+    /// The device macOS is currently sending audio to. This is the single source of truth
+    /// for what Aro plays through: Aro follows the system rather than keeping a private
+    /// route, so this and the Sound menu can never disagree.
+    private(set) var defaultDevice: AudioOutputDevice?
     // Keyed by the device's stable hardware UID rather than its
     // `AudioObjectID`, which CoreAudio can recycle across hot-plug cycles —
     // a recycled ID could otherwise apply one device's remembered sample
     // rate to a different device that reuses its freed ID.
     @ObservationIgnored private var previousSampleRates: [String: Double] = [:]
+    /// Called when macOS switches output device, so playback can re-route rather than
+    /// carrying on into the device that was default when the track started.
+    @ObservationIgnored var defaultDeviceDidChange: ((AudioOutputDevice?) -> Void)?
 
     init() {
         refresh()
@@ -29,13 +36,54 @@ final class AudioDeviceManager: AudioDeviceManaging {
         previousSampleRates = previousSampleRates.filter {
             presentUIDs.contains($0.key)
         }
+        let previousUID = defaultDevice?.uid
+        let defaultID = Self.defaultOutputDeviceID()
+        defaultDevice = devices.first(where: { $0.id == defaultID })
+        // Compared by UID, not AudioObjectID: CoreAudio recycles those across hot-plug, so
+        // an ID that looks unchanged can be a different piece of hardware.
+        if defaultDevice?.uid != previousUID {
+            defaultDeviceDidChange?(defaultDevice)
+        }
+    }
+
+    /// Points macOS itself at `device`. Aro's picker changes the system output rather than
+    /// keeping a private route, so there is one setting and one place it can be seen.
+    @discardableResult
+    func setSystemDefaultOutputDevice(_ device: AudioOutputDevice) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var deviceID = device.id
+        let status = AudioObjectSetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            0,
+            nil,
+            UInt32(MemoryLayout<AudioObjectID>.size),
+            &deviceID
+        )
+        guard status == noErr else {
+            lastWarning = "\(device.name) could not be made the system output device."
+            return false
+        }
+        // The hardware listener will fire and drive the re-route; refreshing here just makes
+        // the UI reflect it immediately rather than a frame later.
+        refresh()
+        return true
     }
 
     func selectedDevice(for uid: String?) -> AudioOutputDevice? {
+        // The system default *is* the selection. `uid` is only a hint about what the user
+        // last chose, used when the listener hasn't caught up yet; it is never allowed to
+        // override the live default, or Aro would drift away from the Sound menu again.
+        if let defaultDevice {
+            return defaultDevice
+        }
         if let uid, let selected = devices.first(where: { $0.uid == uid }) {
             return selected
         }
-
         let defaultID = Self.defaultOutputDeviceID()
         return devices.first(where: { $0.id == defaultID })
             ?? devices.first

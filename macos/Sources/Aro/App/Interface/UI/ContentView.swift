@@ -505,6 +505,7 @@ struct ContentView: View {
                         syncDataStatus = "Metadata reset; server sync queued"
                     },
                     loadHubArtwork: hubArtworkLoader(for: song),
+                    searchHubArtwork: searchHubArtwork(for: song),
                     resolveHubArtwork: resolveHubArtwork
                 )
             }
@@ -782,6 +783,41 @@ struct ContentView: View {
                 }
                 return loaded.sorted { $0.0 < $1.0 }.map(\.1)
             }
+        }
+    }
+
+    /// Runs an archive search on the hub and waits for it to finish.
+    ///
+    /// Polled rather than awaited on one request: the search takes a minute or more at
+    /// MusicBrainz's rate limit, far beyond any sane HTTP timeout. Returns whether it
+    /// completed, so the editor can distinguish "nothing archived" from "couldn't search".
+    private func searchHubArtwork(for song: Song) -> (() async -> Bool)? {
+        guard let contentHash = song.contentHash else { return nil }
+        return {
+            guard let remote = await remoteSyncContext else { return false }
+            guard let job = try? await remote.client.startArtworkDiscovery(
+                contentHash: contentHash,
+                credential: remote.credential
+            ) else { return false }
+            // Generous but bounded: a prolific artist's catalogue is the slow case, and
+            // waiting forever would leave the button spinning if the hub died mid-search.
+            let deadline = Date().addingTimeInterval(600)
+            while Date() < deadline {
+                try? await Task.sleep(for: .seconds(3))
+                guard let latest = try? await remote.client.jobStatus(
+                    jobID: job.jobID,
+                    credential: remote.credential
+                ) else { return false }
+                switch latest.state {
+                case .completed:
+                    return true
+                case .failed, .cancelled:
+                    return false
+                case .pending, .running:
+                    continue
+                }
+            }
+            return false
         }
     }
 

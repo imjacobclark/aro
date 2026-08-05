@@ -107,6 +107,7 @@ final class PlaybackController {
         self.preferences = preferences
         isShuffleEnabled = preferences.shuffleEnabled
         repeatMode = preferences.repeatMode
+        volume = preferences.volume
         self.loudnessService = loudnessService
         listeningSession = ListeningSessionTracker(
             history: listeningHistory,
@@ -128,6 +129,23 @@ final class PlaybackController {
         if let engine {
             configure(engine)
         }
+    }
+
+    /// The mode actually in force, accounting for the route as well as the preference.
+    ///
+    /// The one authority for every gate in the UI. Three surfaces used to consult three
+    /// different notions of "current mode" — the engine's last-loaded status, this
+    /// resolver, and the raw preference — so on a Bluetooth route, which forces normalised
+    /// playback, the volume slider and the loudness target disagreed about whether they
+    /// were usable and the caption claimed unity gain that wasn't in effect.
+    var effectiveMode: PlaybackMode {
+        effectiveModeResolver()
+    }
+
+    /// True when the chosen mode can't be honoured on this route, so the UI can say why
+    /// rather than silently showing something that isn't true.
+    var isModeOverriddenByRoute: Bool {
+        preferences.mode != effectiveModeResolver()
     }
 
     var isPlaying: Bool {
@@ -404,11 +422,17 @@ final class PlaybackController {
         }
     }
 
+    /// Sets the listener's chosen volume.
+    ///
+    /// The requested level is always remembered, even in bit-perfect where it cannot be
+    /// applied. Previously bit-perfect overwrote the stored value with unity, so setting
+    /// 30%, switching to bit-perfect and back returned at full scale — which on a hi-fi is
+    /// not a cosmetic bug. Only what reaches the audio graph is forced to unity, because
+    /// software gain is exactly what bit-perfect exists to avoid.
     func setVolume(_ requestedVolume: Double) {
-        volume = effectiveModeResolver() == .bitPerfect
-            ? 1
-            : min(max(requestedVolume, 0), 1)
-        engine?.volume = Float(volume)
+        volume = min(max(requestedVolume, 0), 1)
+        preferences.volume = volume
+        engine?.volume = effectiveModeResolver() == .bitPerfect ? 1 : Float(volume)
     }
 
     func refreshNormalizedGain() {
@@ -417,6 +441,21 @@ final class PlaybackController {
         }
         engine.volume = Float(volume)
         outputStatus = engine.outputStatus
+    }
+
+    /// macOS switched output device. Aro follows it rather than continuing into the device
+    /// that happened to be default when the track started.
+    ///
+    /// The track is reloaded rather than re-pointed live, because the new device may not
+    /// support the configured sample rate and may need exclusive access acquiring — both of
+    /// which the normal load path already handles.
+    func systemOutputDeviceChanged(to device: AudioOutputDevice?) {
+        engine?.systemDefaultDeviceChanged(to: device)
+        if let engine {
+            outputStatus = engine.outputStatus
+        }
+        guard currentSong != nil else { return }
+        restartForPlaybackSettingsChange()
     }
 
     func restartForPlaybackSettingsChange() {

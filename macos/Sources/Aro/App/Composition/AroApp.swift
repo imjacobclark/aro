@@ -88,6 +88,29 @@ struct AroApp: App {
         if !registry.isConfigured {
             runtime.libraryStore.selection = .settings
         }
+        // Aro follows the system output device. macOS is the single authority on where
+        // sound goes, so a change there re-routes playback instead of leaving Aro playing
+        // into the device that was default when the track started.
+        let playbackController = runtime.playbackController
+        deviceManager.defaultDeviceDidChange = { device in
+            MainActor.assumeIsolated {
+                playbackController.systemOutputDeviceChanged(to: device)
+            }
+        }
+        // Exclusive access and a changed device sample rate are global side effects that
+        // outlive the process. CoreAudio reclaims hog mode when Aro exits, but the device
+        // is left at whatever rate bit-perfect set — so quitting mid-track used to leave a
+        // DAC running at 96 kHz for everything else on the machine. Stopping playback runs
+        // the existing release path.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            MainActor.assumeIsolated {
+                playbackController.stopAndClear()
+            }
+        }
         let nowPlayingCoordinator = NowPlayingCoordinator()
         nowPlayingCoordinator.rebind(to: runtime.playbackController)
         _nowPlayingCoordinator = State(initialValue: nowPlayingCoordinator)

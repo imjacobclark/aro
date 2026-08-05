@@ -180,19 +180,54 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertEqual(controller.volume, 0.3, accuracy: 0.0001)
         XCTAssertEqual(engine.volume, 0.3, accuracy: 0.0001)
 
+        // Bit-perfect cannot apply software gain, so the graph goes to unity — but the
+        // listener's choice is remembered rather than overwritten. It used to be
+        // destroyed here, so a round trip through bit-perfect silently returned to full
+        // scale, which on a hi-fi is a good deal worse than a cosmetic bug.
         preferences.mode = .bitPerfect
         controller.restartForPlaybackSettingsChange()
-        XCTAssertEqual(controller.volume, 1)
-        XCTAssertEqual(engine.volume, 1)
+        XCTAssertEqual(engine.volume, 1, "bit-perfect must reach the graph at unity")
+        XCTAssertEqual(
+            controller.volume,
+            0.3,
+            accuracy: 0.0001,
+            "the requested volume must survive a mode that cannot apply it"
+        )
 
         preferences.mode = .normalized
         controller.restartForPlaybackSettingsChange()
+        XCTAssertEqual(
+            controller.volume,
+            0.3,
+            accuracy: 0.0001,
+            "returning to normalized must restore the volume the listener chose"
+        )
         XCTAssertEqual(
             controller.volume,
             Double(engine.volume),
             accuracy: 0.0001,
             "controller.volume must stay in sync with engine.volume after a restart"
         )
+    }
+
+    /// Volume used to be forgotten on every launch, so an amplifier left turned up met
+    /// full-scale output the next time Aro opened.
+    func testVolumeIsRestoredFromPreferencesOnLaunch() {
+        let store = InMemoryPlaybackPreferenceStore()
+        let first = PlaybackPreferences(store: store)
+        first.mode = .normalized
+        let controller = PlaybackController(
+            engine: FakeAudioPlaybackEngine(),
+            preferences: first
+        )
+        controller.setVolume(0.25)
+
+        let relaunched = PlaybackPreferences(store: store)
+        let restored = PlaybackController(
+            engine: FakeAudioPlaybackEngine(),
+            preferences: relaunched
+        )
+        XCTAssertEqual(restored.volume, 0.25, accuracy: 0.0001)
     }
 
     func testWirelessAwareResolverAvoidsForcingBitPerfectVolumeBehavior() {
@@ -762,8 +797,11 @@ private final class FakeWirelessAudioDeviceManager: AudioDeviceManaging {
     )
     var devices: [AudioOutputDevice] { [wirelessDevice] }
     var lastWarning: String?
+    var defaultDevice: AudioOutputDevice? { wirelessDevice }
+    var defaultDeviceDidChange: ((AudioOutputDevice?) -> Void)?
 
     func refresh() {}
+    func setSystemDefaultOutputDevice(_ device: AudioOutputDevice) -> Bool { true }
     func selectedDevice(for uid: String?) -> AudioOutputDevice? { wirelessDevice }
     func device(withID id: UInt32) -> AudioOutputDevice? { wirelessDevice }
     func nominalSampleRate(for device: AudioOutputDevice) -> Double? { nil }

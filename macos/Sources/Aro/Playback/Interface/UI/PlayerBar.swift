@@ -303,7 +303,12 @@ struct PlayerBar: View {
                 isShowingRoutes.toggle()
             } label: {
                 HStack(spacing: 4) {
-                    Text(playback.outputStatus.deviceName)
+                    // The live system device, not the engine's last-recorded route. The
+                    // engine only writes a name while verifying a route, so before anything
+                    // had played this showed the literal placeholder "System Default" no
+                    // matter which device was actually selected.
+                    Text(deviceManager.defaultDevice?.name
+                        ?? playback.outputStatus.deviceName)
                         .font(AroFont.fixed(10, weight: .semibold))
                         .lineLimit(1)
                     Image(systemName: "chevron.up.chevron.down")
@@ -334,11 +339,11 @@ struct PlayerBar: View {
                     .accessibilityLabel("Volume")
             }
             .frame(width: 64)
-            .opacity(playback.outputStatus.mode == .bitPerfect ? 0.5 : 1)
-            .disabled(playback.outputStatus.mode == .bitPerfect)
+            .opacity(playback.effectiveMode == .bitPerfect ? 0.5 : 1)
+            .disabled(playback.effectiveMode == .bitPerfect)
             .help(
-                playback.outputStatus.mode == .bitPerfect
-                    ? "Volume is fixed in Bit-Perfect mode"
+                playback.effectiveMode == .bitPerfect
+                    ? "Volume is fixed in Bit-Perfect mode: software gain would stop the output being bit-exact"
                     : "Output volume"
             )
 

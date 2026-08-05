@@ -20,6 +20,12 @@ final class PlaybackPreferences {
         didSet { persist() }
     }
 
+    /// Remembered across launches. Playback volume used to reset to full scale on every
+    /// launch, which is a nasty surprise on a system whose amplifier is already turned up.
+    var volume: Double {
+        didSet { persist() }
+    }
+
     var shuffleEnabled: Bool {
         didSet { persist() }
     }
@@ -41,6 +47,7 @@ final class PlaybackPreferences {
         hogModeEnabled = values.hogModeEnabled
         targetLUFS = values.targetLUFS
         shuffleEnabled = values.shuffleEnabled
+        volume = values.volume
         repeatMode = values.repeatMode
     }
 
@@ -52,6 +59,7 @@ final class PlaybackPreferences {
                 hogModeEnabled: hogModeEnabled,
                 targetLUFS: targetLUFS,
                 shuffleEnabled: shuffleEnabled,
+                volume: volume,
                 repeatMode: repeatMode
             )
         )

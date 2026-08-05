@@ -615,3 +615,11 @@ public struct RemoteTranscodeUsage: Codable, Sendable, Identifiable {
 
     public var id: String { quality }
 }
+
+public struct RemoteArtworkDiscoverRequest: Codable, Sendable {
+    public let contentHash: String
+
+    public init(contentHash: String) {
+        self.contentHash = contentHash
+    }
+}

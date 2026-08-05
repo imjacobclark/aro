@@ -217,7 +217,12 @@ final class HighResolutionPlaybackEngine: NSObject, AudioPlaybackEngine {
             normalizationNode.bands[0].bypass = true
             self.normalizationNode = normalizationNode
             normalizationGraphState.setNode(normalizationNode)
-            if let device, player.outputDeviceID != device.id {
+            // Always set the device, never conditionally. Setting it only when it differed
+            // meant that whenever the chosen device happened to already be the default, the
+            // audio unit was left in its own follow-the-default state while Aro believed it
+            // had pinned a route — so Aro was sometimes a follower and sometimes a pinner,
+            // and which one depended on unrelated circumstance.
+            if let device {
                 try player.setOutputDeviceID(device.id)
             }
             if let device {
@@ -512,16 +517,21 @@ final class HighResolutionPlaybackEngine: NSObject, AudioPlaybackEngine {
     private func applyGain(for song: Song?) {
         let gainDecibels: Double
         if effectiveMode == .normalized {
-            guard let loudness = song?.loudness else {
+            // A track with no loudness analysis can't be *normalised*, but the listener's
+            // volume must still apply. Returning early here left `globalGain` at whatever
+            // the previous track set, so the slider moved and nothing happened — only the
+            // normalisation term needs the analysis, so drop that term and carry on.
+            if let loudness = song?.loudness {
+                if outputStatus.warning == Self.missingLoudnessWarning {
+                    outputStatus.warning = nil
+                }
+                gainDecibels = loudness.safeGainDecibels(
+                    targetLUFS: preferences.targetLUFS
+                )
+            } else {
                 outputStatus.warning = Self.missingLoudnessWarning
-                return
+                gainDecibels = 0
             }
-            if outputStatus.warning == Self.missingLoudnessWarning {
-                outputStatus.warning = nil
-            }
-            gainDecibels = loudness.safeGainDecibels(
-                targetLUFS: preferences.targetLUFS
-            )
         } else {
             if outputStatus.warning == Self.missingLoudnessWarning {
                 outputStatus.warning = nil
@@ -541,13 +551,18 @@ final class HighResolutionPlaybackEngine: NSObject, AudioPlaybackEngine {
         normalizationNode?.globalGain = Float(
             min(max(gainDecibels + userGainDecibels, -96), 24)
         )
-        if let player {
+        // Unity is asserted on the output unit only in bit-perfect, where any attenuation
+        // would break the exactness the mode exists to provide. Doing it unconditionally
+        // meant Aro overrode per-app volume set from outside the app on every gain change,
+        // and then blamed the device — the parameter being reset here is the audio unit's
+        // own gain, not the device level shown in Audio MIDI Setup.
+        if let player, effectiveMode == .bitPerfect {
             do {
                 try player.setVolume(1)
                 let actualVolume = player.volume
                 if actualVolume.isFinite, actualVolume < 0.999 {
                     outputStatus.warning =
-                        "\(Self.belowUnityGainWarningPrefix) (\(Int(actualVolume * 100))%). Check the device level in Audio MIDI Setup."
+                        "\(Self.belowUnityGainWarningPrefix) (\(Int(actualVolume * 100))%), so output is not bit-exact. Something outside Aro is attenuating this app."
                 } else if outputStatus.warning?.hasPrefix(
                     Self.belowUnityGainWarningPrefix
                 ) == true {
@@ -678,16 +693,46 @@ final class HighResolutionPlaybackEngine: NSObject, AudioPlaybackEngine {
     /// also advance between pre-enqueued tracks (see `compatibleRun`)
     /// without going through `load()` again, so routing needs to be
     /// reasserted at those points rather than assumed to hold.
+    /// Re-checks that audio is going where macOS is sending it, repairing if not.
+    ///
+    /// "Where macOS is sending it" is re-read live rather than taken from the device chosen
+    /// when the track loaded. Previously this forced the cached device back on every track
+    /// change, which actively fought a system output change and left Aro playing into the
+    /// old device indefinitely while the Sound menu said otherwise.
     private func verifyAndRepairOutputRouting() {
-        guard let player, let selectedDevice else {
-            return
+        guard let player else { return }
+        let device = deviceManager.defaultDevice ?? selectedDevice
+        guard let device else { return }
+        if selectedDevice?.uid != device.uid {
+            selectedDevice = device
         }
         do {
-            try verifyOutputRouting(player: player, requestedDevice: selectedDevice)
+            try verifyOutputRouting(player: player, requestedDevice: device)
         } catch {
-            try? player.setOutputDeviceID(selectedDevice.id)
-            try? verifyOutputRouting(player: player, requestedDevice: selectedDevice)
+            try? player.setOutputDeviceID(device.id)
+            try? verifyOutputRouting(player: player, requestedDevice: device)
         }
+    }
+
+    /// Re-routes to a newly-selected system output device without interrupting playback
+    /// where possible.
+    ///
+    /// Hog mode is released on the device being left before anything is acquired on the new
+    /// one: holding exclusive access to a device Aro is no longer using would silence every
+    /// other app on it for no reason.
+    func systemDefaultDeviceChanged(to device: AudioOutputDevice?) {
+        guard let device else { return }
+        guard selectedDevice?.uid != device.uid else { return }
+        if let previous = selectedDevice, previous.uid != device.uid {
+            deviceManager.releaseHogMode(for: previous)
+        }
+        selectedDevice = device
+        outputStatus.deviceName = device.name
+        // A different device may not support the configured rate, and may need hog mode
+        // acquiring, so the caller restarts the current track through the normal load path
+        // rather than trying to mutate a running graph.
+        configuredSampleRate = nil
+        verifyAndRepairOutputRouting()
     }
 
     private func scheduleWirelessRoutingRecheck(playbackID: UUID) {

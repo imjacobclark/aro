@@ -139,11 +139,15 @@ public protocol AudioPlaybackEngine: AnyObject {
     func pause()
     func seek(to time: TimeInterval, playbackID: UUID, shouldPlay: Bool) throws
     func stop()
+    /// macOS switched output device; follow it. Default no-op for engines that have no
+    /// device of their own to move.
+    func systemDefaultDeviceChanged(to device: AudioOutputDevice?)
 }
 
 public extension AudioPlaybackEngine {
     var bufferedFraction: Double { 1 }
     var isWaitingForData: Bool { false }
+    func systemDefaultDeviceChanged(to device: AudioOutputDevice?) {}
 }
 
 public protocol ListeningHistoryRecording: Sendable {
@@ -199,6 +203,7 @@ public struct PlaybackPreferenceValues: Sendable {
     public var hogModeEnabled = false
     public var targetLUFS = -14.0
     public var shuffleEnabled = false
+    public var volume = 1.0
     public var repeatMode: PlaybackRepeatMode = .off
 
     public init(
@@ -207,6 +212,7 @@ public struct PlaybackPreferenceValues: Sendable {
         hogModeEnabled: Bool = false,
         targetLUFS: Double = -14.0,
         shuffleEnabled: Bool = false,
+        volume: Double = 1.0,
         repeatMode: PlaybackRepeatMode = .off
     ) {
         self.mode = mode
@@ -214,6 +220,7 @@ public struct PlaybackPreferenceValues: Sendable {
         self.hogModeEnabled = hogModeEnabled
         self.targetLUFS = targetLUFS
         self.shuffleEnabled = shuffleEnabled
+        self.volume = volume
         self.repeatMode = repeatMode
     }
 }

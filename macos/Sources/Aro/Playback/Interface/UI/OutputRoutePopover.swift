@@ -11,14 +11,20 @@ struct OutputRoutePopover: View {
             Text("Output")
                 .font(.headline)
 
+            // Reads the live system default rather than a stored preference, and writing
+            // changes the system default. That is what stops the picker and the macOS Sound
+            // menu disagreeing: there is one setting, shown in two places.
             Picker("Output Device", selection: Binding(
-                get: { preferences.outputDeviceUID ?? "" },
+                get: { deviceManager.defaultDevice?.uid ?? "" },
                 set: { newValue in
-                    preferences.outputDeviceUID = newValue.isEmpty ? nil : newValue
+                    guard let device = deviceManager.devices.first(where: { $0.uid == newValue }) else {
+                        return
+                    }
+                    preferences.outputDeviceUID = device.uid
+                    deviceManager.setSystemDefaultOutputDevice(device)
                     playback.restartForPlaybackSettingsChange()
                 }
             )) {
-                Text("System Default").tag("")
                 ForEach(AudioOutputTransport.allCases, id: \.self) { transport in
                     let matching = deviceManager.devices.filter { $0.transport == transport }
                     if !matching.isEmpty {
@@ -39,14 +45,15 @@ struct OutputRoutePopover: View {
             AirPlayRouteControl(
                 mediaURL: playback.currentSong?.url,
                 routeSelectionDidFinish: {
-                    preferences.outputDeviceUID = nil
+                    // AirPlay changes the system default itself; refreshing lets the
+                    // ordinary follow-the-system path pick it up, rather than Aro
+                    // discarding the selection as it used to.
                     deviceManager.refresh()
-                    playback.restartForPlaybackSettingsChange()
                 }
             )
             .frame(maxWidth: .infinity)
 
-            if let selected = deviceManager.selectedDevice(for: preferences.outputDeviceUID), selected.transport.isWireless {
+            if let selected = deviceManager.defaultDevice, selected.transport.isWireless {
                 Label("Shared normalized playback may add latency.", systemImage: "waveform.path.ecg")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -66,18 +73,24 @@ struct OutputRoutePopover: View {
                 playback.restartForPlaybackSettingsChange()
             }
 
-            if deviceManager.selectedDevice(
-                for: preferences.outputDeviceUID
-            )?.transport.isWireless != true {
+            if deviceManager.defaultDevice?.transport.isWireless != true {
                 Toggle(
                     "Exclusive Access",
                     isOn: $preferences.hogModeEnabled
                 )
                 .help(
-                    "Temporarily gives Aro sole access to the selected output device."
+                    "Gives Aro sole access to the output device. Other apps will not be able to play through it."
                 )
                 .onChange(of: preferences.hogModeEnabled) {
                     playback.restartForPlaybackSettingsChange()
+                }
+                if preferences.hogModeEnabled {
+                    // Aro follows the system output device, so exclusive access takes over
+                    // the device everything else is using. Worth saying plainly rather than
+                    // leaving someone to wonder why their video call went silent.
+                    Text("Other apps can't play through \(deviceManager.defaultDevice?.name ?? "this device") while this is on.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -93,15 +106,20 @@ struct OutputRoutePopover: View {
                         .frame(width: 62, alignment: .trailing)
                 }
             }
-            .disabled(preferences.mode != .normalized)
+            .disabled(playback.effectiveMode != .normalized)
             .onChange(of: preferences.targetLUFS) {
                 playback.refreshNormalizedGain()
             }
 
+            // Describes what is actually happening, not what was asked for: a wireless
+            // route forces normalized playback, and this used to claim unity gain and no
+            // processing while gain was in fact being applied.
             Text(
-                preferences.mode == .bitPerfect
-                    ? "Bit-Perfect uses native sample rates, unity gain, and no audio processing."
-                    : "Normalized applies constant gain with a −1 dB peak ceiling."
+                playback.isModeOverriddenByRoute
+                    ? "This route can't do Bit-Perfect, so Normalized is in use: constant gain with a −1 dB peak ceiling."
+                    : (playback.effectiveMode == .bitPerfect
+                        ? "Bit-Perfect uses native sample rates, unity gain, and no audio processing. Volume and loudness are unavailable because they would break bit-exactness."
+                        : "Normalized applies constant gain with a −1 dB peak ceiling.")
             )
             .font(.caption)
             .foregroundStyle(.secondary)

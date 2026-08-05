@@ -251,6 +251,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/transcode/cleanup", post(cleanup_transcodes))
         .route("/v1/transcode/usage", get(transcode_usage))
         .route("/v1/artwork/candidates", get(artwork_candidates))
+        .route("/v1/artwork/discover", post(discover_artwork))
         .route("/v1/artwork/resolve", post(resolve_artwork))
         .route("/v1/metadata-overrides", post(set_manual_metadata))
         .route("/v1/library/tracks/remove", post(remove_track))
@@ -1661,56 +1662,115 @@ async fn topology(
 #[derive(Deserialize)]
 struct ArtworkCandidatesQuery {
     content_hash: String,
-    /// Discards the cached list and walks MusicBrainz again — for when art has been
-    /// uploaded to the archive since the last look.
-    #[serde(default)]
-    refresh: bool,
 }
 
-/// Every cover a listener could plausibly choose for this track: each pressing of its
-/// album, plus one cover from each of the artist's other albums. Identification only ever
-/// stores the single front cover of the one release it matched, which is a reasonable
-/// default and a poor menu — see `aro_track_id::artwork` for why the archive's per-release
-/// population makes that default miss most of what exists.
+/// Covers already found for this track — a pure cache read, and always immediate.
 ///
-/// Cached per release-group, because a cold walk costs dozens of rate-limited requests.
+/// Returns an empty list when nothing has been searched for yet rather than searching on
+/// the spot: see [`discover_artwork`] for why the search cannot live on this request. An
+/// empty result is therefore "nothing found *yet*", which the caller distinguishes by
+/// whether it has run a discovery job.
 async fn artwork_candidates(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(query): Query<ArtworkCandidatesQuery>,
 ) -> Result<Json<Vec<aro_track_id::artwork::ArtworkCandidate>>, ApiError> {
     require_device_or_admin(&state, &headers)?;
+    let cache_key = artwork_cache_key(&state, &query.content_hash)?;
+    let cached = state
+        .store
+        .cached_artwork_candidates(&cache_key)?
+        .and_then(|cached| serde_json::from_str(&cached).ok())
+        .unwrap_or_default();
+    Ok(Json(cached))
+}
+
+/// Cache key for a track's artwork search.
+///
+/// Keyed by release-group so every track on an album shares one walk, falling back to the
+/// release and then the track itself when identification resolved less than that.
+fn artwork_cache_key(state: &AppState, content_hash: &str) -> Result<String, ApiError> {
     let result = state
         .store
-        .identification_result(&query.content_hash)?
+        .identification_result(content_hash)?
         .ok_or_else(|| ApiError::not_found("track_not_identified"))?;
-    // Keyed by release-group so every track on an album shares one walk; falling back to
-    // the release, then the track itself, when identification resolved less than that.
+    Ok(result
+        .release_group_id
+        .clone()
+        .or_else(|| result.release_id.clone())
+        .unwrap_or_else(|| content_hash.to_owned()))
+}
+
+#[derive(Deserialize)]
+struct DiscoverArtworkRequest {
+    content_hash: String,
+}
+
+/// Starts searching the archive for covers, reporting through the ordinary job registry.
+///
+/// This cannot be the same request that reads the results. A cold search walks up to twelve
+/// pressings and twenty-five release-groups, and MusicBrainz permits about one request a
+/// second — measured at 97 seconds for one album and over two minutes for another. No HTTP
+/// client waits that long: the previous synchronous endpoint timed out client-side every
+/// time, which looked exactly like "it spins, then nothing appears".
+async fn discover_artwork(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<DiscoverArtworkRequest>,
+) -> Result<Json<SyncJob>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    let result = state
+        .store
+        .identification_result(&request.content_hash)?
+        .ok_or_else(|| ApiError::not_found("track_not_identified"))?;
     let cache_key = result
         .release_group_id
         .clone()
         .or_else(|| result.release_id.clone())
-        .unwrap_or_else(|| query.content_hash.clone());
-    if !query.refresh
-        && let Some(cached) = state.store.cached_artwork_candidates(&cache_key)?
-        && let Ok(candidates) = serde_json::from_str(&cached)
-    {
-        return Ok(Json(candidates));
-    }
-    let candidates = aro_track_id::artwork::discover_candidates(
-        &state.musicbrainz,
-        &state.artwork_http,
-        &state.musicbrainz_user_agent,
-        &state.store,
-        result.release_id.as_deref(),
-        result.release_group_id.as_deref(),
-        result.album.as_deref(),
-    )
-    .await;
-    if let Ok(encoded) = serde_json::to_string(&candidates) {
-        state.store.cache_artwork_candidates(&cache_key, &encoded)?;
-    }
-    Ok(Json(candidates))
+        .unwrap_or_else(|| request.content_hash.clone());
+
+    // Total units are unknown until MusicBrainz has been asked how many pressings exist, so
+    // the job reports a single unit: the UI shows that a search is running rather than a
+    // percentage it would have to invent.
+    let job = state.jobs.create("artwork_discovery", 1);
+    let job_id = job.job_id;
+    state.jobs.start(job_id);
+
+    let jobs = state.jobs.clone();
+    let store = state.store.clone();
+    let musicbrainz = state.musicbrainz.clone();
+    let http = state.artwork_http.clone();
+    let user_agent = state.musicbrainz_user_agent.clone();
+    tokio::spawn(async move {
+        let candidates = aro_track_id::artwork::discover_candidates(
+            &musicbrainz,
+            &http,
+            &user_agent,
+            &store,
+            result.release_id.as_deref(),
+            result.release_group_id.as_deref(),
+            result.album.as_deref(),
+        )
+        .await;
+        // Cached even when empty: an album with nothing archived is a real answer, and
+        // re-walking MusicBrainz every time someone opens the editor to confirm it would be
+        // both slow and rude.
+        match serde_json::to_string(&candidates) {
+            Ok(encoded) => {
+                if let Err(error) = store.cache_artwork_candidates(&cache_key, &encoded) {
+                    tracing::warn!(%error, "failed to cache artwork candidates");
+                    jobs.fail(job_id, error.to_string());
+                    return;
+                }
+            }
+            Err(error) => {
+                jobs.fail(job_id, error.to_string());
+                return;
+            }
+        }
+        jobs.complete(job_id);
+    });
+    Ok(Json(job))
 }
 
 #[derive(Deserialize)]
