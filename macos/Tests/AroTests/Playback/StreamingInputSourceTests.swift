@@ -63,7 +63,10 @@ final class StreamingInputSourceTests: XCTestCase {
             url: URL(string: "https://aro.test/test.wav")!,
             length: Int64(payload.count)
         ) { offset, length in
-            let start = Int(offset)
+            // Clamped at both ends: CoreAudio probes past the end while identifying a
+            // format, and an unclamped lower bound builds an invalid range rather than
+            // reporting end-of-file.
+            let start = min(max(Int(offset), 0), payload.count)
             let end = min(start + Int(length), payload.count)
             return payload.subdata(in: start..<end)
         }
@@ -86,7 +89,10 @@ final class StreamingInputSourceTests: XCTestCase {
     }
 
     private static func makePCMTestWAV() -> Data {
-        let frameCount: UInt32 = 128
+        // A tenth of a second rather than 128 frames. CoreAudio reads well beyond the
+        // header to identify a format, and a 300-byte file left it hitting end-of-file
+        // and reporting the format as unrecognised.
+        let frameCount: UInt32 = 4_410
         let sampleRate: UInt32 = 44_100
         let channelCount: UInt16 = 1
         let bitsPerSample: UInt16 = 16

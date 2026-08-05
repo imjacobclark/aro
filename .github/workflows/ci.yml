@@ -55,6 +55,11 @@ jobs:
       - name: Install libchromaprint (Windows)
         if: runner.os == 'Windows'
         run: |
+          # vcpkg supplies the libraries and their .pc files, but Windows runners have no
+          # pkg-config binary at all — so the build script failed looking for chromaprint
+          # with "The pkg-config command could not be found", regardless of what was
+          # installed.
+          choco install pkgconfiglite -y --no-progress
           vcpkg install chromaprint:x64-windows opus:x64-windows
           echo "PKG_CONFIG_PATH=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\lib\pkgconfig" >> $env:GITHUB_ENV
       - run: cargo test --manifest-path server/Cargo.toml --workspace

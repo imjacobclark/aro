@@ -149,7 +149,11 @@ final class DevicesRedesignTests: XCTestCase {
 
         registry.remove(remote.id)
 
-        XCTAssertEqual(registry.profiles, [local])
+        // Compared by identity, not by value: `activate` stamps `lastActivatedAt`, so the
+        // profile held in the registry is legitimately no longer equal to the copy
+        // returned before activation. The two differ below the precision `Date` prints at,
+        // which made the failure read as "these identical values are not equal".
+        XCTAssertEqual(registry.profiles.map(\.id), [local.id])
         XCTAssertEqual(registry.activeProfileID, local.id)
     }
 
