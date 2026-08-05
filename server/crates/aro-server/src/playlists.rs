@@ -22,10 +22,66 @@ const MAXIMUM_TRACK_COUNT: usize = 30;
 /// must match the vocabulary `aro_track_id::musicbrainz::canonicalize_tags` can produce.
 const MOOD_ORDER: [&str; 4] = ["relaxed", "energetic", "feelgood", "mellow"];
 
-/// A historically well-played track (at least this many lifetime plays) that hasn't
-/// been played in [`FORGOTTEN_MIN_DAYS_SINCE_PLAY`] days is a "forgotten favourite".
-const FORGOTTEN_MIN_PLAYS: i64 = 3;
+/// Lower bound for "well played", for a listener whose history is too short for a
+/// percentile to mean anything. Everything above this is relative — see [`ListeningScale`].
+const FORGOTTEN_MIN_PLAYS_FLOOR: i64 = 3;
 const FORGOTTEN_MIN_DAYS_SINCE_PLAY: f64 = 90.0;
+
+/// Thresholds taken from the listener's own distribution rather than fixed counts.
+///
+/// A fixed threshold only suits one size of library. "Played at least three times" picks
+/// out a handful of tracks for someone with a hundred plays and very nearly the entire
+/// library for someone with a million — and a shelf that matches everything is exactly as
+/// useless as one that matches nothing, while failing silently in both directions.
+///
+/// Percentiles hold their meaning at any scale: the top quartile of what *this* listener
+/// plays is a real distinction whether that means four plays or four hundred. A floor keeps
+/// small histories sane, where a percentile of a handful of plays is noise.
+struct ListeningScale {
+    /// Non-zero lifetime play counts, ascending.
+    play_counts: Vec<i64>,
+}
+
+impl ListeningScale {
+    fn from_seeds(seeds: &PlaylistSeeds) -> Self {
+        let mut play_counts: Vec<i64> = seeds
+            .listening
+            .values()
+            .map(|summary| summary.play_count)
+            .filter(|count| *count > 0)
+            .collect();
+        play_counts.sort_unstable();
+        Self { play_counts }
+    }
+
+    /// Nearest-rank percentile of the play-count distribution, `0.0..=1.0`.
+    fn percentile(&self, fraction: f64) -> i64 {
+        if self.play_counts.is_empty() {
+            return 0;
+        }
+        let rank = ((self.play_counts.len() as f64 - 1.0) * fraction.clamp(0.0, 1.0)).round();
+        self.play_counts[rank as usize]
+    }
+
+    /// What counts as well played *for this listener*: more played than half of what they
+    /// play at all. The floor stops a library with a few dozen plays treating a single play
+    /// as a favourite.
+    ///
+    /// The median rather than an upper quartile, because a quartile is defined by the
+    /// listener's very heaviest tracks — on a library with a few hot records and a long
+    /// tail of loved ones, a p75 bar excludes the loved tail entirely and empties the
+    /// shelf. The median asks "played more than most", which is the actual question.
+    fn well_played(&self) -> i64 {
+        self.percentile(0.5).max(FORGOTTEN_MIN_PLAYS_FLOOR)
+    }
+
+    /// Enough plays for a proportion of them to be evidence rather than coincidence.
+    /// Lower than [`Self::well_played`]: this gates *shape* (when a track is played), not
+    /// *strength*, so it only has to rule out the single data point.
+    fn representative(&self) -> i64 {
+        self.percentile(0.25).max(TIME_OF_DAY_MIN_PLAYS_FLOOR)
+    }
+}
 
 /// A track first seen within this many days, with at most one play, is a "fresh find".
 const FRESH_MAX_DAYS: i64 = 30;
@@ -35,7 +91,7 @@ const FRESH_MAX_PLAYS: i64 = 1;
 /// falling in a given local-time window, to represent that window meaningfully —
 /// otherwise a track played once at 3am would swing "Late Night" on a single data
 /// point.
-const TIME_OF_DAY_MIN_PLAYS: i64 = 2;
+const TIME_OF_DAY_MIN_PLAYS_FLOOR: i64 = 2;
 const TIME_OF_DAY_MIN_FRACTION: f64 = 0.5;
 /// Local hour-of-day windows (24h clock) for the two time-of-day playlists.
 const MORNING_HOURS: [u32; 6] = [5, 6, 7, 8, 9, 10];
@@ -50,8 +106,6 @@ const LOST_ALBUM_MIN_DAYS_SINCE_PLAY: f64 = 60.0;
 /// A track needs at least this many lifetime plays to have been genuinely loved, and
 /// its *most recent* play needs to be at least this many years ago to count as
 /// dormant enough for "Time Capsule" — a track played 3 times last month has plays,
-/// but nothing to be nostalgic about yet.
-const TIME_CAPSULE_MIN_PLAYS: i64 = 3;
 const TIME_CAPSULE_MIN_YEARS_AGO: i32 = 2;
 
 /// What a [`GeneratedPlaylist`] represents, so clients can route it to the right Home
@@ -498,10 +552,11 @@ fn push_time_capsule(
     now: DateTime<Utc>,
 ) {
     let current_year = now.year();
+    let well_played = ListeningScale::from_seeds(seeds).well_played();
     let mut candidates: Vec<(&str, i64, i32)> = seeds
         .listening
         .iter()
-        .filter(|(_, summary)| summary.play_count >= TIME_CAPSULE_MIN_PLAYS)
+        .filter(|(_, summary)| summary.play_count >= well_played)
         .filter_map(|(hash, summary)| {
             let last_played_year = summary.last_played_year?;
             (current_year - last_played_year >= TIME_CAPSULE_MIN_YEARS_AGO).then_some((
@@ -1043,16 +1098,19 @@ fn ranked_by(seeds: &PlaylistSeeds, metric: impl Fn(&ListeningEventSummary) -> f
     ranked.into_iter().map(|(hash, _)| hash.clone()).collect()
 }
 
-/// Historically well-played tracks that have gone quiet — see [`FORGOTTEN_MIN_PLAYS`]/
-/// [`FORGOTTEN_MIN_DAYS_SINCE_PLAY`]. Ordered by lifetime play count descending, so the
-/// tracks with the strongest history lead.
+/// Historically well-played tracks that have gone quiet. "Well played" is the listener's
+/// own top quartile (see [`ListeningScale`]), not a fixed count, so this stays a short,
+/// meaningful shelf whether their history runs to dozens of plays or millions. Ordered by
+/// lifetime play count descending, so the tracks with the strongest history lead.
 fn forgotten_favourites(seeds: &PlaylistSeeds, now: DateTime<Utc>) -> Vec<String> {
+    let scale = ListeningScale::from_seeds(seeds);
+    let well_played = scale.well_played();
     let now_secs = now.timestamp() as f64;
     let mut candidates: Vec<(&String, i64)> = seeds
         .listening
         .iter()
         .filter(|(_, summary)| {
-            summary.play_count >= FORGOTTEN_MIN_PLAYS
+            summary.play_count >= well_played
                 && (now_secs - summary.last_played_at) / 86_400.0 >= FORGOTTEN_MIN_DAYS_SINCE_PLAY
         })
         .map(|(hash, summary)| (hash, summary.play_count))
@@ -1096,14 +1154,16 @@ fn fresh_finds(seeds: &PlaylistSeeds, now: DateTime<Utc>) -> Vec<String> {
 }
 
 /// Tracks whose plays skew heavily into one local-time window (morning, late night, …)
-/// for the *requesting device's* timezone — see [`TIME_OF_DAY_MIN_PLAYS`]/
-/// [`TIME_OF_DAY_MIN_FRACTION`]. `hour_histogram` is recorded in UTC; `utc_offset_minutes`
+/// for the *requesting device's* timezone. The play-count gate is the listener's own
+/// median (see [`ListeningScale`]) rather than a fixed count, so a heavy listener isn't
+/// swamped by tracks they played twice. `hour_histogram` is recorded in UTC; `utc_offset_minutes`
 /// shifts it to local hours before matching against `local_hours`.
 fn time_of_day(seeds: &PlaylistSeeds, local_hours: &[u32], utc_offset_minutes: i32) -> Vec<String> {
     let offset_hours = utc_offset_minutes.div_euclid(60);
+    let representative = ListeningScale::from_seeds(seeds).representative();
     let mut candidates: Vec<(&String, f64)> = Vec::new();
     for (hash, summary) in &seeds.listening {
-        if summary.play_count < TIME_OF_DAY_MIN_PLAYS {
+        if summary.play_count < representative {
             continue;
         }
         let matching: i64 = summary
@@ -1260,6 +1320,84 @@ mod tests {
         }
     }
 
+    /// The point of a relative threshold is that it means the same thing at any scale.
+    /// A fixed "at least three plays" picks out a handful of tracks for a light listener
+    /// and nearly the whole library for a heavy one, so the shelf quietly stops
+    /// discriminating exactly when there is most to discriminate between.
+    #[test]
+    fn well_played_tracks_the_listeners_own_distribution() {
+        // A short history: the floor governs, because a percentile of a few plays is noise.
+        let light = PlaylistSeeds {
+            listening: HashMap::from([
+                ("a".to_string(), summary(1, 0.0, 0.0)),
+                ("b".to_string(), summary(1, 0.0, 0.0)),
+                ("c".to_string(), summary(2, 0.0, 0.0)),
+            ]),
+            ..Default::default()
+        };
+        assert_eq!(
+            ListeningScale::from_seeds(&light).well_played(),
+            FORGOTTEN_MIN_PLAYS_FLOOR,
+            "a short history should fall back to the floor"
+        );
+
+        // A heavy history: three plays is now unremarkable, and the threshold rises with
+        // the distribution instead of admitting almost everything.
+        let heavy = PlaylistSeeds {
+            listening: (0..100)
+                .map(|index| {
+                    (
+                        format!("track-{index}"),
+                        summary(index as i64 + 1, 0.0, 0.0),
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let threshold = ListeningScale::from_seeds(&heavy).well_played();
+        assert!(
+            threshold >= 40,
+            "expected roughly the median of 1..=100, got {threshold}"
+        );
+
+        // No history at all must not divide by zero or admit everything.
+        let empty = PlaylistSeeds::default();
+        assert_eq!(
+            ListeningScale::from_seeds(&empty).well_played(),
+            FORGOTTEN_MIN_PLAYS_FLOOR
+        );
+    }
+
+    /// Guards the failure mode that makes an adaptive threshold worth having: at scale a
+    /// fixed count admits nearly everything, and a shelf that matches everything is as
+    /// useless as one that matches nothing.
+    #[test]
+    fn forgotten_favourites_stays_selective_on_a_large_history() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 5, 12, 0, 0).unwrap();
+        let long_ago = now.timestamp() as f64 - 200.0 * 86_400.0;
+        let seeds = PlaylistSeeds {
+            listening: (0..200)
+                .map(|index| {
+                    (
+                        format!("track-{index}"),
+                        summary(index as i64 + 1, long_ago, 0.0),
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let forgotten = forgotten_favourites(&seeds, now);
+        assert!(
+            forgotten.len() <= 105,
+            "a fixed floor of 3 plays would admit 198 of these 200 tracks; got {}",
+            forgotten.len()
+        );
+        assert!(
+            !forgotten.is_empty(),
+            "the shelf should still find something"
+        );
+    }
+
     #[test]
     fn recently_loved_contains_only_favourites_and_needs_three() {
         let seeds = PlaylistSeeds {
@@ -1352,6 +1490,7 @@ mod tests {
                 .map(|i| track(&format!("hash-{i}"), false, &[]))
                 .collect(),
             listening,
+            ..Default::default()
         };
 
         let first = generate_utc(&seeds, wednesday());
@@ -1440,7 +1579,11 @@ mod tests {
         let mut listening = HashMap::new();
         listening.insert("overplayed".to_string(), summary(2, 0.0, 0.0));
 
-        let seeds = PlaylistSeeds { tracks, listening };
+        let seeds = PlaylistSeeds {
+            tracks,
+            listening,
+            ..Default::default()
+        };
 
         let playlists = generate(&seeds, now, 0);
         let fresh = playlists.iter().find(|p| p.id == "fresh-finds").unwrap();
@@ -1525,7 +1668,11 @@ mod tests {
             tracks.push(track_full(&format!("gamma-{i}"), Some("Gamma"), None, None));
         }
 
-        let seeds = PlaylistSeeds { tracks, listening };
+        let seeds = PlaylistSeeds {
+            tracks,
+            listening,
+            ..Default::default()
+        };
         let playlists = generate_utc(&seeds, wednesday());
 
         let artist_mixes: Vec<&GeneratedPlaylist> = playlists
@@ -1567,7 +1714,11 @@ mod tests {
             listening.insert(hash, summary(1, 100.0, 5.0));
         }
 
-        let seeds = PlaylistSeeds { tracks, listening };
+        let seeds = PlaylistSeeds {
+            tracks,
+            listening,
+            ..Default::default()
+        };
         let playlists = generate_utc(&seeds, wednesday());
 
         let artist_mixes: Vec<&GeneratedPlaylist> = playlists
@@ -1600,7 +1751,11 @@ mod tests {
             listening.insert(hash, summary(1, 3_000.0, 1.0));
         }
 
-        let seeds = PlaylistSeeds { tracks, listening };
+        let seeds = PlaylistSeeds {
+            tracks,
+            listening,
+            ..Default::default()
+        };
         let playlists = generate_utc(&seeds, wednesday());
 
         let albums: Vec<&GeneratedPlaylist> = playlists
@@ -1650,7 +1805,11 @@ mod tests {
             ));
         }
 
-        let seeds = PlaylistSeeds { tracks, listening };
+        let seeds = PlaylistSeeds {
+            tracks,
+            listening,
+            ..Default::default()
+        };
         let playlists = generate(&seeds, now, 0);
 
         let lost: Vec<&GeneratedPlaylist> = playlists
@@ -1711,7 +1870,11 @@ mod tests {
             );
         }
 
-        let seeds = PlaylistSeeds { tracks, listening };
+        let seeds = PlaylistSeeds {
+            tracks,
+            listening,
+            ..Default::default()
+        };
         let playlists = generate(&seeds, now, 0);
 
         let capsule = playlists
@@ -1747,7 +1910,11 @@ mod tests {
             }
         }
 
-        let seeds = PlaylistSeeds { tracks, listening };
+        let seeds = PlaylistSeeds {
+            tracks,
+            listening,
+            ..Default::default()
+        };
         let playlists = generate_utc(&seeds, wednesday());
 
         let hits: Vec<&GeneratedPlaylist> = playlists
@@ -1780,7 +1947,11 @@ mod tests {
             listening.insert(hash, summary(1, 1.0, 5.0));
         }
 
-        let seeds = PlaylistSeeds { tracks, listening };
+        let seeds = PlaylistSeeds {
+            tracks,
+            listening,
+            ..Default::default()
+        };
         let playlists = generate_utc(&seeds, wednesday());
 
         let hits: Vec<&GeneratedPlaylist> = playlists
@@ -2078,7 +2249,11 @@ mod tests {
                 last_played_year: None,
             },
         );
-        let seeds = PlaylistSeeds { tracks, listening };
+        let seeds = PlaylistSeeds {
+            tracks,
+            listening,
+            ..Default::default()
+        };
 
         let result = radio(&seeds, "seed", 10).unwrap();
 
