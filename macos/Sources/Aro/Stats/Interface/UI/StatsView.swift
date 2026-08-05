@@ -215,6 +215,65 @@ struct StatsView: View {
         }
     }
 
+    /// What the library *is*, rather than how big it is: how much survived encoding
+    /// intact, how much is better than CD, and how compressed the masters are. Hidden
+    /// entirely when the hub doesn't report it, rather than showing zeroes that would read
+    /// as "none of your library is lossless".
+    @ViewBuilder
+    private var fidelityView: some View {
+        if let fidelity = serverDashboard?.fidelity, fidelity.losslessTracks + fidelity.lossyTracks > 0 {
+            Divider()
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Fidelity")
+                    .font(.headline)
+
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 132), spacing: 12)],
+                    spacing: 12
+                ) {
+                    StatCard(
+                        label: "Lossless",
+                        value: "\(Int((fidelity.losslessFraction * 100).rounded()))%",
+                        detail: "\(fidelity.losslessTracks) tracks"
+                    )
+                    if fidelity.lossyTracks > 0 {
+                        StatCard(
+                            label: "Lossy",
+                            value: "\(fidelity.lossyTracks)",
+                            detail: fidelity.meanLossyBitrate.map {
+                                "avg \(Int(($0 / 1000).rounded())) kbps"
+                            }
+                        )
+                    }
+                    if fidelity.highResolutionTracks > 0 {
+                        StatCard(
+                            label: "High resolution",
+                            value: "\(fidelity.highResolutionTracks)",
+                            detail: "beyond CD"
+                        )
+                    }
+                    if let range = fidelity.dynamicRange, let mean = range.meanCrestDb {
+                        StatCard(
+                            label: "Dynamic range",
+                            value: String(format: "%.1f dB", mean),
+                            detail: range.maxCrestDb.map {
+                                String(format: "up to %.1f dB", $0)
+                            }
+                        )
+                    }
+                }
+
+                Text(
+                    "Dynamic range is the average crest factor — the gap between peak and "
+                    + "typical level. Higher means the dynamics survived mastering."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+    }
+
     private var libraryView: some View {
         VStack(alignment: .leading, spacing: 24) {
             LazyVGrid(
@@ -232,6 +291,8 @@ struct StatsView: View {
                     detail: formattedBytes(library.fileSizeBytes)
                 )
             }
+
+            fidelityView
 
             Divider()
 

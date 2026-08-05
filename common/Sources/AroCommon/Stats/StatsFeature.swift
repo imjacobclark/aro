@@ -172,10 +172,71 @@ public protocol StatsQuerying: Sendable {
 public struct StatsDashboard: Codable, Sendable {
     public let listening: ListeningStats
     public let library: LibraryStats
+    /// What the library actually *is*, as opposed to how big it is. Optional because a
+    /// local library computes its dashboard without a hub, and older hubs don't report it.
+    public let fidelity: FidelityStats?
 
-    public init(listening: ListeningStats, library: LibraryStats) {
+    public init(
+        listening: ListeningStats,
+        library: LibraryStats,
+        fidelity: FidelityStats? = nil
+    ) {
         self.listening = listening
         self.library = library
+        self.fidelity = fidelity
+    }
+}
+
+/// How much of the library survived encoding intact, and how compressed its masters are.
+public struct FidelityStats: Codable, Sendable {
+    public var losslessTracks: Int
+    /// `0.0...1.0` — what share of the library is lossless.
+    public var losslessFraction: Double
+    public var losslessBytes: Int64
+    public var lossyTracks: Int
+    /// Beyond CD: more than 16-bit, or faster than 48 kHz.
+    public var highResolutionTracks: Int
+    /// Mean bitrate of the lossy portion, bits per second. `nil` when nothing is lossy.
+    public var meanLossyBitrate: Double?
+    public var dynamicRange: DynamicRangeStats?
+
+    public init(
+        losslessTracks: Int = 0,
+        losslessFraction: Double = 0,
+        losslessBytes: Int64 = 0,
+        lossyTracks: Int = 0,
+        highResolutionTracks: Int = 0,
+        meanLossyBitrate: Double? = nil,
+        dynamicRange: DynamicRangeStats? = nil
+    ) {
+        self.losslessTracks = losslessTracks
+        self.losslessFraction = losslessFraction
+        self.losslessBytes = losslessBytes
+        self.lossyTracks = lossyTracks
+        self.highResolutionTracks = highResolutionTracks
+        self.meanLossyBitrate = meanLossyBitrate
+        self.dynamicRange = dynamicRange
+    }
+}
+
+/// Crest factor across the library — peak against average level, in dB. Higher means the
+/// dynamics survived mastering; lower means the recording was compressed loud-throughout.
+public struct DynamicRangeStats: Codable, Sendable {
+    public var meanCrestDb: Double?
+    public var minCrestDb: Double?
+    public var maxCrestDb: Double?
+    public var analyzedTracks: Int
+
+    public init(
+        meanCrestDb: Double? = nil,
+        minCrestDb: Double? = nil,
+        maxCrestDb: Double? = nil,
+        analyzedTracks: Int = 0
+    ) {
+        self.meanCrestDb = meanCrestDb
+        self.minCrestDb = minCrestDb
+        self.maxCrestDb = maxCrestDb
+        self.analyzedTracks = analyzedTracks
     }
 }
 
