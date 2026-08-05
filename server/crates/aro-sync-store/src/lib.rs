@@ -3651,6 +3651,100 @@ impl HubStore {
             .collect())
     }
 
+    /// Moves everything Aro knows about a track from one content hash to another.
+    ///
+    /// Content hash is the identity of a track everywhere in this system: it keys the blob
+    /// store, the source-file index, loudness and audio-feature analysis, identification
+    /// results, release-group affinity, cached transcodes, and the hash lists inside
+    /// generated playlists. It is the SHA-256 of the *whole file*, tags included — so
+    /// writing corrected tags back to a file changes the track's identity in every one of
+    /// those places at once.
+    ///
+    /// Without this, a single tag write means: the file fails verification and is marked
+    /// unavailable the next time it is served; the next scan re-imports it as a *new*
+    /// track, leaving a second full copy of the audio in managed mode; loudness, features
+    /// and every cached encode are orphaned and recomputed; and two identical files that
+    /// previously de-duplicated to one track silently become two.
+    ///
+    /// One transaction, because a partial migration is worse than none: it would leave the
+    /// track playable but strip its history, or leave history pointing at bytes that no
+    /// longer exist.
+    ///
+    /// Identification is deliberately *not* carried across — the caller re-identifies, so
+    /// the row for `old` is dropped rather than moved. That is safe from looping only
+    /// because tag write-back is always user-initiated; nothing in the pipeline writes tags
+    /// on its own, so a re-identification cannot trigger another write.
+    pub fn rekey_content_hash(&self, old: &str, new: &str) -> Result<(), StoreError> {
+        validate_hash(old)?;
+        validate_hash(new)?;
+        if old == new {
+            return Ok(());
+        }
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction()?;
+
+        // Anything already recorded under the new hash wins: the file's current bytes are
+        // the truth, and a stale row from a previous life of that hash must not survive to
+        // conflict with it.
+        for table in [
+            "loudness",
+            "loudness_analysis_failures",
+            "audio_features",
+            "audio_feature_failures",
+            "identification_results",
+            "release_group_affinity_members",
+            "transcoded_blobs",
+        ] {
+            transaction.execute(
+                &format!("DELETE FROM {table} WHERE content_hash = ?1"),
+                [new],
+            )?;
+        }
+        transaction.execute("DELETE FROM blobs WHERE hash = ?1", [new])?;
+        transaction.execute("DELETE FROM referenced_blobs WHERE hash = ?1", [new])?;
+
+        // Analysis and derived data follow the bytes: the audio is unchanged by a tag
+        // edit, so loudness and features remain valid, and re-deriving them would be
+        // minutes of needless work on a slow hub.
+        for table in [
+            "loudness",
+            "loudness_analysis_failures",
+            "audio_features",
+            "audio_feature_failures",
+            "release_group_affinity_members",
+            "transcoded_blobs",
+        ] {
+            transaction.execute(
+                &format!("UPDATE {table} SET content_hash = ?1 WHERE content_hash = ?2"),
+                params![new, old],
+            )?;
+        }
+        transaction.execute(
+            "UPDATE tracks SET content_hash = ?1 WHERE content_hash = ?2",
+            params![new, old],
+        )?;
+        transaction.execute(
+            "UPDATE source_files SET content_hash = ?1 WHERE content_hash = ?2",
+            params![new, old],
+        )?;
+        transaction.execute(
+            "UPDATE blobs SET hash = ?1 WHERE hash = ?2",
+            params![new, old],
+        )?;
+        transaction.execute(
+            "UPDATE referenced_blobs SET hash = ?1 WHERE hash = ?2",
+            params![new, old],
+        )?;
+        // Dropped rather than moved, so the caller's re-identification starts clean.
+        transaction.execute(
+            "DELETE FROM identification_results WHERE content_hash = ?1",
+            [old],
+        )?;
+
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn purge_blob(&self, hash: &str) -> Result<bool, StoreError> {
         validate_hash(hash)?;
         let mut connection = self.connection.lock();
@@ -5861,6 +5955,183 @@ mod tests {
 
         // No source_files row exists for this track, so it isn't reachable on disk.
         assert!(store.live_path_for_track(track_id).unwrap().is_none());
+    }
+
+    /// Writing corrected tags into a file changes its bytes, and therefore the SHA-256 that
+    /// identifies the track everywhere. This asserts every hash-keyed table actually moved
+    /// — by re-querying each one, not by counting — because a migration that misses a table
+    /// leaves the track playable while silently losing its history or its analysis, which
+    /// is the failure this function exists to prevent.
+    #[test]
+    fn rekeying_a_content_hash_moves_every_table_that_identifies_a_track() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let old = "a".repeat(64);
+        let new = "b".repeat(64);
+        let device_id = Uuid::new_v4();
+        let source_id = Uuid::new_v4();
+        let track_id = Uuid::new_v4();
+
+        {
+            let connection = store.connection.lock();
+            connection
+                .execute(
+                    "INSERT INTO tracks(hub_track_id, content_hash, metadata, field_versions) \
+                     VALUES (?1, ?2, '{}', '{}')",
+                    params![track_id.to_string(), old],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO sources(source_id, mode, path, available, name) \
+                     VALUES (?1, 'managed', '/music', 1, 'Music')",
+                    params![source_id.to_string()],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO source_files(source_id, relative_path, hub_track_id, \
+                     content_hash, size, modified_millis, last_seen_at) \
+                     VALUES (?1, 'a.flac', ?2, ?3, 1, 1, 'now')",
+                    params![source_id.to_string(), track_id.to_string(), old],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO blobs(hash, size, verified_at) VALUES (?1, 1, 1)",
+                    [&old],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO loudness(content_hash, algorithm_version, payload) \
+                     VALUES (?1, 1, '{}')",
+                    [&old],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO audio_features(content_hash, algorithm_version, payload) \
+                     VALUES (?1, 1, '{}')",
+                    [&old],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO release_group_affinity_members\
+                     (artist_normalized, release_group_id, content_hash) \
+                     VALUES ('artist', 'rg', ?1)",
+                    [&old],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO transcoded_blobs\
+                     (content_hash, quality, blob_hash, byte_count, created_at) \
+                     VALUES (?1, 'saver', 'blob', 10, 1)",
+                    [&old],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO identification_results(content_hash, identified_at) \
+                     VALUES (?1, 1)",
+                    [&old],
+                )
+                .unwrap();
+            let _ = device_id;
+        }
+
+        store.rekey_content_hash(&old, &new).unwrap();
+
+        let connection = store.connection.lock();
+        let count = |sql: &str, hash: &str| -> i64 {
+            connection.query_row(sql, [hash], |row| row.get(0)).unwrap()
+        };
+
+        // The audio itself is unchanged by a tag edit, so analysis and derived data follow
+        // the file rather than being thrown away and recomputed.
+        for (table, column) in [
+            ("tracks", "content_hash"),
+            ("source_files", "content_hash"),
+            ("loudness", "content_hash"),
+            ("audio_features", "content_hash"),
+            ("release_group_affinity_members", "content_hash"),
+            ("transcoded_blobs", "content_hash"),
+            ("blobs", "hash"),
+        ] {
+            assert_eq!(
+                count(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1"),
+                    &new
+                ),
+                1,
+                "{table} should have moved to the new hash"
+            );
+            assert_eq!(
+                count(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1"),
+                    &old
+                ),
+                0,
+                "{table} should have nothing left under the old hash"
+            );
+        }
+
+        // Identification is dropped rather than moved: the caller re-identifies, and a
+        // stale answer keyed to bytes that no longer exist would be worse than none.
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM identification_results WHERE content_hash = ?1",
+                &old
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM identification_results WHERE content_hash = ?1",
+                &new
+            ),
+            0
+        );
+    }
+
+    /// Rekeying onto a hash that already has rows must not collide. The file's current
+    /// bytes are the truth; a leftover row from a previous life of that hash is not.
+    #[test]
+    fn rekeying_onto_an_occupied_hash_replaces_the_stale_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let old = "c".repeat(64);
+        let new = "d".repeat(64);
+        {
+            let connection = store.connection.lock();
+            for (hash, version) in [(&old, 1), (&new, 2)] {
+                connection
+                    .execute(
+                        "INSERT INTO loudness(content_hash, algorithm_version, payload) \
+                         VALUES (?1, ?2, '{}')",
+                        params![hash, version],
+                    )
+                    .unwrap();
+            }
+        }
+
+        store.rekey_content_hash(&old, &new).unwrap();
+
+        let connection = store.connection.lock();
+        let version: i64 = connection
+            .query_row(
+                "SELECT algorithm_version FROM loudness WHERE content_hash = ?1",
+                [&new],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 1, "the migrated row should win over the stale one");
+        let rows: i64 = connection
+            .query_row("SELECT COUNT(*) FROM loudness", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "no duplicate should survive");
     }
 
     /// Codec names alone get this wrong, and did: the reference library stores its codec
