@@ -308,6 +308,42 @@ pub struct HubStore {
     root: Arc<PathBuf>,
 }
 
+/// Formats that always reproduce the source exactly.
+const LOSSLESS_CODECS: [&str; 7] = ["alac", "flac", "wav", "aiff", "aif", "ape", "wv"];
+/// Formats that never do.
+const LOSSY_CODECS: [&str; 6] = ["mp3", "aac", "ogg", "vorbis", "opus", "wma"];
+/// `m4a`/`mp4` name a *container*, which can hold lossless ALAC or lossy AAC, so the name
+/// alone cannot decide. The ratio of actual to uncompressed bitrate can: ALAC lands around
+/// 70% of uncompressed, while even a generous AAC sits far below — the reference library's
+/// ALAC files report 1,012 kbps against 1,411 kbps uncompressed, and its MP3s 320 kbps with
+/// no bit depth at all.
+const LOSSLESS_MIN_BITRATE_RATIO: f64 = 0.4;
+
+/// Whether a track's audio survived encoding intact.
+///
+/// Deliberately conservative: without the evidence to judge, a track is not claimed as
+/// lossless. Overstating fidelity is the worse error for a statistic whose whole purpose is
+/// telling a listener what they actually hold.
+fn is_lossless(codec: &str, metadata: &serde_json::Map<String, Value>) -> bool {
+    if LOSSLESS_CODECS.contains(&codec) {
+        return true;
+    }
+    if LOSSY_CODECS.contains(&codec) {
+        return false;
+    }
+    let number = |key: &str| metadata.get(key).and_then(Value::as_f64);
+    let (Some(depth), Some(rate), Some(bitrate)) = (
+        number("bit_depth"),
+        number("sample_rate"),
+        number("bitrate"),
+    ) else {
+        return false;
+    };
+    let channels = number("channel_count").unwrap_or(2.0).max(1.0);
+    let uncompressed = rate * depth * channels;
+    uncompressed > 0.0 && bitrate / uncompressed >= LOSSLESS_MIN_BITRATE_RATIO
+}
+
 impl HubStore {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, StoreError> {
         let root = root.as_ref().to_path_buf();
@@ -1635,6 +1671,13 @@ impl HubStore {
         let mut complete_title = 0_u64;
         let mut complete_artist = 0_u64;
         let mut complete_album = 0_u64;
+        // Lossless is a property of the codec, not the bit depth: a 16-bit ALAC file is
+        // lossless while a 16-bit-decoded MP3 is not, and both report a bit depth.
+        let mut lossless_tracks = 0_u64;
+        let mut lossless_bytes = 0_u64;
+        let mut lossy_bitrate_total = 0_f64;
+        let mut lossy_bitrate_count = 0_u64;
+        let mut high_resolution_tracks = 0_u64;
         for row in rows {
             let (metadata, size) = row?;
             let metadata: serde_json::Map<String, Value> =
@@ -1685,8 +1728,55 @@ impl HubStore {
             if let Some(depth) = metadata.get("bit_depth").and_then(Value::as_u64) {
                 *bit_depths.entry(depth.to_string()).or_default() += 1;
             }
+            let codec = text("codec").unwrap_or_default().to_ascii_lowercase();
+            if is_lossless(&codec, &metadata) {
+                lossless_tracks += 1;
+                lossless_bytes = lossless_bytes.saturating_add(size);
+                // Anything beyond CD — 24-bit, or faster than 48 kHz — is what a listener
+                // means by "high resolution".
+                let depth = metadata
+                    .get("bit_depth")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(16);
+                let rate = metadata
+                    .get("sample_rate")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(44_100.0);
+                if depth > 16 || rate > 48_000.0 {
+                    high_resolution_tracks += 1;
+                }
+            } else if let Some(bitrate) = metadata.get("bitrate").and_then(Value::as_f64) {
+                lossy_bitrate_total += bitrate;
+                lossy_bitrate_count += 1;
+            }
         }
         drop(tracks);
+
+        // Crest factor, already measured for every analyzed track. For a losslessly-ripped
+        // library this is the statistic that actually separates pressings: two copies of
+        // one album can differ by more here than by any other measure available.
+        let dynamic_range = connection
+            .query_row(
+                r#"
+                SELECT AVG(crest), MIN(crest), MAX(crest), COUNT(*)
+                FROM (
+                    SELECT json_extract(payload, '$.dynamic_range') AS crest
+                    FROM audio_features
+                )
+                WHERE crest IS NOT NULL
+                "#,
+                [],
+                |row| {
+                    Ok(serde_json::json!({
+                        "mean_crest_db": row.get::<_, Option<f64>>(0)?,
+                        "min_crest_db": row.get::<_, Option<f64>>(1)?,
+                        "max_crest_db": row.get::<_, Option<f64>>(2)?,
+                        "analyzed_tracks": row.get::<_, i64>(3)?,
+                    }))
+                },
+            )
+            .optional()?
+            .unwrap_or(Value::Null);
 
         let mut listening = connection.query_row(
             r#"
@@ -1871,6 +1961,22 @@ impl HubStore {
                 "decades": breakdown(decades),
                 "sample_rates": sample_rates,
                 "bit_depths": bit_depths,
+            },
+            // What an audiophile actually wants to know about their own library, from data
+            // already collected: how much of it survived intact, how much is better than
+            // CD, and which files are the weak links worth re-ripping.
+            "fidelity": {
+                "lossless_tracks": lossless_tracks,
+                "lossless_fraction": ratio(lossless_tracks, track_count),
+                "lossless_bytes": lossless_bytes,
+                "lossy_tracks": track_count.saturating_sub(lossless_tracks),
+                "high_resolution_tracks": high_resolution_tracks,
+                "mean_lossy_bitrate": if lossy_bitrate_count == 0 {
+                    Value::Null
+                } else {
+                    Value::from(lossy_bitrate_total / lossy_bitrate_count as f64)
+                },
+                "dynamic_range": dynamic_range,
             },
             "metadata": {
                 "title_coverage": ratio(complete_title, track_count),
@@ -5755,6 +5861,38 @@ mod tests {
 
         // No source_files row exists for this track, so it isn't reachable on disk.
         assert!(store.live_path_for_track(track_id).unwrap().is_none());
+    }
+
+    /// Codec names alone get this wrong, and did: the reference library stores its codec
+    /// as `m4a`, a *container* that holds lossless ALAC or lossy AAC. A name-only list
+    /// reported a 300-track ALAC library as 0% lossless.
+    #[test]
+    fn lossless_detection_reads_the_evidence_not_just_the_container() {
+        let metadata = |depth: Option<f64>, rate: f64, bitrate: f64| {
+            let mut map = serde_json::Map::new();
+            if let Some(depth) = depth {
+                map.insert("bit_depth".into(), Value::from(depth));
+            }
+            map.insert("sample_rate".into(), Value::from(rate));
+            map.insert("bitrate".into(), Value::from(bitrate));
+            map
+        };
+
+        // ALAC in an m4a container: 1,012 kbps against 1,411 kbps uncompressed.
+        assert!(is_lossless(
+            "m4a",
+            &metadata(Some(16.0), 44_100.0, 1_012_000.0)
+        ));
+        // AAC in the same container, at a bitrate no lossless encoder could produce.
+        assert!(!is_lossless(
+            "m4a",
+            &metadata(Some(16.0), 44_100.0, 256_000.0)
+        ));
+        // Named formats never need the heuristic.
+        assert!(is_lossless("flac", &serde_json::Map::new()));
+        assert!(!is_lossless("mp3", &metadata(None, 44_100.0, 320_000.0)));
+        // Nothing to judge by: claim nothing rather than overstate fidelity.
+        assert!(!is_lossless("m4a", &serde_json::Map::new()));
     }
 
     /// Engagement is aggregated in three layers — heartbeats to sessions, sessions to
