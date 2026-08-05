@@ -120,7 +120,9 @@ struct MetadataEditorView: View {
                     .foregroundStyle(.secondary)
 
                     Label(
-                        "Aro stores these changes in its library only. The original or managed audio file is never modified.",
+                        "Aro stores these changes in its library. Your audio files are left "
+                            + "untouched unless you write metadata back to them from the "
+                            + "Metadata screen.",
                         systemImage: "lock.doc"
                     )
                     .font(.callout)

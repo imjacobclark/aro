@@ -83,6 +83,23 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    Metadata {
+        #[command(subcommand)]
+        command: MetadataCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum MetadataCommand {
+    /// Whether Aro may write its metadata into your audio files.
+    ///
+    /// Off by default, and only ever acted on when someone asks for a specific write —
+    /// nothing in Aro rewrites files on its own. Turning this on lets corrections made in
+    /// Aro be carried out to the files themselves, which changes those files on disk.
+    WriteBack {
+        /// `on` to permit writes, `off` to forbid them. Omit to show the current setting.
+        state: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -154,7 +171,56 @@ async fn main() -> Result<()> {
         Command::Purge { hash } => purge(&config_path, &hash),
         Command::Migrate { to } => migrate_instance(&config_path, &to),
         Command::Config { command } => config_command(&config_path, command),
+        Command::Metadata { command } => metadata_command(&config_path, command).await,
     }
+}
+
+async fn metadata_command(path: &Path, command: MetadataCommand) -> Result<()> {
+    let config = Config::load(path)?;
+    let client = admin_client()?;
+    let url = format!("{}/v1/metadata/write-back/enabled", local_url(&config));
+    let MetadataCommand::WriteBack { state } = command;
+    let enabled = match state.as_deref() {
+        None => {
+            client
+                .get(&url)
+                .bearer_auth(&config.admin_token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<serde_json::Value>()
+                .await?["enabled"]
+                == serde_json::json!(true)
+        }
+        Some("on" | "true" | "yes") => {
+            set_write_back(&client, &url, &config.admin_token, true).await?
+        }
+        Some("off" | "false" | "no") => {
+            set_write_back(&client, &url, &config.admin_token, false).await?
+        }
+        Some(other) => anyhow::bail!("expected `on` or `off`, got `{other}`"),
+    };
+    println!(
+        "Writing metadata into your audio files is {}",
+        if enabled { "ON" } else { "OFF" }
+    );
+    Ok(())
+}
+
+async fn set_write_back(
+    client: &reqwest::Client,
+    url: &str,
+    admin_token: &str,
+    enabled: bool,
+) -> Result<bool> {
+    client
+        .put(url)
+        .bearer_auth(admin_token)
+        .json(&serde_json::json!({"enabled": enabled}))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(enabled)
 }
 
 fn config_command(path: &Path, command: ConfigCommand) -> Result<()> {

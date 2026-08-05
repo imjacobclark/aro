@@ -302,16 +302,16 @@ pub fn write_back_track(
         }
     };
     if let Err(error) = store.rekey_content_hash(&track.content_hash, &new_hash) {
-        outcome.error = Some(format!("wrote the file but could not move its history: {error}"));
+        outcome.error = Some(format!(
+            "wrote the file but could not move its history: {error}"
+        ));
         return outcome;
     }
     // A managed hub keeps its own copy, and playback serves that copy rather than the
     // original. Without re-importing, the file would show corrected tags in Finder while
     // Aro went on serving the bytes from before the edit — a divergence nothing would
     // surface.
-    if managed
-        && let Err(error) = store.import_managed(path)
-    {
+    if managed && let Err(error) = store.import_managed(path) {
         outcome.error = Some(format!(
             "wrote the file, but Aro's own copy could not be refreshed: {error}"
         ));
@@ -404,6 +404,60 @@ mod tests {
             .find(|delta| delta.field == "title")
             .unwrap();
         assert_eq!(title.aro.as_deref(), Some("Real Title"));
+    }
+
+    /// A file whose bytes no longer match what Aro recorded has been changed by something
+    /// else — another tagger, a re-rip, a sync. Writing Aro's values over it would discard
+    /// that change with no way to know what it was, so the file is left exactly as found.
+    #[test]
+    fn a_file_that_has_drifted_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = HubStore::open(dir.path()).unwrap();
+        let path = dir.path().join("drifted.flac");
+        std::fs::write(&path, b"these are not the bytes aro recorded").unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let outcome = write_back_track(
+            &store,
+            &track(
+                json!({"title": "Corrected Title"}),
+                Some(path.to_str().unwrap()),
+                false,
+            ),
+            false,
+        );
+
+        assert!(!outcome.written);
+        assert!(
+            outcome.error.unwrap().contains("changed since"),
+            "the refusal must say why, so the user can go and look"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "a refused write must not have touched the file"
+        );
+    }
+
+    /// Nothing in Aro writes tags on its own — write-back is always user-initiated — which
+    /// is the only reason re-identifying a written file cannot loop back into another write.
+    /// A track with no values to write must therefore stop rather than rewrite a file with
+    /// nothing, changing its hash for no gain.
+    #[test]
+    fn a_track_with_nothing_to_write_does_not_touch_its_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = HubStore::open(dir.path()).unwrap();
+        let path = dir.path().join("empty-metadata.flac");
+        std::fs::write(&path, b"audio").unwrap();
+        let (hash, _size) = aro_sync_core::hash_file(&path).unwrap();
+
+        let mut scope = track(json!({}), Some(path.to_str().unwrap()), false);
+        scope.content_hash = hash;
+        let outcome = write_back_track(&store, &scope, false);
+
+        assert!(!outcome.written);
+        assert_eq!(outcome.error.as_deref(), Some("nothing to write"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"audio");
     }
 
     /// Years arrive as JSON numbers from identification and as strings from the editor's

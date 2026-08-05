@@ -807,6 +807,35 @@ actor AroSyncClient {
         )
     }
 
+    /// Writes Aro's metadata into these tracks' own files on the hub.
+    ///
+    /// Returns an outcome per track rather than a single success: a batch where some files
+    /// had drifted since Aro last read them is a partial result, and collapsing that into
+    /// one answer would hide which files were left alone and why.
+    func writeBackMetadata(
+        contentHashes: [String],
+        credential: HubDeviceCredential? = nil
+    ) async throws -> [RemoteMetadataWriteBackOutcome] {
+        try await postAuthenticated(
+            "v1/metadata/write-back",
+            body: ["content_hashes": contentHashes],
+            credential: credential
+        )
+    }
+
+    /// Whether this hub permits its files to be modified, so the app can show the choice
+    /// instead of offering a button that is certain to be refused.
+    func metadataWriteBackEnabled(
+        credential: HubDeviceCredential? = nil
+    ) async throws -> Bool {
+        struct Response: Decodable { let enabled: Bool }
+        let response: Response = try await getAuthenticated(
+            "v1/metadata/write-back/enabled",
+            credential: credential
+        )
+        return response.enabled
+    }
+
     /// What converting the library to `quality` would cost on this hub. Asked before any
     /// conversion is agreed to: the same library is minutes of work on a fast machine and
     /// hours on a slow one, so the number has to come from the hub itself.

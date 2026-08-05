@@ -1,12 +1,17 @@
 //! Reading a file's own tags, and optionally writing Aro's metadata back into them.
 //!
-//! Off by default (see the `persist_metadata_to_files` setting). Only ever updates
-//! existing tag fields in place via
-//! lofty's tag API — never a destructive re-encode of the audio itself — and is only
-//! attempted against files aro can currently reach (see
-//! `HubStore::live_path_for_track`). Aro's own database remains the source of truth
-//! either way; this is a convenience for users who want their files to carry the
-//! identified metadata outside of Aro.
+//! Off by default (see the `persist_metadata_to_files` setting), and never automatic —
+//! only a person asking for it causes a file to be written. That matters beyond caution:
+//! it is the reason re-identifying a written file cannot loop back into another write.
+//!
+//! Writes go through lofty's tag API, so the audio itself is never re-encoded; a file with
+//! no tag at all gets one, since a rip that carries nothing is exactly the case worth
+//! correcting. Only files the hub can currently reach are attempted (see
+//! `HubStore::live_path_for_track`).
+//!
+//! Aro's database remains the source of truth. But a write is not free of consequence: a
+//! track is identified by the SHA-256 of its whole file, tags included, so writing changes
+//! its identity everywhere. Callers must migrate it — see `HubStore::rekey_content_hash`.
 
 use aro_sync_store::HubStore;
 use lofty::{

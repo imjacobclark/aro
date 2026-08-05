@@ -710,3 +710,24 @@ public struct RemoteTrackMetadataDelta: Codable, Sendable, Identifiable {
         fields.filter(\.verdict.isDifference)
     }
 }
+
+/// What happened when a hub tried to write Aro's metadata into one track's file.
+///
+/// A track's identity is the SHA-256 of its whole file, tags included, so a successful
+/// write always produces a new hash — the hub migrates the track's history onto it, and
+/// reports it here so a client can stop referring to bytes that no longer exist.
+public struct RemoteMetadataWriteBackOutcome: Codable, Sendable, Identifiable {
+    public let contentHash: String
+    public let newContentHash: String?
+    public let written: Bool
+    public let error: String?
+
+    public var id: String { contentHash }
+
+    public init(contentHash: String, newContentHash: String?, written: Bool, error: String?) {
+        self.contentHash = contentHash
+        self.newContentHash = newContentHash
+        self.written = written
+        self.error = error
+    }
+}

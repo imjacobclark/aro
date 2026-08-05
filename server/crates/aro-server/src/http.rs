@@ -262,6 +262,11 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/artwork/resolve", post(resolve_artwork))
         .route("/v1/metadata-overrides", post(set_manual_metadata))
         .route("/v1/metadata/deltas", get(metadata_deltas))
+        .route("/v1/metadata/write-back", post(write_back_metadata))
+        .route(
+            "/v1/metadata/write-back/enabled",
+            get(write_back_enabled).put(set_write_back_enabled),
+        )
         .route("/v1/library/tracks/remove", post(remove_track))
         .route("/v1/imports", post(create_import))
         .route("/v1/imports/{id}/files", post(register_import_file))
@@ -1895,6 +1900,106 @@ async fn metadata_deltas(
     .await
     .map_err(|error| ApiError::internal(error.to_string()))??;
     Ok(Json(deltas))
+}
+
+#[derive(Deserialize)]
+struct MetadataWriteBackRequest {
+    content_hashes: Vec<String>,
+}
+
+/// A batch large enough for any album or a generous multi-disc selection, and small enough
+/// that the request answers while someone is still looking at it. Each track is read twice
+/// over — once to verify it has not drifted, once to re-hash after writing — so this is
+/// bounded by disk throughput, not by anything Aro controls.
+const WRITE_BACK_BATCH_LIMIT: usize = 200;
+
+/// Writes Aro's metadata into the tracks' own files.
+///
+/// Answers synchronously with an outcome per track rather than returning a job, because the
+/// per-track result *is* the answer: a batch where three of twenty files were skipped for
+/// having drifted is a success and a refusal at once, and a job's single completed/failed
+/// state cannot express that.
+///
+/// Off by default. Rewriting files Aro was trusted to only ever read is not something to
+/// infer from a click, so it stays behind `persist_metadata_to_files` until the owner of the
+/// library turns it on.
+async fn write_back_metadata(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<MetadataWriteBackRequest>,
+) -> Result<Json<Vec<crate::metadata_delta::WriteBackOutcome>>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    if !aro_track_id::tags::should_persist_to_files(&state.store)? {
+        return Err(ApiError::forbidden(
+            "metadata_write_back_disabled",
+            "This library does not allow Aro to modify the files it holds. \
+             Turn on writing metadata to files in its settings first.",
+        ));
+    }
+    if request.content_hashes.len() > WRITE_BACK_BATCH_LIMIT {
+        return Err(ApiError::bad_request("too_many_tracks"));
+    }
+
+    let managed = matches!(state.sources.mode(), crate::config::StorageMode::Managed);
+    let store = state.store.clone();
+    let outcomes = tokio::task::spawn_blocking(move || {
+        request
+            .content_hashes
+            .into_iter()
+            .map(|hash| {
+                let track = store
+                    .metadata_scope_tracks(None, None, Some(&hash), 1)
+                    .ok()
+                    .and_then(|mut tracks| tracks.pop());
+                match track {
+                    Some(track) => crate::metadata_delta::write_back_track(&store, &track, managed),
+                    None => crate::metadata_delta::WriteBackOutcome {
+                        content_hash: hash,
+                        new_content_hash: None,
+                        written: false,
+                        error: Some("this library has no such track".into()),
+                    },
+                }
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(outcomes))
+}
+
+#[derive(Serialize, Deserialize)]
+struct WriteBackEnabled {
+    enabled: bool,
+}
+
+/// Whether this library permits its files to be modified, so a client can show the choice
+/// rather than offering a button that always fails.
+async fn write_back_enabled(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<WriteBackEnabled>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    Ok(Json(WriteBackEnabled {
+        enabled: aro_track_id::tags::should_persist_to_files(&state.store)?,
+    }))
+}
+
+/// Admin-only: permitting a library's files to be rewritten is the owner's decision, not
+/// something any paired device should be able to turn on for everyone.
+async fn set_write_back_enabled(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<WriteBackEnabled>,
+) -> Result<Json<WriteBackEnabled>, ApiError> {
+    require_admin(&state, &headers)?;
+    state.store.set_setting(
+        aro_track_id::tags::PERSIST_METADATA_SETTING,
+        &json!(request.enabled),
+    )?;
+    Ok(Json(WriteBackEnabled {
+        enabled: request.enabled,
+    }))
 }
 
 async fn set_manual_metadata(

@@ -254,7 +254,9 @@ struct ContentView: View {
                 syncStore: syncStore,
                 status: $cachedIdentificationStatus,
                 remoteHubInfo: $cachedRemoteHubInfo,
-                loadDeltas: metadataDeltaLoader
+                loadDeltas: metadataDeltaLoader,
+                writeBack: metadataWriteBack,
+                loadWriteBackEnabled: metadataWriteBackEnabledLoader
             )
         } else if case .folder(let folderID) = store.selection,
                   let folder = store.folders.first(where: { $0.id == folderID }),
@@ -838,6 +840,30 @@ struct ContentView: View {
                 album: album,
                 credential: remote.credential
             )
+        }
+    }
+
+    private var metadataWriteBack: (([String]) async -> [RemoteMetadataWriteBackOutcome]?)? {
+        guard profileRegistry.activeProfile?.kind == .remote else { return nil }
+        return { hashes in
+            guard let remote = await remoteSyncContext else { return nil }
+            return try? await remote.client.writeBackMetadata(
+                contentHashes: hashes,
+                credential: remote.credential
+            )
+        }
+    }
+
+    private var metadataWriteBackEnabledLoader: (() async -> Bool)? {
+        guard profileRegistry.activeProfile?.kind == .remote else { return nil }
+        return {
+            guard let remote = await remoteSyncContext else { return false }
+            // A hub that cannot be asked is treated as refusing: showing the action and
+            // discovering on the click that the library forbids it is worse than not
+            // offering it until the answer is known.
+            return (try? await remote.client.metadataWriteBackEnabled(
+                credential: remote.credential
+            )) ?? false
         }
     }
 

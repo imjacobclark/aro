@@ -36,10 +36,25 @@ struct MetadataView: View {
     @State private var deltaError: String?
     @State private var expanded: Set<String> = []
     @State private var onlyDifferences = true
+    @State private var writeBackEnabled = false
+    @State private var writing: Set<String> = []
+    /// Tracks awaiting confirmation. Writing changes files the user owns, so it is always
+    /// confirmed against a count rather than happening on the click that asked for it.
+    @State private var pendingWrite: [RemoteTrackMetadataDelta] = []
+    @State private var writeReport: String?
 
     /// Loads metadata differences from the hub. `nil` when there is no hub to ask, which
     /// hides the Differences mode rather than offering something that cannot work.
     var loadDeltas: ((String?) async -> [RemoteTrackMetadataDelta]?)?
+
+    /// Writes Aro's metadata into the given tracks' own files, returning what happened to
+    /// each. Some will be refused — a file that has drifted since Aro read it is left
+    /// alone — so the caller reports per track rather than pass or fail.
+    var writeBack: (([String]) async -> [RemoteMetadataWriteBackOutcome]?)?
+
+    /// Whether the hub permits its files to be modified at all. Asked before showing the
+    /// action, so the app never offers a button it knows will be refused.
+    var loadWriteBackEnabled: (() async -> Bool)?
 
     enum Mode: String, CaseIterable, Identifiable {
         case sync = "Sync"
@@ -125,9 +140,44 @@ struct MetadataView: View {
                 }
             }
         }
+        // Without this the stack takes its children's intrinsic height and the window
+        // centres it, leaving the screen floating in a band of empty space whenever a
+        // branch renders something short — an empty state, or an error.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .task(id: mode) {
-            guard mode == .differences, deltas.isEmpty else { return }
+            guard mode == .differences else { return }
+            writeBackEnabled = await loadWriteBackEnabled?() ?? false
+            guard deltas.isEmpty else { return }
             await refreshDeltas()
+        }
+        .confirmationDialog(
+            pendingWrite.count == 1
+                ? "Write Aro's metadata into this file?"
+                : "Write Aro's metadata into \(pendingWrite.count) files?",
+            isPresented: .constant(!pendingWrite.isEmpty),
+            titleVisibility: .visible
+        ) {
+            Button("Write to Files") {
+                let tracks = pendingWrite
+                pendingWrite = []
+                Task { await performWriteBack(tracks) }
+            }
+            Button("Cancel", role: .cancel) { pendingWrite = [] }
+        } message: {
+            Text(
+                "These are your own audio files, not Aro's copies. Aro will change their "
+                    + "tags on disk. Any file that has been edited since Aro last read it "
+                    + "is left alone."
+            )
+        }
+        .alert(
+            "Finished writing",
+            isPresented: .constant(writeReport != nil),
+            presenting: writeReport
+        ) { _ in
+            Button("OK") { writeReport = nil }
+        } message: { report in
+            Text(report)
         }
         .task {
             localServers.refresh()
@@ -206,6 +256,14 @@ struct MetadataView: View {
                 if loadingDeltas {
                     ProgressView().controlSize(.small)
                 }
+                if writeBackEnabled, !writableWithDifferences.isEmpty {
+                    Button("Write \(writableWithDifferences.count) to Files") {
+                        pendingWrite = writableWithDifferences
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(!writing.isEmpty)
+                }
                 Button("Refresh") { Task { await refreshDeltas() } }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -222,6 +280,7 @@ struct MetadataView: View {
                     systemImage: "exclamationmark.triangle",
                     description: Text(deltaError)
                 )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if loadingDeltas && deltas.isEmpty {
                 ProgressView("Reading your files…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -237,6 +296,7 @@ struct MetadataView: View {
                             : "No tracks in this library have readable files to compare."
                     )
                 )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List(visibleDeltas) { delta in
                     deltaRow(delta)
@@ -276,6 +336,16 @@ struct MetadataView: View {
                         .padding(.vertical, 3)
                         .background(.orange.opacity(0.18), in: Capsule())
                         .foregroundStyle(.orange)
+                }
+
+                if writeBackEnabled, delta.writable, delta.differenceCount > 0 {
+                    if writing.contains(delta.id) {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Button("Write to File") { pendingWrite = [delta] }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                    }
                 }
 
                 Button(isExpanded ? "Hide" : "Compare") {
@@ -378,6 +448,42 @@ struct MetadataView: View {
             return
         }
         deltas = loaded
+    }
+
+    /// The tracks a bulk write would actually touch: those that disagree with their file
+    /// and whose original is still reachable. Offering "write everything" when half the
+    /// selection cannot be written would make the count a lie.
+    private var writableWithDifferences: [RemoteTrackMetadataDelta] {
+        visibleDeltas.filter { $0.writable && $0.differenceCount > 0 }
+    }
+
+    /// Writes, then reloads — a written file has a new content hash, so every delta held
+    /// here refers to bytes that no longer exist and must not be shown as current.
+    private func performWriteBack(_ tracks: [RemoteTrackMetadataDelta]) async {
+        guard let writeBack else { return }
+        let ids = tracks.map(\.contentHash)
+        writing.formUnion(ids)
+        let outcomes = await writeBack(ids)
+        writing.subtract(ids)
+
+        guard let outcomes else {
+            writeReport = "The library didn't answer, so nothing is known to have been written."
+            return
+        }
+        let written = outcomes.filter(\.written).count
+        let refused = outcomes.filter { !$0.written }
+        var report = written == 1 ? "1 file updated." : "\(written) files updated."
+        // The first refusal's own words rather than a count: "the file has changed since
+        // Aro last read it" tells the user what to go and look at, and a bulk write
+        // usually fails for one reason rather than many.
+        if let first = refused.first {
+            report += refused.count == 1
+                ? "\n\n1 was left alone: \(first.error ?? "no reason given")"
+                : "\n\n\(refused.count) were left alone, the first because: "
+                    + (first.error ?? "no reason given")
+        }
+        writeReport = report
+        await refreshDeltas()
     }
 
     private func refreshRemoteHubInfo() async {
