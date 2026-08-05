@@ -69,6 +69,13 @@ pub struct AppState {
     /// pickers exceed MusicBrainz's one-request-a-second policy between them.
     pub musicbrainz: Arc<aro_track_id::musicbrainz::MusicBrainzClient>,
     pub artwork_http: reqwest::Client,
+    /// Last-built playlist seeds, with the operation-log sequence they were built at.
+    ///
+    /// Building them reads every live track and its analysis, so doing it per request is
+    /// invisible on a small library and ruinous on a large one — Home would re-read and
+    /// re-parse the entire catalogue every time it opened. The library only changes when
+    /// the operation log advances, which is a single cheap read to check.
+    pub playlist_seeds: CachedPlaylistSeeds,
     /// Caps concurrent transcodes to what this machine can actually sustain.
     ///
     /// Encoding is CPU-bound and the hosts differ enormously: measured at 96 kbps, a
@@ -1381,6 +1388,40 @@ async fn transcode_usage(
     ))
 }
 
+/// Playlist seeds alongside the operation-log sequence they were built at, so a cheap
+/// sequence read can decide whether the expensive rebuild is needed.
+pub type CachedPlaylistSeeds =
+    Arc<parking_lot::Mutex<Option<(u64, Arc<aro_sync_store::PlaylistSeeds>)>>>;
+
+/// Playlist seeds, rebuilt only when the library has actually changed.
+async fn cached_playlist_seeds(
+    state: &Arc<AppState>,
+) -> Result<Arc<aro_sync_store::PlaylistSeeds>, ApiError> {
+    let cached = state.playlist_seeds.lock().clone();
+    let store = state.store.clone();
+    let cached_sequence = cached.as_ref().map(|(sequence, _)| *sequence);
+    let (sequence, rebuilt) = tokio::task::spawn_blocking(move || {
+        let sequence = store.latest_sequence()?;
+        if Some(sequence) == cached_sequence {
+            return Ok::<_, aro_sync_store::StoreError>((sequence, None));
+        }
+        Ok((sequence, Some(store.playlist_seeds()?)))
+    })
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))??;
+
+    match rebuilt {
+        Some(seeds) => {
+            let seeds = Arc::new(seeds);
+            *state.playlist_seeds.lock() = Some((sequence, seeds.clone()));
+            Ok(seeds)
+        }
+        // Unchanged since the cached build, so reuse it. The `expect` cannot fire: a
+        // matching sequence is only reported when something was cached.
+        None => Ok(cached.expect("cache hit implies a cached value").1),
+    }
+}
+
 fn parse_quality(value: Option<&str>) -> Result<aro_track_id::transcode::StreamQuality, ApiError> {
     let quality = value
         .map(|value| {
@@ -1566,10 +1607,7 @@ async fn playlists(
     headers: HeaderMap,
 ) -> Result<Json<Vec<crate::playlists::GeneratedPlaylist>>, ApiError> {
     require_device_or_admin(&state, &headers)?;
-    let store = state.store.clone();
-    let seeds = tokio::task::spawn_blocking(move || store.playlist_seeds())
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))??;
+    let seeds = cached_playlist_seeds(&state).await?;
     Ok(Json(crate::playlists::generate(
         &seeds,
         chrono::Utc::now(),
@@ -1609,7 +1647,7 @@ async fn smart_shuffle(
     Json(request): Json<SmartShuffleRequest>,
 ) -> Result<Json<Vec<String>>, ApiError> {
     require_device_or_admin(&state, &headers)?;
-    let seeds = state.store.playlist_seeds()?;
+    let seeds = cached_playlist_seeds(&state).await?;
     Ok(Json(crate::playlists::smart_shuffle(
         &seeds,
         &request.content_hashes,
@@ -1626,10 +1664,7 @@ async fn radio(
     headers: HeaderMap,
 ) -> Result<Json<Option<crate::playlists::GeneratedPlaylist>>, ApiError> {
     require_device_or_admin(&state, &headers)?;
-    let store = state.store.clone();
-    let seeds = tokio::task::spawn_blocking(move || store.playlist_seeds())
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))??;
+    let seeds = cached_playlist_seeds(&state).await?;
     Ok(Json(crate::playlists::radio(&seeds, &hash, query.limit)))
 }
 
