@@ -646,8 +646,14 @@ mod tests {
         let all = all.as_array().unwrap();
         assert!(!all.is_empty());
 
+        // Asserted as "nothing at or before the cursor" rather than "nothing at all".
+        // Adding a source starts a filesystem watcher as well as scanning, and inotify
+        // delivers events that FSEvents coalesces away — so on Linux more operations can
+        // legitimately land between these two calls. Demanding an empty answer tested the
+        // platform's event timing; what `changes_after` actually promises is that it never
+        // returns anything the caller has already seen.
         let latest_sequence = state.store.latest_sequence().unwrap();
-        let none = dispatch(
+        let later = dispatch(
             &state,
             json!({
                 "command": "changes_after",
@@ -656,7 +662,14 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(none.as_array().unwrap().is_empty());
+        for operation in later.as_array().unwrap() {
+            let sequence = operation["sequence"].as_u64().expect("a sequence");
+            assert!(
+                sequence > latest_sequence,
+                "changes_after({latest_sequence}) returned sequence {sequence}, \
+                 which the caller has already seen"
+            );
+        }
     }
 
     #[tokio::test]

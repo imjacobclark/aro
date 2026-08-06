@@ -70,6 +70,13 @@ jobs:
           EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
         run: test "$(uname -m)" = "${EXPECTED_ARCHITECTURE}"
 
+      # Same libraries CI installs. Without them audiopus_sys stops looking for a
+      # system libopus and tries to build its bundled copy from source, which needs
+      # autotools the runner does not have — so the failure surfaces as a missing
+      # `autoreconf` rather than a missing library.
+      - name: Install libchromaprint and libopus
+        run: brew install chromaprint opus pkgconf
+
       - name: Build and ad-hoc sign development app
         env:
           APP_VERSION: ${{ needs.version.outputs.version }}
@@ -155,17 +162,41 @@ jobs:
           toolchain: 1.97.1
           targets: armv7-unknown-linux-gnueabihf
 
-      - name: Install ARMv7 cross compiler
-        run: >-
-          sudo apt-get update &&
-          sudo apt-get install -y
-          gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+      # A cross compiler alone is not enough: aro-track-id links the real libchromaprint
+      # and libopus, so the *target's* libraries have to be present too. Ubuntu's main
+      # archive carries amd64/i386 only, so armhf packages come from ports.ubuntu.com —
+      # and the existing sources must be pinned to amd64 first, or apt tries to fetch
+      # armhf from an archive that has never held it and the update fails outright.
+      - name: Install ARMv7 cross compiler and target libraries
+        run: |
+          sudo dpkg --add-architecture armhf
+          sudo sed -i 's|^deb \(http\|mirror+file\)|deb [arch=amd64] \1|' \
+            /etc/apt/sources.list
+          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+            sudo sed -i '/^Types: deb$/a Architectures: amd64' \
+              /etc/apt/sources.list.d/ubuntu.sources
+          fi
+          codename="$(lsb_release -cs)"
+          sudo tee /etc/apt/sources.list.d/armhf-ports.list >/dev/null <<EOF
+          deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports ${codename} main universe
+          deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports ${codename}-updates main universe
+          EOF
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf pkg-config \
+            libchromaprint-dev:armhf libopus-dev:armhf
 
       - name: Build server
         env:
           CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
           CC_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-gcc
           CXX_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-g++
+          # pkg-config refuses to answer for a target other than the host unless told
+          # this is deliberate, and must be pointed at the armhf multiarch directory so
+          # it reports the target's libraries rather than the runner's own amd64 ones.
+          PKG_CONFIG_ALLOW_CROSS: "1"
+          PKG_CONFIG_PATH: /usr/lib/arm-linux-gnueabihf/pkgconfig
+          PKG_CONFIG_LIBDIR: /usr/lib/arm-linux-gnueabihf/pkgconfig
         run: >-
           cargo build --locked --release
           --manifest-path server/Cargo.toml

@@ -1,4 +1,5 @@
 #if canImport(XCTest)
+import AroCommon
 import Foundation
 import XCTest
 @testable import Aro
@@ -47,9 +48,14 @@ final class LivePairingIntegrationTests: XCTestCase {
             baseURL: baseURL,
             pinnedTLSFingerprint: completed.tlsFingerprint
         )
+        // Asserted against the version this client actually speaks rather than a literal:
+        // pinning the number here meant every protocol bump broke a test that has nothing
+        // to do with the bump, which is how it came to be failing for the wrong reason.
+        // What matters is that a real Rust hub and this client agree on a usable range.
         let info = try await pinnedClient.hubInfo()
-        XCTAssertEqual(info.protocolMin, 2)
-        XCTAssertEqual(info.protocolMax, 4)
+        XCTAssertLessThanOrEqual(info.protocolMin, AroSyncProtocol.currentVersion)
+        XCTAssertGreaterThanOrEqual(info.protocolMax, AroSyncProtocol.currentVersion)
+        _ = try await pinnedClient.compatibleHubInfo()
     }
 }
 #endif
