@@ -3983,6 +3983,35 @@ impl HubStore {
         Ok(removed)
     }
 
+    /// Deletes the stored copy of a hash that nothing refers to any more.
+    ///
+    /// Blob files are addressed by content, so moving a track's identity with
+    /// [`Self::rekey_content_hash`] renames the row but cannot move the file: the bytes
+    /// stay where the old hash put them. Re-importing then writes the new bytes to their
+    /// own path and the old file is left with nothing pointing at it — a second full copy
+    /// of the track, per written track, invisible until the disk fills.
+    ///
+    /// Refuses while any row still references the hash, so this cannot delete something in
+    /// use no matter what the caller believes.
+    pub fn discard_orphaned_blob(&self, hash: &str) -> Result<bool, StoreError> {
+        validate_hash(hash)?;
+        let referenced: bool = self.connection.lock().query_row(
+            "SELECT EXISTS(SELECT 1 FROM blobs WHERE hash = ?1) \
+             OR EXISTS(SELECT 1 FROM tracks WHERE content_hash = ?1)",
+            [hash],
+            |row| row.get(0),
+        )?;
+        if referenced {
+            return Ok(false);
+        }
+        let path = self.blob_path(hash);
+        if !path.is_file() {
+            return Ok(false);
+        }
+        fs::remove_file(&path)?;
+        Ok(true)
+    }
+
     fn blob_path(&self, hash: &str) -> PathBuf {
         let hash = hash.to_ascii_lowercase();
         self.root.join("blobs").join(&hash[..2]).join(hash)
@@ -6431,6 +6460,48 @@ mod tests {
                 &new
             ),
             0
+        );
+    }
+
+    /// Writing tags changes a track's hash, and blob files are addressed by content — so
+    /// the rekey renames the row while the pre-edit bytes stay at the old path. Nothing
+    /// then refers to them, and on a managed hub that is a second full copy of the track
+    /// for every write, invisible until the disk fills.
+    #[test]
+    fn the_superseded_copy_of_a_rewritten_track_is_reclaimed() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let old = "c".repeat(64);
+        let stale = store.blob_path(&old);
+        std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        std::fs::write(&stale, b"the bytes from before the edit").unwrap();
+
+        // While anything still points at the hash it must survive, whatever the caller
+        // believes -- deleting audio a track still refers to loses the track.
+        {
+            let connection = store.connection.lock();
+            connection
+                .execute(
+                    "INSERT INTO tracks(hub_track_id, content_hash, metadata, field_versions) \
+                     VALUES (?1, ?2, '{}', '{}')",
+                    params![Uuid::new_v4().to_string(), old],
+                )
+                .unwrap();
+        }
+        assert!(!store.discard_orphaned_blob(&old).unwrap());
+        assert!(stale.is_file(), "a referenced blob must never be deleted");
+
+        {
+            let connection = store.connection.lock();
+            connection
+                .execute("DELETE FROM tracks WHERE content_hash = ?1", params![old])
+                .unwrap();
+        }
+        assert!(store.discard_orphaned_blob(&old).unwrap());
+        assert!(!stale.exists(), "the superseded copy should be reclaimed");
+        assert!(
+            !store.discard_orphaned_blob(&old).unwrap(),
+            "reclaiming twice is not an error"
         );
     }
 

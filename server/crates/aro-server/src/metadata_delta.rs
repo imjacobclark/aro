@@ -311,10 +311,27 @@ pub fn write_back_track(
     // original. Without re-importing, the file would show corrected tags in Finder while
     // Aro went on serving the bytes from before the edit — a divergence nothing would
     // surface.
-    if managed && let Err(error) = store.import_managed(path) {
-        outcome.error = Some(format!(
-            "wrote the file, but Aro's own copy could not be refreshed: {error}"
-        ));
+    if managed {
+        match store.import_managed(path) {
+            Ok(_) => {
+                // Blob files are addressed by content, so the rekey above renamed the row
+                // but left the pre-edit bytes sitting at the old hash's path with nothing
+                // referring to them. Left alone, every written track costs a second full
+                // copy of itself on the hub's disk.
+                if let Err(error) = store.discard_orphaned_blob(&track.content_hash) {
+                    tracing::warn!(
+                        hash = %track.content_hash,
+                        %error,
+                        "could not remove the superseded copy of a rewritten track"
+                    );
+                }
+            }
+            Err(error) => {
+                outcome.error = Some(format!(
+                    "wrote the file, but Aro's own copy could not be refreshed: {error}"
+                ));
+            }
+        }
     }
 
     outcome.new_content_hash = Some(new_hash);
