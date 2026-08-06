@@ -154,6 +154,9 @@ public struct SourceHealthReport: Hashable, Codable, Sendable {
     public let available: Bool
     public let warning: String?
     public let songCount: UInt64?
+    /// Which machine's folder this is, so an unavailable source can be attributed to a
+    /// library rather than reported as music that has vanished from nowhere in particular.
+    public let ownerDeviceID: UUID?
 
     public init(
         sourceID: UUID,
@@ -161,7 +164,8 @@ public struct SourceHealthReport: Hashable, Codable, Sendable {
         mode: String,
         available: Bool,
         warning: String? = nil,
-        songCount: UInt64? = nil
+        songCount: UInt64? = nil,
+        ownerDeviceID: UUID? = nil
     ) {
         self.sourceID = sourceID
         self.name = name
@@ -169,6 +173,7 @@ public struct SourceHealthReport: Hashable, Codable, Sendable {
         self.available = available
         self.warning = warning
         self.songCount = songCount
+        self.ownerDeviceID = ownerDeviceID
     }
 }
 

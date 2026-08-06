@@ -258,6 +258,11 @@ pub struct SourceHealthReport {
     pub warning: Option<String>,
     #[serde(default)]
     pub song_count: Option<u64>,
+    /// Which machine's folder this is. Without it an unavailable source cannot be
+    /// attributed — a client could say "some music is missing" but not which library it
+    /// belonged to, which is the only part a person can act on.
+    #[serde(default)]
+    pub owner_device_id: Option<Uuid>,
 }
 
 /// Authenticated, user-facing view of the library relationship graph.

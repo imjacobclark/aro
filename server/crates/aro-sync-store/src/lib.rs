@@ -1348,7 +1348,7 @@ impl HubStore {
         let mut statement = connection.prepare(
             r#"
             SELECT s.source_id, s.name, s.mode, s.available, s.warning,
-                   COUNT(sf.relative_path)
+                   COUNT(sf.relative_path), s.owner_device_id
             FROM sources s
             LEFT JOIN source_files sf ON sf.source_id = s.source_id AND sf.available = 1
             GROUP BY s.source_id
@@ -1365,6 +1365,9 @@ impl HubStore {
                     available: row.get(3)?,
                     warning: row.get(4)?,
                     song_count: Some(row.get(5)?),
+                    owner_device_id: row
+                        .get::<_, Option<String>>(6)?
+                        .and_then(|id| Uuid::parse_str(&id).ok()),
                 })
             })?
             .collect::<Result<_, _>>()?)
@@ -6187,6 +6190,41 @@ mod tests {
     }
 
     /// A referenced original is marked unavailable when a download fails to verify, but
+    /// An unavailable source is only actionable if you can tell whose it is. The column
+    /// existed all along and the report simply never selected it, so a client could say
+    /// "some music is unreachable" but not which machine to go and look at.
+    #[test]
+    fn source_health_says_which_device_a_folder_belongs_to() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let owner = Uuid::new_v4();
+        {
+            let connection = store.connection.lock();
+            connection
+                .execute(
+                    "INSERT INTO sources(source_id, mode, path, available, name, \
+                     owner_device_id) VALUES (?1, 'referenced', '/music', 0, 'Laptop', ?2)",
+                    params![Uuid::new_v4().to_string(), owner.to_string()],
+                )
+                .unwrap();
+            // A hub's own folder has no owning device, and that must stay expressible
+            // rather than collapsing to some default UUID that names nothing.
+            connection
+                .execute(
+                    "INSERT INTO sources(source_id, mode, path, available, name) \
+                     VALUES (?1, 'managed', '/srv/music', 1, 'Hub')",
+                    params![Uuid::new_v4().to_string()],
+                )
+                .unwrap();
+        }
+
+        let report = store.source_health().unwrap();
+        let laptop = report.iter().find(|s| s.name == "Laptop").unwrap();
+        assert_eq!(laptop.owner_device_id, Some(owner));
+        let hub = report.iter().find(|s| s.name == "Hub").unwrap();
+        assert_eq!(hub.owner_device_id, None);
+    }
+
     /// nothing restored it: re-import only runs when size or mtime changes, so a file that
     /// failed once for a transient reason stayed unavailable while sitting on disk. The
     /// scan is the only thing that actually looks, so its verdict has to propagate.
