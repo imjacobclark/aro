@@ -284,10 +284,27 @@ pub fn generate(
         );
     }
 
+    push_recently_played_albums(&mut playlists, seeds);
+    push_artist_sections(&mut playlists, seeds);
+    push_hits_by_year(&mut playlists, seeds);
+    push_replay(&mut playlists, seeds, now);
+    push_measured_mixes(&mut playlists, seeds);
+    push_genre_shelves(&mut playlists, seeds);
+    push_harmonic_mix(&mut playlists, seeds);
+    push_dynamic_range_shelf(&mut playlists, seeds);
+    push_daily_mixes(&mut playlists, seeds, seed);
+    // Lost Albums runs first so Deep Cuts can see what it claimed. Both shelves are
+    // "music you don't play", and a never-played *album* qualifies for both by the plain
+    // reading — its tracks have no listening history at all. Leaving that alone put whole
+    // records in the shelf meant for strays, which is precisely the blur these two were
+    // separated to remove.
+    let claimed_by_lost_albums = push_lost_albums(&mut playlists, seeds, now);
+    let claimed: std::collections::HashSet<&String> = claimed_by_lost_albums.iter().collect();
     let mut deep_cuts: Vec<String> = seeds
         .tracks
         .iter()
         .filter(|track| !seeds.listening.contains_key(&track.content_hash))
+        .filter(|track| !claimed.contains(&track.content_hash))
         .map(|track| track.content_hash.clone())
         .collect();
     shuffle(&mut deep_cuts, seed);
@@ -300,17 +317,6 @@ pub fn generate(
         "Individual tracks you've passed over",
         deep_cuts,
     );
-
-    push_recently_played_albums(&mut playlists, seeds);
-    push_artist_sections(&mut playlists, seeds);
-    push_hits_by_year(&mut playlists, seeds);
-    push_replay(&mut playlists, seeds, now);
-    push_measured_mixes(&mut playlists, seeds);
-    push_genre_shelves(&mut playlists, seeds);
-    push_harmonic_mix(&mut playlists, seeds);
-    push_dynamic_range_shelf(&mut playlists, seeds);
-    push_daily_mixes(&mut playlists, seeds, seed);
-    push_lost_albums(&mut playlists, seeds, now);
     push_time_capsule(&mut playlists, seeds, now);
 
     playlists
@@ -490,11 +496,14 @@ fn push_recently_played_albums(playlists: &mut Vec<GeneratedPlaylist>, seeds: &P
 /// album's membership regardless of whether it's ever been played — an album with
 /// zero plays at all is the most "lost" of all, not excluded the way an unplayed
 /// track is excluded from "Recently Played Albums".
+/// Returns the hashes this shelf claimed, so Deep Cuts can leave them alone: a track on
+/// a record nobody has returned to is not a stray someone skipped past, and listing it as
+/// both is the blurring these two shelves were split apart to end.
 fn push_lost_albums(
     playlists: &mut Vec<GeneratedPlaylist>,
     seeds: &PlaylistSeeds,
     now: DateTime<Utc>,
-) {
+) -> Vec<String> {
     struct AlbumAggregate {
         album: String,
         content_hashes: Vec<String>,
@@ -552,7 +561,7 @@ fn push_lost_albums(
     // about individual *tracks* passed over; this is about whole *albums* not returned to.
     let lost: Vec<AlbumAggregate> = lost.into_iter().take(LOST_ALBUM_MAX_ALBUMS).collect();
     if lost.is_empty() {
-        return;
+        return Vec::new();
     }
     let subtitle = match lost.as_slice() {
         [only] => format!("{} hasn't been played in a while", only.album),
@@ -575,8 +584,9 @@ fn push_lost_albums(
         "lost-albums",
         "Lost Albums",
         &subtitle,
-        content_hashes,
+        content_hashes.clone(),
     );
+    content_hashes
 }
 
 /// Albums drawn into the "Lost Albums" shelf. Enough to feel like a real backlog without
@@ -2189,6 +2199,134 @@ mod tests {
         assert_eq!(albums[0].title, "Album One");
         assert_eq!(albums[1].title, "Album Two");
         assert!(!playlists.iter().any(|p| p.title == "Solo"));
+    }
+
+    /// Deep Cuts and Lost Albums are both "things you don't play", which is exactly why
+    /// they have to be told apart on sight. Asserted together, from one library, because
+    /// testing each alone proves each exists and says nothing about whether a listener
+    /// could tell which is which — the failure that prompted the split was two adjacent
+    /// rows of near-identical tiles.
+    #[test]
+    fn deep_cuts_covers_stray_tracks_and_lost_albums_covers_whole_records() {
+        let now = wednesday();
+        let now_secs = now.timestamp() as f64;
+        let mut tracks = Vec::new();
+        let mut listening = HashMap::new();
+
+        // A record played to death — belongs in neither shelf.
+        for i in 0..4 {
+            let hash = format!("loved-{i}");
+            tracks.push(track_full(&hash, Some("Artist"), Some("Loved Album"), None));
+            listening.insert(hash, summary(20, now_secs - 2.0 * 86_400.0, 1.0));
+        }
+        // A record left behind: every track played once, long ago. A whole album.
+        for i in 0..4 {
+            let hash = format!("dormant-{i}");
+            tracks.push(track_full(
+                &hash,
+                Some("Artist"),
+                Some("Dormant Album"),
+                None,
+            ));
+            listening.insert(hash, summary(3, now_secs - 400.0 * 86_400.0, 0.02));
+        }
+        // Strays: unplayed tracks scattered through a record otherwise well played, which
+        // is what "passed over" actually looks like — not a neglected album.
+        for i in 0..3 {
+            tracks.push(track_full(
+                &format!("stray-{i}"),
+                Some("Artist"),
+                Some("Loved Album"),
+                None,
+            ));
+        }
+        // A record never played at all. This is the case real data exposed: with no
+        // listening history whatsoever its tracks satisfy "never played" outright, so
+        // without care they land in Deep Cuts *and* Lost Albums at once.
+        for i in 0..4 {
+            tracks.push(track_full(
+                &format!("untouched-{i}"),
+                Some("Artist"),
+                Some("Untouched Album"),
+                None,
+            ));
+        }
+
+        let playlists = generate(
+            &PlaylistSeeds {
+                tracks,
+                listening,
+                ..Default::default()
+            },
+            now,
+            0,
+        );
+        let shelf = |id: &str| {
+            playlists
+                .iter()
+                .find(|playlist| playlist.id == id)
+                .unwrap_or_else(|| panic!("expected a {id} shelf"))
+        };
+        let cuts = shelf("deep-cuts");
+        let lost = shelf("lost-albums");
+
+        // Two shelves, not one shelf plus a card per album.
+        assert_eq!(
+            playlists
+                .iter()
+                .filter(|playlist| playlist.id.starts_with("lost-album"))
+                .count(),
+            1,
+            "the dormant albums belong on one shelf, not one shelf each"
+        );
+
+        // Deep Cuts holds the strays and nothing else: a track from a dormant album is
+        // not a stray, it is part of a record that has its own shelf.
+        assert!(
+            cuts.content_hashes.iter().all(|h| h.starts_with("stray-")),
+            "Deep Cuts should hold only passed-over tracks, got {:?}",
+            cuts.content_hashes
+        );
+        assert_eq!(cuts.content_hashes.len(), 3);
+
+        // Lost Albums holds whole records, and names them so the row is not anonymous.
+        assert!(
+            lost.content_hashes
+                .iter()
+                .all(|h| h.starts_with("dormant-") || h.starts_with("untouched-")),
+            "Lost Albums should hold whole neglected records, got {:?}",
+            lost.content_hashes
+        );
+        assert_eq!(
+            lost.content_hashes.len(),
+            8,
+            "whole records, not samples of them"
+        );
+        assert!(
+            lost.subtitle.contains("Dormant Album"),
+            "the shelf should say which record, got {:?}",
+            lost.subtitle
+        );
+
+        // Nothing appears in both, and the played-to-death record appears in neither.
+        assert!(
+            cuts.content_hashes
+                .iter()
+                .all(|hash| !lost.content_hashes.contains(hash)),
+            "a track cannot be both a stray and a lost record"
+        );
+        for shelf in [cuts, lost] {
+            assert!(
+                shelf
+                    .content_hashes
+                    .iter()
+                    .all(|h| !h.starts_with("loved-")),
+                "a record you keep playing is not lost, in {:?}",
+                shelf.id
+            );
+        }
+        // The subtitles are what a listener actually reads to tell the rows apart.
+        assert_ne!(cuts.subtitle, lost.subtitle);
     }
 
     #[test]
