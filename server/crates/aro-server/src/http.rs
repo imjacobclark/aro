@@ -48,7 +48,14 @@ pub struct AppState {
     pub display_name: String,
     /// Trust bootstrap exposed only through the filesystem-protected local
     /// control socket. Normal client traffic still uses pinned HTTPS.
+    ///
+    /// That socket is Unix-only, so on other platforms nothing reads these — they are
+    /// still populated because the state is built identically everywhere, and gating the
+    /// fields would mean gating every construction site to say something the doc comment
+    /// already says.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub tls_fingerprint: String,
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub https_port: u16,
     pub admin_token: String,
     /// Networks permitted to reach admin-only endpoints; enforced by
