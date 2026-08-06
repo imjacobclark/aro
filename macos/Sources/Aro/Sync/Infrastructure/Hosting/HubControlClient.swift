@@ -86,6 +86,20 @@ struct IdentificationStatus: Codable, Sendable {
     let processed: UInt64
     let failed: UInt64
     let lastError: String?
+    /// Tracks are fingerprinted individually but identified as folders, so this is the
+    /// unit of work that actually moves — three counters ticking one at a time say far
+    /// less than "on the fourth of nine albums".
+    let groupsQueued: UInt64?
+    let lastGroup: IdentificationGroupSummary?
+}
+
+/// The folder identification last finished with, so progress can name what it is doing
+/// rather than only count it.
+struct IdentificationGroupSummary: Codable, Sendable {
+    let folder: String?
+    let memberCount: UInt64?
+    let releaseTitle: String?
+    let accepted: Bool?
 }
 
 /// A file to (re-)identify, addressed by content hash and its absolute on-disk path

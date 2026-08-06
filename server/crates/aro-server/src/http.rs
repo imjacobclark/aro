@@ -262,6 +262,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/artwork/resolve", post(resolve_artwork))
         .route("/v1/metadata-overrides", post(set_manual_metadata))
         .route("/v1/metadata/deltas", get(metadata_deltas))
+        .route("/v1/identify/sweep", post(identify_sweep))
         .route("/v1/metadata/write-back", post(write_back_metadata))
         .route(
             "/v1/metadata/write-back/enabled",
@@ -2063,6 +2064,56 @@ async fn identify_tracks(
         }
     }
     Ok(Json(IdentifyTracksResponse { queued, unresolved }))
+}
+
+#[derive(Deserialize)]
+struct IdentifySweepRequest {
+    #[serde(default)]
+    artist: Option<String>,
+    #[serde(default)]
+    album: Option<String>,
+    /// Re-identify tracks that already have a result. Off by default: a sweep is normally
+    /// asked for to fill gaps, and re-asking AcoustID about answered tracks spends a
+    /// rate-limited budget on questions already settled.
+    #[serde(default)]
+    include_identified: bool,
+}
+
+#[derive(Serialize)]
+struct IdentifySweepResponse {
+    queued: usize,
+}
+
+/// Identifies everything in scope, resolving that scope on the hub.
+///
+/// "Sync all" used to mean the client posting every content hash in the library, which
+/// grows with the library and means shipping the catalogue back to the machine that owns
+/// it to ask a question about it. An artist's name is enough — the hub knows which tracks
+/// that is.
+async fn identify_sweep(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<IdentifySweepRequest>,
+) -> Result<Json<IdentifySweepResponse>, ApiError> {
+    let device_id = require_device(&state, &headers)?;
+    require_contributor(&state, device_id)?;
+
+    let tracks = state.store.identification_scope(
+        request.artist.as_deref(),
+        request.album.as_deref(),
+        request.include_identified,
+    )?;
+    let identification = state.sources.identification();
+    let mut queued = 0;
+    for (hash, track_id) in tracks {
+        // Resolved one at a time rather than in the scope query: a track whose file has
+        // gone is not an error worth failing the sweep over, it just cannot be identified.
+        if let Ok(Some(path)) = state.store.live_path_for_track(track_id) {
+            identification.enqueue(hash, path);
+            queued += 1;
+        }
+    }
+    Ok(Json(IdentifySweepResponse { queued }))
 }
 
 /// Remote-client equivalent of the control socket's `identification_status` command —

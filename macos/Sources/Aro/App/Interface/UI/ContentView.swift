@@ -256,6 +256,7 @@ struct ContentView: View {
                 remoteHubInfo: $cachedRemoteHubInfo,
                 loadDeltas: metadataDeltaLoader,
                 writeBack: metadataWriteBack,
+                sweep: identifySweep,
                 loadWriteBackEnabled: metadataWriteBackEnabledLoader
             )
         } else if case .folder(let folderID) = store.selection,
@@ -837,6 +838,18 @@ struct ContentView: View {
         return { album in
             guard let remote = await remoteSyncContext else { return nil }
             return try? await remote.client.metadataDeltas(
+                album: album,
+                credential: remote.credential
+            )
+        }
+    }
+
+    private var identifySweep: ((String?, String?) async -> Int?)? {
+        guard profileRegistry.activeProfile?.kind == .remote else { return nil }
+        return { artist, album in
+            guard let remote = await remoteSyncContext else { return nil }
+            return try? await remote.client.identifySweep(
+                artist: artist,
                 album: album,
                 credential: remote.credential
             )

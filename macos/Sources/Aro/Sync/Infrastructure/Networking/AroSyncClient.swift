@@ -807,6 +807,38 @@ actor AroSyncClient {
         )
     }
 
+    /// Identifies everything matching a scope, resolved by the hub.
+    ///
+    /// Passing no artist or album means the whole library. The alternative — the client
+    /// enumerating its own copy of the catalogue and posting every content hash — grows
+    /// with the library and asks the machine that owns the catalogue a question the client
+    /// had to answer first.
+    func identifySweep(
+        artist: String? = nil,
+        album: String? = nil,
+        includeIdentified: Bool = false,
+        credential: HubDeviceCredential? = nil
+    ) async throws -> Int {
+        struct Request: Encodable {
+            let artist: String?
+            let album: String?
+            let includeIdentified: Bool
+
+            enum CodingKeys: String, CodingKey {
+                case artist
+                case album
+                case includeIdentified = "include_identified"
+            }
+        }
+        struct Response: Decodable { let queued: Int }
+        let response: Response = try await postAuthenticated(
+            "v1/identify/sweep",
+            body: Request(artist: artist, album: album, includeIdentified: includeIdentified),
+            credential: credential
+        )
+        return response.queued
+    }
+
     /// Writes Aro's metadata into these tracks' own files on the hub.
     ///
     /// Returns an outcome per track rather than a single success: a batch where some files

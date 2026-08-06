@@ -2807,6 +2807,70 @@ impl HubStore {
         Ok(rows)
     }
 
+    /// Which tracks an identification sweep should cover.
+    ///
+    /// Scope is resolved here rather than by the client, because the hub is what holds the
+    /// catalogue: "identify everything by this artist" is a question about the library, and
+    /// answering it client-side means sending the library over the wire first.
+    ///
+    /// Ordered newest-first by rowid so a sweep that is watched rather than waited out
+    /// starts with the tracks most likely to have just arrived.
+    pub fn identification_scope(
+        &self,
+        artist: Option<&str>,
+        album: Option<&str>,
+        include_identified: bool,
+    ) -> Result<Vec<(String, Uuid)>, StoreError> {
+        let connection = self.connection.lock();
+        let effective = |field: &str| {
+            format!(
+                "CASE WHEN json_extract(t.metadata, '$.manual_{field}_set') = 1 \
+                 THEN json_extract(t.metadata, '$.manual_{field}') \
+                 ELSE json_extract(t.metadata, '$.{field}') END"
+            )
+        };
+        let mut clauses = vec![
+            "t.tombstoned_at IS NULL".to_string(),
+            "t.purged_at IS NULL".to_string(),
+            "t.content_hash IS NOT NULL".to_string(),
+        ];
+        // Bound positionally and only when present: an unscoped sweep is the common case,
+        // and its SQL carries no placeholders at all, so binding a fixed pair would make
+        // "identify everything" the one call that always fails.
+        let mut bindings: Vec<&str> = Vec::new();
+        if let Some(artist) = artist {
+            clauses.push(format!("LOWER({}) = LOWER(?)", effective("artist")));
+            bindings.push(artist);
+        }
+        if let Some(album) = album {
+            clauses.push(format!("LOWER({}) = LOWER(?)", effective("album")));
+            bindings.push(album);
+        }
+        if !include_identified {
+            clauses.push(
+                "NOT EXISTS(SELECT 1 FROM identification_results r \
+                 WHERE r.content_hash = t.content_hash)"
+                    .to_string(),
+            );
+        }
+        let sql = format!(
+            "SELECT t.content_hash, t.hub_track_id FROM tracks t WHERE {} ORDER BY t.rowid DESC",
+            clauses.join(" AND ")
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(bindings), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?
+                        .parse()
+                        .unwrap_or_else(|_| Uuid::nil()),
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn live_path_for_track(&self, track_id: Uuid) -> Result<Option<PathBuf>, StoreError> {
         let row: Option<(String, String)> = self
             .connection
@@ -6171,6 +6235,71 @@ mod tests {
     /// — by re-querying each one, not by counting — because a migration that misses a table
     /// leaves the track playable while silently losing its history or its analysis, which
     /// is the failure this function exists to prevent.
+    #[test]
+    /// A sweep exists to fill gaps. Re-asking AcoustID about tracks it has already
+    /// answered for spends a rate-limited budget on settled questions, so identified
+    /// tracks are skipped unless the caller explicitly asks for them.
+    #[test]
+    fn a_sweep_skips_tracks_that_have_already_been_identified() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let identified = "a".repeat(64);
+        let unknown = "b".repeat(64);
+        {
+            let connection = store.connection.lock();
+            for (hash, artist) in [(&identified, "Grimes"), (&unknown, "Grimes")] {
+                connection
+                    .execute(
+                        "INSERT INTO tracks(hub_track_id, content_hash, metadata, field_versions) \
+                         VALUES (?1, ?2, ?3, '{}')",
+                        params![
+                            Uuid::new_v4().to_string(),
+                            hash,
+                            serde_json::json!({"artist": artist}).to_string()
+                        ],
+                    )
+                    .unwrap();
+            }
+            connection
+                .execute(
+                    "INSERT INTO identification_results(content_hash, title, identified_at) \
+                     VALUES (?1, 'Oblivion', unixepoch())",
+                    params![identified],
+                )
+                .unwrap();
+        }
+
+        let gaps = store.identification_scope(None, None, false).unwrap();
+        assert_eq!(
+            gaps.iter()
+                .map(|(hash, _)| hash.clone())
+                .collect::<Vec<_>>(),
+            vec![unknown.clone()],
+            "an already-identified track must not be queued again"
+        );
+
+        let everything = store.identification_scope(None, None, true).unwrap();
+        assert_eq!(everything.len(), 2, "asking for all should mean all");
+
+        // Scoping is what makes artist- and album-level syncs possible without the client
+        // enumerating the catalogue, so an unmatched scope must return nothing rather than
+        // quietly falling back to the whole library.
+        assert!(
+            store
+                .identification_scope(Some("Someone Else"), None, true)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .identification_scope(Some("grimes"), None, true)
+                .unwrap()
+                .len(),
+            2,
+            "artist matching is case-insensitive, as it is everywhere else"
+        );
+    }
+
     #[test]
     fn rekeying_a_content_hash_moves_every_table_that_identifies_a_track() {
         let directory = tempfile::tempdir().unwrap();

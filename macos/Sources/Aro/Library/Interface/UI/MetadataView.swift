@@ -52,6 +52,11 @@ struct MetadataView: View {
     /// alone — so the caller reports per track rather than pass or fail.
     var writeBack: (([String]) async -> [RemoteMetadataWriteBackOutcome]?)?
 
+    /// Identifies a scope the hub resolves itself — an artist, an album, or the whole
+    /// library when both are nil. `nil` when there is no hub, in which case syncing falls
+    /// back to posting the tracks the client already holds.
+    var sweep: ((String?, String?) async -> Int?)?
+
     /// Whether the hub permits its files to be modified at all. Asked before showing the
     /// action, so the app never offers a button it knows will be refused.
     var loadWriteBackEnabled: (() async -> Bool)?
@@ -544,9 +549,18 @@ struct MetadataView: View {
             summaryStat(label: "Failed", value: status?.failed ?? 0)
 
             if status?.inFlight == true {
-                Label("Identifying…", systemImage: "waveform")
-                    .font(AroFont.callout)
-                    .foregroundStyle(.secondary)
+                // Named rather than merely counted: identification works a folder at a
+                // time, so "Art Angels — 15 tracks" says what three ticking counters
+                // cannot, and the hub has been sending it all along.
+                Label(
+                    status?.lastGroup?.releaseTitle
+                        ?? status?.lastGroup?.folder.map(lastPathComponent)
+                        ?? "Identifying…",
+                    systemImage: "waveform"
+                )
+                .font(AroFont.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
             }
 
             Spacer()
@@ -579,6 +593,12 @@ struct MetadataView: View {
                 .padding(.horizontal, 20)
                 .padding(.bottom, 8)
         }
+    }
+
+    /// The hub reports a folder as an absolute path on its own filesystem, which is long
+    /// and mostly irrelevant here — the last component is the album.
+    private func lastPathComponent(_ path: String) -> String {
+        (path as NSString).lastPathComponent
     }
 
     private func summaryStat(label: String, value: UInt64) -> some View {
@@ -616,6 +636,19 @@ struct MetadataView: View {
         guard !songs.isEmpty else {
             statusMessage = "No songs with a readable local file were found "
                 + "(\(songs.count) song(s) had no usable file fingerprint)."
+            return
+        }
+        // Ask the hub to work out what "everything" is where possible: it holds the
+        // catalogue, and it can also see tracks this client never synced a folder for.
+        if let sweep {
+            if let queued = await sweep(nil, nil) {
+                statusMessage = queued == 0
+                    ? "Everything in this library has already been identified."
+                    : "Queued \(queued) track(s) for identification."
+            } else {
+                statusMessage = "The library didn't answer, so nothing was queued."
+            }
+            await refreshStatus()
             return
         }
         do {
