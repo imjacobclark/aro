@@ -169,15 +169,17 @@ jobs:
       # armhf from an archive that has never held it and the update fails outright.
       - name: Install ARMv7 cross compiler and target libraries
         run: |
-          sudo dpkg --add-architecture armhf
-          sudo sed -i 's|^deb \(http\|mirror+file\)|deb [arch=amd64] \1|' \
-            /etc/apt/sources.list
-          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
-            sudo sed -i '/^Types: deb$/a Architectures: amd64' \
-              /etc/apt/sources.list.d/ubuntu.sources
-          fi
           codename="$(lsb_release -cs)"
-          sudo tee /etc/apt/sources.list.d/armhf-ports.list >/dev/null <<EOF
+          sudo dpkg --add-architecture armhf
+          # The whole list is replaced rather than patched. The runner's sources resolve
+          # through a mirror file and span several files, and any entry left unscoped
+          # sends apt looking for armhf on archive.ubuntu.com/security.ubuntu.com, which
+          # have never carried it — one 404 there fails the entire update.
+          sudo rm -f /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources
+          sudo tee /etc/apt/sources.list >/dev/null <<EOF
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu ${codename} main universe
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu ${codename}-updates main universe
+          deb [arch=amd64] http://security.ubuntu.com/ubuntu ${codename}-security main universe
           deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports ${codename} main universe
           deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports ${codename}-updates main universe
           EOF

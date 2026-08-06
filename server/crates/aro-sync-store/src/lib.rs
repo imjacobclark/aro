@@ -6259,12 +6259,6 @@ mod tests {
         );
     }
 
-    /// Writing corrected tags into a file changes its bytes, and therefore the SHA-256 that
-    /// identifies the track everywhere. This asserts every hash-keyed table actually moved
-    /// — by re-querying each one, not by counting — because a migration that misses a table
-    /// leaves the track playable while silently losing its history or its analysis, which
-    /// is the failure this function exists to prevent.
-    #[test]
     /// A sweep exists to fill gaps. Re-asking AcoustID about tracks it has already
     /// answered for spends a rate-limited budget on settled questions, so identified
     /// tracks are skipped unless the caller explicitly asks for them.
@@ -6329,6 +6323,11 @@ mod tests {
         );
     }
 
+    /// Writing corrected tags into a file changes its bytes, and therefore the SHA-256 that
+    /// identifies the track everywhere. This asserts every hash-keyed table actually moved
+    /// — by re-querying each one, not by counting — because a migration that misses a table
+    /// leaves the track playable while silently losing its history or its analysis, which
+    /// is the failure this function exists to prevent.
     #[test]
     fn rekeying_a_content_hash_moves_every_table_that_identifies_a_track() {
         let directory = tempfile::tempdir().unwrap();
