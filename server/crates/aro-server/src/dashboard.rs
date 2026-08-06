@@ -54,6 +54,10 @@ pub fn router(state: DashboardState) -> Router {
         )
         .route("/api/v1/admin/pairing/approve", post(admin_approve_pairing))
         .route("/api/v1/admin/verify", post(admin_verify))
+        .route(
+            "/api/v1/admin/metadata-write-back",
+            get(admin_write_back).put(admin_set_write_back),
+        )
         .route_layer(middleware::from_fn_with_state(state.clone(), admin_guard));
 
     Router::new()
@@ -213,6 +217,37 @@ async fn admin_device_permission(
             "device_not_found",
             "Device not found.",
         ),
+        Err(error) => admin_internal(error),
+    }
+}
+
+/// Whether Aro may write its metadata into the library's own audio files.
+///
+/// Kept out of the `aro.toml` config form deliberately: everything there needs a restart
+/// to take effect, while this is read from the store on each request and applies at once.
+/// Presenting it alongside settings that don't take hold yet would be misleading about the
+/// one control here that changes files on disk.
+async fn admin_write_back(State(state): State<DashboardState>) -> Response {
+    match aro_track_id::tags::should_persist_to_files(&state.app.store) {
+        Ok(enabled) => Json(json!({"enabled": enabled})).into_response(),
+        Err(error) => admin_internal(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct WriteBackToggle {
+    enabled: bool,
+}
+
+async fn admin_set_write_back(
+    State(state): State<DashboardState>,
+    Json(request): Json<WriteBackToggle>,
+) -> Response {
+    match state.app.store.set_setting(
+        aro_track_id::tags::PERSIST_METADATA_SETTING,
+        &json!(request.enabled),
+    ) {
+        Ok(()) => Json(json!({"enabled": request.enabled})).into_response(),
         Err(error) => admin_internal(error),
     }
 }

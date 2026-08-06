@@ -423,6 +423,95 @@ mod tests {
         assert_eq!(title.aro.as_deref(), Some("Real Title"));
     }
 
+    /// A minimal valid silent WAV — a container for lofty to attach a tag to. A
+    /// zero-length `data` chunk is rejected by lofty's WAV decoder, so this writes a little
+    /// actual silence.
+    fn write_silent_wav(path: &std::path::Path) {
+        use std::io::Write;
+        let mut file = std::fs::File::create(path).unwrap();
+        let data = vec![0u8; 200];
+        file.write_all(b"RIFF").unwrap();
+        file.write_all(&(36 + data.len() as u32).to_le_bytes())
+            .unwrap();
+        file.write_all(b"WAVE").unwrap();
+        file.write_all(b"fmt ").unwrap();
+        file.write_all(&16u32.to_le_bytes()).unwrap();
+        file.write_all(&1u16.to_le_bytes()).unwrap();
+        file.write_all(&1u16.to_le_bytes()).unwrap();
+        file.write_all(&44_100u32.to_le_bytes()).unwrap();
+        file.write_all(&88_200u32.to_le_bytes()).unwrap();
+        file.write_all(&2u16.to_le_bytes()).unwrap();
+        file.write_all(&16u16.to_le_bytes()).unwrap();
+        file.write_all(b"data").unwrap();
+        file.write_all(&(data.len() as u32).to_le_bytes()).unwrap();
+        file.write_all(&data).unwrap();
+    }
+
+    /// The whole path, on a real file: verify it hasn't drifted, write Aro's values into
+    /// its tags, re-hash, and report the new identity. Asserted by reading the file back
+    /// from disk rather than trusting the return value, because the point of write-back is
+    /// what ends up in the file — everything else is bookkeeping about it.
+    #[test]
+    fn writing_back_changes_the_file_on_disk_and_its_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = HubStore::open(dir.path()).unwrap();
+        let path = dir.path().join("untagged.wav");
+        write_silent_wav(&path);
+        let (before_hash, _size) = aro_sync_core::hash_file(&path).unwrap();
+
+        // No tag at all — the rip-with-nothing case, which is exactly what a correction is
+        // worth making for, and which an "update existing fields only" write would skip.
+        assert!(
+            aro_track_id::tags::read_existing_tags(&path)
+                .title
+                .is_none()
+        );
+
+        let mut scope = track(
+            json!({
+                "title": "Real Title",
+                "artist": "Real Artist",
+                "album": "Real Album",
+                "genre": "Shoegaze",
+                "release_year": 1991,
+                "track_number": 3,
+                "manual_title": "Corrected By Hand",
+                "manual_title_set": true,
+            }),
+            Some(path.to_str().unwrap()),
+            false,
+        );
+        scope.content_hash = before_hash.clone();
+
+        let outcome = write_back_track(&store, &scope, false);
+        assert!(outcome.written, "error was: {:?}", outcome.error);
+
+        let tags = aro_track_id::tags::read_existing_tags(&path);
+        assert_eq!(
+            tags.title.as_deref(),
+            Some("Corrected By Hand"),
+            "the manual override is what the listener sees, so it is what gets written"
+        );
+        assert_eq!(tags.artist.as_deref(), Some("Real Artist"));
+        assert_eq!(tags.album.as_deref(), Some("Real Album"));
+        assert_eq!(tags.genre.as_deref(), Some("Shoegaze"));
+        assert_eq!(tags.release_year, Some(1991));
+        assert_eq!(tags.track_number, Some(3));
+
+        // Tags are part of the bytes, so the track's identity necessarily moved.
+        let (after_hash, _) = aro_sync_core::hash_file(&path).unwrap();
+        assert_ne!(after_hash, before_hash);
+        assert_eq!(
+            outcome.new_content_hash.as_deref(),
+            Some(after_hash.as_str())
+        );
+
+        // And the written file is now the drifted one from Aro's old point of view, so a
+        // second write against the stale hash must refuse rather than write twice.
+        let repeat = write_back_track(&store, &scope, false);
+        assert!(!repeat.written);
+    }
+
     /// A file whose bytes no longer match what Aro recorded has been changed by something
     /// else — another tagger, a re-rip, a sync. Writing Aro's values over it would discard
     /// that change with no way to know what it was, so the file is left exactly as found.
