@@ -2006,7 +2006,7 @@ async fn set_write_back_enabled(
 async fn set_manual_metadata(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(request): Json<crate::control::ManualMetadataRequest>,
+    Json(request): Json<crate::metadata_overrides::ManualMetadataRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let device_id = if bearer(&headers).is_some_and(|token| admin_token_matches(&state, token)) {
         state.hub_id
@@ -2014,7 +2014,7 @@ async fn set_manual_metadata(
         require_device(&state, &headers)?
     };
     Ok(Json(json!({
-        "updated": crate::control::apply_manual_metadata(&state, request, device_id)
+        "updated": crate::metadata_overrides::apply_manual_metadata(&state, request, device_id)
             .map_err(|error| ApiError::internal(error.to_string()))?
     })))
 }

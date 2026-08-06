@@ -6,6 +6,7 @@ mod dashboard;
 mod dlna;
 mod http;
 mod metadata_delta;
+mod metadata_overrides;
 mod playlists;
 mod sources;
 

@@ -144,7 +144,6 @@ impl SourceManager {
         Ok(manager)
     }
 
-    #[cfg(unix)]
     pub fn mode(&self) -> StorageMode {
         self.inner.mode
     }
