@@ -10,15 +10,19 @@ endif
 ifneq ($(filter server,$(MAKECMDGOALS)),)
 SCOPE := server
 endif
+ifneq ($(filter web,$(MAKECMDGOALS)),)
+SCOPE := web
+endif
 ifneq ($(filter all,$(MAKECMDGOALS)),)
 SCOPE := all
 endif
 
 .DEFAULT_GOAL := help
 
-.PHONY: help macos common server all build test run app install package doctor check \
+.PHONY: help macos web common server all build test run app install package doctor check \
 	common-build common-test common-run common-app common-install \
 	macos-build macos-test macos-run macos-app macos-install \
+	web-build web-test web-run web-package \
 	server-build server-test server-run server-package server-doctor \
 	all-build all-test all-run all-app all-install
 
@@ -28,8 +32,12 @@ help:
 	@echo "  make macos build     Build the macOS app"
 	@echo "  make macos test      Test the macOS app"
 	@echo "  make macos run       Run the macOS app"
-	@echo "  make macos app       Create macos/dist/Aro.app"
+	@echo "  make macos app       Create clients/macos/dist/Aro.app"
 	@echo "  make macos install   Install the app in ~/Applications"
+	@echo "  make web build       Build the web client"
+	@echo "  make web test        Lint and type-check the web client"
+	@echo "  make web run         Run the web client against a hub"
+	@echo "  make web package     Build the linux/arm/v7 container image"
 	@echo "  make common build    Build the shared library"
 	@echo "  make common test     Test the shared library"
 	@echo "  make server build    Build the library server"
@@ -44,7 +52,7 @@ help:
 	@echo ""
 	@echo "Hyphenated aliases such as 'make macos-build' also work."
 
-macos common server all:
+macos web common server all:
 	@:
 
 build:
@@ -84,19 +92,31 @@ common-install: common-build
 	@echo "AroCommon is a library; there is no app to install."
 
 macos-build:
-	swift build --package-path macos
+	swift build --package-path clients/macos
 
 macos-test:
-	swift test --package-path macos
+	swift test --package-path clients/macos
 
 macos-run:
-	swift run --package-path macos Aro
+	swift run --package-path clients/macos Aro
 
 macos-app:
-	./macos/scripts/build-app.sh
+	./clients/macos/scripts/build-app.sh
 
 macos-install:
-	./macos/scripts/install-app.sh
+	./clients/macos/scripts/install-app.sh
+
+web-build:
+	cd clients/web && npm run build
+
+web-test:
+	cd clients/web && npm run lint
+
+web-run:
+	cd clients/web && npm run dev
+
+web-package:
+	./clients/web/scripts/build-image.sh
 
 server-build:
 	cargo build --manifest-path server/Cargo.toml --workspace
@@ -126,7 +146,7 @@ all-install: common-build macos-install
 
 check: all-test
 	./scripts/check-legacy-brand.sh
-	./macos/scripts/check-architecture.sh
-	./macos/scripts/check-library-health-architecture.sh
+	./clients/macos/scripts/check-architecture.sh
+	./clients/macos/scripts/check-library-health-architecture.sh
 	cargo fmt --manifest-path server/Cargo.toml --all -- --check
 	cargo clippy --manifest-path server/Cargo.toml --workspace --all-targets -- -D warnings

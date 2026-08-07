@@ -25,11 +25,13 @@ library updated as files change.
 
 ## Repository layout
 
-Aro is a small monorepo with independently buildable Swift packages:
+Aro is a small monorepo with independently buildable packages:
 
 ```text
-common/   Cross-platform library models, policies, and use cases
-macos/    The macOS app, UI, audio engine, filesystem, and SQLite adapters
+common/          Cross-platform library models, policies, and use cases
+clients/macos/   The macOS app, UI, audio engine, filesystem, and SQLite adapters
+clients/web/     The mobile-first web client, served as a PWA
+server/          The Rust hub every client reads from
 ```
 
 `AroCommon` supports macOS and iOS, but there is intentionally no iOS app
@@ -55,8 +57,8 @@ The spaced commands requested above are aliases for conventional targets such
 as `make macos-build` and `make all-test`. Run `make help` for the complete
 command list.
 
-To work on the app in Xcode, open `macos/Package.swift`. To work directly with
-SwiftPM, use `swift build --package-path macos` or
+To work on the app in Xcode, open `clients/macos/Package.swift`. To work directly with
+SwiftPM, use `swift build --package-path clients/macos` or
 `swift build --package-path common`.
 
 ## Install as a Mac app
@@ -75,7 +77,7 @@ locally for this Mac. To only create the app bundle without installing it, run:
 make macos app
 ```
 
-The resulting bundle is at `macos/dist/Aro.app`. Drag that bundle into
+The resulting bundle is at `clients/macos/dist/Aro.app`. Drag that bundle into
 `/Applications` if you prefer a system-wide installation.
 
 ## Playback
@@ -106,7 +108,7 @@ The project uses
 [SFBAudioEngine](https://github.com/sbooth/SFBAudioEngine) and its bundled
 codec libraries. See `Package.resolved` and the dependency's `LICENSES`
 directory for the complete third-party license set. The resolved macOS
-dependency graph is stored at `macos/Package.resolved`.
+dependency graph is stored at `clients/macos/Package.resolved`.
 
 ## Library database
 

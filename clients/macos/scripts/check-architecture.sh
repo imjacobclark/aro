@@ -2,11 +2,11 @@
 
 set -eu
 
-repository_root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+repository_root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd)
 cd "$repository_root"
 
 common_root="common/Sources/AroCommon"
-macos_root="macos/Sources/Aro"
+macos_root="clients/macos/Sources/Aro"
 
 fail() {
     echo "Architecture check failed: $1" >&2
@@ -14,11 +14,11 @@ fail() {
 }
 
 test -f "common/Package.swift" || fail "Missing common Swift package."
-test -f "macos/Package.swift" || fail "Missing macOS Swift package."
+test -f "clients/macos/Package.swift" || fail "Missing macOS Swift package."
 test ! -f "Package.swift" || fail "The repository root must orchestrate packages, not own one."
 
-grep -q '\.package(path: "../common")' "macos/Package.swift" \
-    || fail "The macOS package must depend on ../common."
+grep -q '\.package(path: "../../common")' "clients/macos/Package.swift" \
+    || fail "The macOS package must depend on ../../common."
 
 if find "$common_root" -maxdepth 1 -name '*.swift' -print | grep -q .; then
     fail "Common Swift sources must live in an owning capability."

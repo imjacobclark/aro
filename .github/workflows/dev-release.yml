@@ -86,32 +86,32 @@ jobs:
 
       - name: Verify app and embedded helper
         run: |
-          test -x macos/dist/Aro.app/Contents/MacOS/Aro
-          test -x macos/dist/Aro.app/Contents/MacOS/aro-server
-          test -f macos/dist/Aro.app/Contents/Resources/Montserrat-Variable.ttf
-          plutil -lint macos/dist/Aro.app/Contents/Info.plist
+          test -x clients/macos/dist/Aro.app/Contents/MacOS/Aro
+          test -x clients/macos/dist/Aro.app/Contents/MacOS/aro-server
+          test -f clients/macos/dist/Aro.app/Contents/Resources/Montserrat-Variable.ttf
+          plutil -lint clients/macos/dist/Aro.app/Contents/Info.plist
           test "$(
             /usr/libexec/PlistBuddy \
               -c 'Print :CFBundleShortVersionString' \
-              macos/dist/Aro.app/Contents/Info.plist
+              clients/macos/dist/Aro.app/Contents/Info.plist
           )" = "${APP_VERSION}"
           test "$(
             /usr/libexec/PlistBuddy \
               -c 'Print :CFBundleVersion' \
-              macos/dist/Aro.app/Contents/Info.plist
+              clients/macos/dist/Aro.app/Contents/Info.plist
           )" = "${BUILD_NUMBER}"
-          plutil -lint macos/dist/Aro.app/Contents/Library/LaunchAgents/com.aro.server.plist
+          plutil -lint clients/macos/dist/Aro.app/Contents/Library/LaunchAgents/com.aro.server.plist
           codesign --verify --strict \
             --test-requirement '=identifier "com.imjacobclark.aro.server"' \
-            macos/dist/Aro.app/Contents/MacOS/aro-server
-          codesign --verify --deep --strict --verbose=2 macos/dist/Aro.app
+            clients/macos/dist/Aro.app/Contents/MacOS/aro-server
+          codesign --verify --deep --strict --verbose=2 clients/macos/dist/Aro.app
         env:
           APP_VERSION: ${{ needs.version.outputs.version }}
           BUILD_NUMBER: ${{ github.run_number }}
 
       - name: Smoke-test packaged app launch
         run: |
-          macos/dist/Aro.app/Contents/MacOS/Aro \
+          clients/macos/dist/Aro.app/Contents/MacOS/Aro \
             >"${RUNNER_TEMP}/aro-launch.log" 2>&1 &
           app_pid=$!
           sleep 3
@@ -131,7 +131,7 @@ jobs:
         run: |
           asset="Aro-v${VERSION}-macos-${ARCHITECTURE}.zip"
           ditto -c -k --sequesterRsrc --keepParent \
-            macos/dist/Aro.app "${asset}"
+            clients/macos/dist/Aro.app "${asset}"
           shasum -a 256 "${asset}" > "${asset}.sha256"
 
       - name: Upload signed app for release job

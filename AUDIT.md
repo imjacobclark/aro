@@ -1,6 +1,6 @@
 # Aro Codebase Audit
 
-Scope: `common/` (shared `AroCommon` Swift package), `macos/` (SwiftUI client), `server/` (Rust hub/sync server). ~26K LOC Swift + ~54K LOC Rust. Findings only — no fixes applied. Severity reflects realistic exploitability/impact given this is a self-hosted, LAN-facing personal media server, not a multi-tenant public service.
+Scope: `common/` (shared `AroCommon` Swift package), `clients/macos/` (SwiftUI client), `server/` (Rust hub/sync server). ~26K LOC Swift + ~54K LOC Rust. Findings only — no fixes applied. Severity reflects realistic exploitability/impact given this is a self-hosted, LAN-facing personal media server, not a multi-tenant public service.
 
 ## Summary — top issues by severity
 
@@ -55,7 +55,7 @@ Scope: `common/` (shared `AroCommon` Swift package), `macos/` (SwiftUI client), 
 ## Performance
 
 ### 1. [High] Synchronous main-thread SQLite polling loops
-`LibraryDatabase.withReadConnection`/`withConnection` (`macos/Sources/Aro/Shared/Infrastructure/Persistence/SQLite/LibraryDatabase.swift:76-91`) execute synchronously under an `NSRecursiveLock` with no dispatch to a background queue/actor. `StatsView.swift:58-63` and `LibraryHealthView.swift:26-31` both run `while !Task.isCancelled { <sync DB query>; sleep(5s) }` inside `.task`, which runs on the view's (main) actor — so every 5 seconds while those tabs are visible, the main thread blocks on synchronous SQLite work. `ContentView.swift:159-188` stacks three more main-actor polling loops (30s/15s/15s) on top.
+`LibraryDatabase.withReadConnection`/`withConnection` (`clients/macos/Sources/Aro/Shared/Infrastructure/Persistence/SQLite/LibraryDatabase.swift:76-91`) execute synchronously under an `NSRecursiveLock` with no dispatch to a background queue/actor. `StatsView.swift:58-63` and `LibraryHealthView.swift:26-31` both run `while !Task.isCancelled { <sync DB query>; sleep(5s) }` inside `.task`, which runs on the view's (main) actor — so every 5 seconds while those tabs are visible, the main thread blocks on synchronous SQLite work. `ContentView.swift:159-188` stacks three more main-actor polling loops (30s/15s/15s) on top.
 - **Direction:** move these query calls off the main actor (e.g., a background `actor` wrapper around `LibraryDatabase`, or dispatch via `Task.detached`), especially as library size grows.
 
 ### 2. [Medium] N+1 query pattern during library rescans
@@ -85,14 +85,14 @@ Scope: `common/` (shared `AroCommon` Swift package), `macos/` (SwiftUI client), 
 
 ### Confirmed non-issues
 - Zero `try!`/`as!` anywhere in the Swift codebase. Of 13 genuine force-unwraps, the ones sampled in `DevicesView.swift:693-694,757` and the Sync networking files (see Security section) are all guarded or provably safe on inspection — the grep-level count overstates real risk.
-- No `TODO`/`FIXME`/`HACK` markers anywhere in `macos/Sources/Aro`.
+- No `TODO`/`FIXME`/`HACK` markers anywhere in `clients/macos/Sources/Aro`.
 - Recent commit history (last ~20 commits) clusters around Library/Playback/Devices/Sync connection-repair bugs — consistent with these being the highest-touched, highest-complexity modules; no new distinct bug classes found beyond what's already been fixed or is listed above.
 
 ---
 
 ## Accessibility
 
-**Systemic gap, not a spot issue.** Of 37 SwiftUI view files under `macos/Sources/Aro/**/UI`, only 14 contain any accessibility modifier (`accessibilityLabel`/`Hint`/`Element`/`Value`), and most of those 14 have just one or two modifiers rather than comprehensive coverage — roughly a 38% file-touch rate that overstates actual depth of support.
+**Systemic gap, not a spot issue.** Of 37 SwiftUI view files under `clients/macos/Sources/Aro/**/UI`, only 14 contain any accessibility modifier (`accessibilityLabel`/`Hint`/`Element`/`Value`), and most of those 14 have just one or two modifiers rather than comprehensive coverage — roughly a 38% file-touch rate that overstates actual depth of support.
 
 - **[High]** Zero usage anywhere of `dynamicTypeSize`, `@ScaledMetric`, or `scaledMetric` — the app has no Dynamic Type support at all, meaning users who rely on larger system text sizes get no accommodation anywhere in the UI.
 - **[Medium]** `ConnectLibrarySheet.swift`, `OfflineMusicSettingsSheet.swift`, and most of `DevicesView.swift` (907 lines) — all complex, state-heavy sheets — have no accessibility modifiers at all, making them effectively unusable with VoiceOver.
@@ -104,5 +104,5 @@ Scope: `common/` (shared `AroCommon` Swift package), `macos/` (SwiftUI client), 
 ## Testing Gaps
 
 - `common/Tests/AroCommonTests`: 5 files / 802 LOC — covers `LibraryHealthAnalyzer`, `LibraryModels`, Stats dashboard loading, Playback application logic, Sync.
-- `macos/Tests/AroTests` + `Tests/Standalone`: 26 files / 4,216 LOC — covers AudioAnalysis, Devices, Library (AppKit table, scanner, application), Persistence, Playback (meter relay, now-playing, controller, safety, progressive media, streaming input, preferences), Sync (discovery, credential store, hosting prefs, pairing integration, persistence, protocol dates).
+- `clients/macos/Tests/AroTests` + `Tests/Standalone`: 26 files / 4,216 LOC — covers AudioAnalysis, Devices, Library (AppKit table, scanner, application), Persistence, Playback (meter relay, now-playing, controller, safety, progressive media, streaming input, preferences), Sync (discovery, credential store, hosting prefs, pairing integration, persistence, protocol dates).
 - **No dedicated tests found for:** Settings, Stats, App/Composition (`AroApp.swift`, `LibraryRuntime.swift`), Artist, Album, or DesignSystem modules. Given the main-thread polling loops (Performance #1) and the admin-channel security findings (Security #1-3) both live in code paths without direct test coverage identified here, these are reasonable priorities for new tests alongside any fixes.

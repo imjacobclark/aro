@@ -4,9 +4,9 @@ set -eu
 matches=$(
     git grep -n -i 'sonora' -- \
         . \
-        ':(exclude)macos/Sources/Aro/App/Composition/LegacyProductMigration.swift' \
-        ':(exclude)macos/Tests/AroTests/Persistence/LegacyProductMigrationTests.swift' \
-        ':(exclude)macos/scripts/install-app.sh' \
+        ':(exclude)clients/macos/Sources/Aro/App/Composition/LegacyProductMigration.swift' \
+        ':(exclude)clients/macos/Tests/AroTests/Persistence/LegacyProductMigrationTests.swift' \
+        ':(exclude)clients/macos/scripts/install-app.sh' \
         ':(exclude)scripts/check-legacy-brand.sh' \
         ':(exclude)README.md' \
         || true

@@ -3,9 +3,9 @@
 set -euo pipefail
 
 script_directory=${0:A:h}
-repository_root=${script_directory:h:h}
+repository_root=${script_directory:h:h:h}
 common_feature="$repository_root/common/Sources/AroCommon/LibraryHealth/LibraryHealthFeature.swift"
-macos_context="$repository_root/macos/Sources/Aro/LibraryHealth"
+macos_context="$repository_root/clients/macos/Sources/Aro/LibraryHealth"
 
 required_files=(
   "$common_feature"

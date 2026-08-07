@@ -101,8 +101,8 @@ cd aro
 make server doctor
 make check
 make macos app
-xattr -dr com.apple.quarantine macos/dist/Aro.app
-open macos/dist/Aro.app
+xattr -dr com.apple.quarantine clients/macos/dist/Aro.app
+open clients/macos/dist/Aro.app
 ```
 
 To build, install, and launch the app in the user Applications directory:
@@ -119,10 +119,16 @@ make all build
 make all test
 make server run
 make server package
+make web run
 ```
 
-See [the macOS guide](macos/README.md) for playback and architecture details,
-and [the server guide](server/README.md) for standalone hosting configuration,
+Clients live under `clients/`: `clients/macos` is the native app, and `clients/web` is a
+mobile-first PWA that runs on the machine hosting the hub and serves your library to any
+phone or browser on the network.
+
+See [the macOS guide](clients/macos/README.md) for playback and architecture details,
+[the web client guide](clients/web/README.md) for how it reaches the hub and how it is
+deployed, and [the server guide](server/README.md) for standalone hosting configuration,
 imports, pairing, verification, and Docker deployment.
 
 ## Development release automation

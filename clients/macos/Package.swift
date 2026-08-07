@@ -14,7 +14,7 @@ let package = Package(
         )
     ],
     dependencies: [
-        .package(path: "../common"),
+        .package(path: "../../common"),
         .package(
             url: "https://github.com/sbooth/SFBAudioEngine.git",
             exact: "0.13.0"
