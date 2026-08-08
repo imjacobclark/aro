@@ -219,6 +219,53 @@ impl EngagementSummary {
     }
 }
 
+/// One scanned file and the track it backs, straight off the join. Deliberately raw —
+/// turning `metadata` into codec, sample rate and the rest is the caller's business, and
+/// the store has no opinion about what library health means.
+#[derive(Debug, Clone)]
+pub struct LibraryCopyRow {
+    pub track_id: String,
+    pub content_hash: Option<String>,
+    /// The track's CRDT metadata, JSON-encoded.
+    pub metadata: String,
+    /// Absolute where the source has a root path, relative where it does not.
+    pub path: String,
+    pub size: i64,
+    pub available: bool,
+}
+
+/// Where a catalog page starts.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CatalogCursor {
+    /// Skip this many rows of the sorted catalogue. Correct only if nothing writes between
+    /// requests, which on a live hub is never true — see [`HubStore::catalog_page_from`].
+    Offset(u64),
+    /// Resume after this `hub_track_id`; `None` starts at the beginning. Walks the whole
+    /// catalogue exactly once regardless of what else is being written.
+    Keyset(Option<String>),
+}
+
+/// The sort key expressions for a catalog ordering, most significant first.
+///
+/// Kept as a list rather than one `ORDER BY` string because keyset paging has to compare
+/// against exactly the same expressions it orders by; deriving both from one definition is
+/// what stops the two drifting apart. `hub_track_id` is always last — unique and immutable,
+/// so no two rows ever tie.
+fn catalog_sort_keys(sort: Option<&str>) -> Vec<&'static str> {
+    const TITLE: &str = "LOWER(COALESCE(CASE WHEN json_extract(t.metadata, '$.manual_title_set') = 1 THEN json_extract(t.metadata, '$.manual_title') ELSE json_extract(t.metadata, '$.title') END, ''))";
+    const ARTIST: &str = "LOWER(COALESCE(CASE WHEN json_extract(t.metadata, '$.manual_artist_set') = 1 THEN json_extract(t.metadata, '$.manual_artist') ELSE json_extract(t.metadata, '$.artist') END, ''))";
+    const ALBUM: &str = "LOWER(COALESCE(CASE WHEN json_extract(t.metadata, '$.manual_album_set') = 1 THEN json_extract(t.metadata, '$.manual_album') ELSE json_extract(t.metadata, '$.album') END, ''))";
+    const DISC: &str = "COALESCE(CAST(CASE WHEN json_extract(t.metadata, '$.manual_disc_number_set') = 1 THEN json_extract(t.metadata, '$.manual_disc_number') ELSE json_extract(t.metadata, '$.disc_number') END AS INTEGER), 0)";
+    const TRACK: &str = "COALESCE(CAST(CASE WHEN json_extract(t.metadata, '$.manual_track_number_set') = 1 THEN json_extract(t.metadata, '$.manual_track_number') ELSE json_extract(t.metadata, '$.track_number') END AS INTEGER), 0)";
+    const ID: &str = "t.hub_track_id";
+
+    match sort.unwrap_or("title") {
+        "artist" => vec![ARTIST, ALBUM, DISC, TRACK, ID],
+        "album" => vec![ALBUM, ARTIST, DISC, TRACK, ID],
+        _ => vec![TITLE, ARTIST, ID],
+    }
+}
+
 /// The outcome of identifying one file, keyed by `content_hash` rather than
 /// `hub_track_id`. Content hash is the only identifier genuinely shared between this
 /// database and the macOS app's separate local library catalog (their track IDs are
@@ -598,12 +645,83 @@ impl HubStore {
         rows.collect::<Result<_, _>>().map_err(Into::into)
     }
 
+    /// Every scanned file the hub knows about, with the track it backs.
+    ///
+    /// One row per *copy* rather than per track: library health is entirely a question
+    /// about copies — the same bytes in two places, a file that moved, a folder whose
+    /// contents disagree — so collapsing them here would throw away the evidence. Tombstoned
+    /// and purged tracks are excluded; a track the listener has removed is not a problem to
+    /// report back to them.
+    ///
+    /// Unlike a client's own view, this covers every source the hub holds rather than one
+    /// machine's, which is the point: the hub is where the files actually are.
+    pub fn library_copies(&self) -> Result<Vec<LibraryCopyRow>, StoreError> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            r#"
+            SELECT t.hub_track_id, t.content_hash, t.metadata,
+                   sources.path, sf.relative_path, sf.size, sf.available
+            FROM source_files sf
+            JOIN sources ON sources.source_id = sf.source_id
+            JOIN tracks t ON t.hub_track_id = sf.hub_track_id
+            WHERE t.purged_at IS NULL AND t.tombstoned_at IS NULL
+            ORDER BY t.hub_track_id, sf.relative_path
+            "#,
+        )?;
+        let rows = statement.query_map([], |row| {
+            let root: Option<String> = row.get(3)?;
+            let relative: String = row.get(4)?;
+            Ok(LibraryCopyRow {
+                track_id: row.get(0)?,
+                content_hash: row.get(1)?,
+                metadata: row.get(2)?,
+                path: match root {
+                    Some(root) => format!("{}/{}", root.trim_end_matches('/'), relative),
+                    None => relative,
+                },
+                size: row.get(5)?,
+                available: row.get(6)?,
+            })
+        })?;
+        rows.collect::<Result<_, _>>().map_err(Into::into)
+    }
+
     /// Presentation-ready catalog page. The query is deliberately executed in
     /// SQLite so a streaming client never needs to download or group the whole
     /// library just to render one screen.
+    ///
+    /// Pages by row offset, which is only sound while nothing else is writing. Prefer
+    /// [`HubStore::catalog_page_from`] with [`CatalogCursor::Keyset`]; this remains because
+    /// clients released before keyset paging read `next_cursor` as an integer and stop
+    /// paging when it does not increase, so they cannot be handed an opaque token.
     pub fn catalog_page(
         &self,
         cursor: u64,
+        limit: u32,
+        query: Option<&str>,
+        sort: Option<&str>,
+    ) -> Result<CatalogPage, StoreError> {
+        self.catalog_page_from(CatalogCursor::Offset(cursor), limit, query, sort)
+    }
+
+    /// Catalog page positioned by either a row offset or the last track already seen.
+    ///
+    /// The keyset form exists because offsets are not stable here, and neither is any
+    /// ordering built from `t.metadata`. Titles and artists are under constant rewrite —
+    /// identification, artwork backfill, and any client editing a track all reorder rows —
+    /// so a walk that positions itself by *either* a row count or a sort key will return
+    /// some tracks twice and miss others entirely. A row moved behind the cursor is simply
+    /// never visited again.
+    ///
+    /// So the keyset walk orders by `hub_track_id`: unique, immutable, and untouched by any
+    /// edit. Every track is therefore returned exactly once no matter what else is being
+    /// written, at the cost of arriving in no presentational order — which is the right
+    /// trade, because a client paging the whole catalogue holds all of it and can sort far
+    /// more cheaply than the hub can guarantee a stable sorted walk. `sort` still applies to
+    /// the offset form, which existing clients depend on.
+    pub fn catalog_page_from(
+        &self,
+        cursor: CatalogCursor,
         limit: u32,
         query: Option<&str>,
         sort: Option<&str>,
@@ -614,21 +732,15 @@ impl HubStore {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(|value| format!("%{}%", value));
-        let order = match sort.unwrap_or("title") {
-            "artist" => "LOWER(COALESCE(CASE WHEN json_extract(t.metadata, '$.manual_artist_set') = 1 THEN json_extract(t.metadata, '$.manual_artist') ELSE json_extract(t.metadata, '$.artist') END, '')),
-                LOWER(COALESCE(CASE WHEN json_extract(t.metadata, '$.manual_album_set') = 1 THEN json_extract(t.metadata, '$.manual_album') ELSE json_extract(t.metadata, '$.album') END, '')),
-                COALESCE(CAST(CASE WHEN json_extract(t.metadata, '$.manual_disc_number_set') = 1 THEN json_extract(t.metadata, '$.manual_disc_number') ELSE json_extract(t.metadata, '$.disc_number') END AS INTEGER), 0),
-                COALESCE(CAST(CASE WHEN json_extract(t.metadata, '$.manual_track_number_set') = 1 THEN json_extract(t.metadata, '$.manual_track_number') ELSE json_extract(t.metadata, '$.track_number') END AS INTEGER), 0),
-                t.hub_track_id",
-            "album" => "LOWER(COALESCE(CASE WHEN json_extract(t.metadata, '$.manual_album_set') = 1 THEN json_extract(t.metadata, '$.manual_album') ELSE json_extract(t.metadata, '$.album') END, '')),
-                LOWER(COALESCE(CASE WHEN json_extract(t.metadata, '$.manual_artist_set') = 1 THEN json_extract(t.metadata, '$.manual_artist') ELSE json_extract(t.metadata, '$.artist') END, '')),
-                COALESCE(CAST(CASE WHEN json_extract(t.metadata, '$.manual_disc_number_set') = 1 THEN json_extract(t.metadata, '$.manual_disc_number') ELSE json_extract(t.metadata, '$.disc_number') END AS INTEGER), 0),
-                COALESCE(CAST(CASE WHEN json_extract(t.metadata, '$.manual_track_number_set') = 1 THEN json_extract(t.metadata, '$.manual_track_number') ELSE json_extract(t.metadata, '$.track_number') END AS INTEGER), 0),
-                t.hub_track_id",
-            _ => "LOWER(COALESCE(CASE WHEN json_extract(t.metadata, '$.manual_title_set') = 1 THEN json_extract(t.metadata, '$.manual_title') ELSE json_extract(t.metadata, '$.title') END, '')),
-                LOWER(COALESCE(CASE WHEN json_extract(t.metadata, '$.manual_artist_set') = 1 THEN json_extract(t.metadata, '$.manual_artist') ELSE json_extract(t.metadata, '$.artist') END, '')),
-                t.hub_track_id",
+
+        let keyset = matches!(cursor, CatalogCursor::Keyset(_));
+        let order = if keyset {
+            "t.hub_track_id".to_owned()
+        } else {
+            catalog_sort_keys(sort).join(", ")
         };
+        let after = matches!(&cursor, CatalogCursor::Keyset(Some(_)));
+
         let sql = format!(
             "SELECT t.hub_track_id, t.content_hash, t.metadata,\
              COALESCE((SELECT b.size FROM blobs b WHERE b.hash = t.content_hash),\
@@ -639,22 +751,37 @@ impl HubStore {
              (SELECT l.payload FROM loudness l WHERE l.content_hash = t.content_hash \
               ORDER BY l.algorithm_version DESC LIMIT 1) \
              FROM tracks t WHERE t.purged_at IS NULL AND t.tombstoned_at IS NULL \
-             {search} ORDER BY {order} LIMIT ?1 OFFSET ?2",
+             {search} {after} ORDER BY {order} LIMIT ? {offset}",
             search = if search.is_some() {
-                "AND (t.metadata LIKE ?3 OR t.content_hash LIKE ?3)"
+                "AND (t.metadata LIKE ? OR t.content_hash LIKE ?)"
             } else {
                 ""
-            }
+            },
+            after = if after { "AND t.hub_track_id > ?" } else { "" },
+            offset = if keyset { "" } else { "OFFSET ?" }
         );
+
+        // Bound positionally, in the order the placeholders appear above.
+        let mut bindings: Vec<rusqlite::types::Value> = Vec::new();
+        if let Some(search) = &search {
+            bindings.push(search.clone().into());
+            bindings.push(search.clone().into());
+        }
+        if let CatalogCursor::Keyset(Some(last)) = &cursor {
+            bindings.push(last.clone().into());
+        }
+        bindings.push((limit as i64).into());
+        if let CatalogCursor::Offset(offset) = cursor {
+            bindings.push((offset as i64).into());
+        }
+
         let mut statement = connection.prepare(&sql)?;
-        let mut rows = if let Some(search) = search {
-            statement.query(params![limit, cursor, search])?
-        } else {
-            statement.query(params![limit, cursor])?
-        };
+        let mut rows = statement.query(rusqlite::params_from_iter(bindings))?;
+        let mut last_id: Option<String> = None;
         let mut tracks = Vec::new();
         while let Some(row) = rows.next()? {
             let id: String = row.get(0)?;
+            last_id = Some(id.clone());
             let metadata: Value = serde_json::from_str::<Value>(&row.get::<_, String>(2)?)
                 .unwrap_or(Value::Object(Default::default()));
             let effective = |key: &str| {
@@ -737,8 +864,16 @@ impl HubStore {
         drop(rows);
         drop(statement);
         drop(connection);
-        let next_cursor =
-            (tracks.len() == limit as usize).then(|| (cursor + tracks.len() as u64).to_string());
+
+        // A short page is the last page, in either scheme.
+        let more = tracks.len() == limit as usize;
+        let next_cursor = match cursor {
+            CatalogCursor::Offset(offset) => {
+                more.then(|| (offset + tracks.len() as u64).to_string())
+            }
+            CatalogCursor::Keyset(_) => more.then(|| last_id.clone()).flatten(),
+        };
+
         let revision = self.latest_sequence()?;
         Ok(CatalogPage {
             tracks,
@@ -4566,6 +4701,32 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
             "#,
         )
     })?;
+
+    // Clears the phantom tracks a client's unmapped edit used to create.
+    //
+    // Before `materialize_operation` refused to create a track from a `track_state`
+    // operation, an edit naming a track id the hub had never seen — which is every edit a
+    // client makes before it has learned the hub's id, since the two id spaces are
+    // independent — inserted a row carrying only that edit. The result was an unplayable
+    // track with no content hash and no metadata, and enough of them collected into an
+    // "Unknown Artist — Unknown Album" entry in the catalogue that could be neither played
+    // nor removed: `/v1/library/tracks/remove` works by content hash, and these have none.
+    //
+    // The condition can only match that garbage. A contributed track always carries a
+    // content hash, and a scanned one always has a `source_files` row, so a track with
+    // neither has no bytes behind it anywhere and never had.
+    run_once(connection, 17, |connection| {
+        connection.execute_batch(
+            r#"
+            DELETE FROM tracks
+            WHERE content_hash IS NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM source_files
+                  WHERE source_files.hub_track_id = tracks.hub_track_id
+              );
+            "#,
+        )
+    })?;
     Ok(())
 }
 
@@ -4702,6 +4863,31 @@ fn materialize_operation(
     if Uuid::parse_str(&track_id).is_err() {
         return Ok(());
     }
+
+    // `track_state` is state *about* a track — a favourite, a manual correction, chosen
+    // artwork. It must never bring a track into existence.
+    //
+    // A client's local track ids are generated independently of the hub's and never
+    // coincide, so a client that pushes an edit before it has learned the hub's id sends
+    // one this database has never seen. Materialising that used to INSERT a brand-new row:
+    // no content hash, no title, no artist, unplayable — a phantom track carrying nothing
+    // but the artwork the listener had just chosen. Twenty-seven of them accumulated on one
+    // library from two artwork edits, and they collected in the catalogue as an "Unknown
+    // Artist — Unknown Album" record that could not be played or removed.
+    //
+    // A `track` upsert still creates, because that is what contributing music *is*.
+    let is_known = transaction
+        .query_row(
+            "SELECT 1 FROM tracks WHERE hub_track_id = ?1",
+            [&track_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if operation.entity_type == "track_state" && !is_known {
+        return Ok(());
+    }
+
     let existing: Option<(String, String, Option<i64>)> = transaction
         .query_row(
             "SELECT metadata, field_versions, tombstoned_at FROM tracks WHERE hub_track_id = ?1",
@@ -4922,6 +5108,302 @@ mod tests {
         assert!(page.tracks[0].loudness_analyzed_at.is_some());
         assert!(!page.tracks[0].available);
         assert!(page.tracks[0].byte_count.is_none());
+    }
+
+    /// Writes one track with a given title, so paging tests can arrange a known order.
+    fn seed_titled_track(store: &HubStore, title: &str) -> Uuid {
+        let track_id = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+        let timestamp = aro_sync_protocol::HybridTimestamp {
+            physical_millis: 1,
+            logical: 0,
+            device_id,
+        };
+        let mut field_versions = BTreeMap::new();
+        for field in ["content_hash", "title", "artist"] {
+            field_versions.insert(field.to_owned(), timestamp.clone());
+        }
+        store
+            .append_operations(&[Operation {
+                operation_id: Uuid::new_v4(),
+                device_id,
+                entity_type: "track".into(),
+                entity_id: track_id.to_string(),
+                kind: "upsert".into(),
+                payload: serde_json::json!({
+                    "content_hash": hex::encode(Sha256::digest(title.as_bytes())),
+                    "title": title,
+                    "artist": "Artist",
+                }),
+                field_versions,
+            }])
+            .unwrap();
+        track_id
+    }
+
+    /// Retitles a track, as identification does constantly on a live hub.
+    fn retitle(store: &HubStore, track_id: Uuid, title: &str) {
+        let device_id = Uuid::new_v4();
+        let timestamp = aro_sync_protocol::HybridTimestamp {
+            physical_millis: 2,
+            logical: 0,
+            device_id,
+        };
+        let mut field_versions = BTreeMap::new();
+        field_versions.insert("title".to_owned(), timestamp);
+        store
+            .append_operations(&[Operation {
+                operation_id: Uuid::new_v4(),
+                device_id,
+                entity_type: "track".into(),
+                entity_id: track_id.to_string(),
+                kind: "set_metadata".into(),
+                payload: serde_json::json!({ "title": title }),
+                field_versions,
+            }])
+            .unwrap();
+    }
+
+    /// Walks the whole catalogue a page at a time, retitling one track between pages so the
+    /// ordering shifts underneath the walk — exactly what identification does on a live hub.
+    fn page_through(store: &HubStore, keyset: bool, disturb: impl Fn()) -> Vec<Uuid> {
+        let mut seen = Vec::new();
+        let mut cursor = if keyset {
+            CatalogCursor::Keyset(None)
+        } else {
+            CatalogCursor::Offset(0)
+        };
+        let mut disturbed = false;
+
+        loop {
+            let page = store.catalog_page_from(cursor, 2, None, None).unwrap();
+            seen.extend(page.tracks.iter().map(|track| track.track_id));
+
+            if !disturbed {
+                disturb();
+                disturbed = true;
+            }
+
+            let Some(next) = page.next_cursor else { break };
+            cursor = if keyset {
+                CatalogCursor::Keyset(Some(next))
+            } else {
+                CatalogCursor::Offset(next.parse().unwrap())
+            };
+        }
+        seen
+    }
+
+    /// The bug this paging exists to fix: a track retitled between two page requests moves
+    /// in the ordering, and every offset after it shifts. One track comes back twice and
+    /// another is never returned at all — which crashed the macOS client, because a repeated
+    /// song id reached a `Dictionary(uniqueKeysWithValues:)`.
+    #[test]
+    fn offset_paging_duplicates_and_skips_when_a_title_changes_mid_walk() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        for title in ["A", "B", "C", "D", "E", "F"] {
+            seed_titled_track(&store, title);
+        }
+        let moved = seed_titled_track(&store, "G");
+
+        // "G" sorts last, so the first page cannot contain it; retitling it to sort first
+        // pushes every later row one place along.
+        let seen = page_through(&store, false, || retitle(&store, moved, "AA"));
+
+        let unique: HashSet<_> = seen.iter().collect();
+        assert!(
+            unique.len() < seen.len() || seen.len() < 7,
+            "offset paging is expected to duplicate or skip here; saw {} rows, {} distinct",
+            seen.len(),
+            unique.len()
+        );
+    }
+
+    /// The same disturbance, paged by sort key: every track is returned exactly once.
+    #[test]
+    fn keyset_paging_returns_every_track_once_when_a_title_changes_mid_walk() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let mut expected: HashSet<Uuid> = HashSet::new();
+        for title in ["A", "B", "C", "D", "E", "F"] {
+            expected.insert(seed_titled_track(&store, title));
+        }
+        let moved = seed_titled_track(&store, "G");
+        expected.insert(moved);
+
+        let seen = page_through(&store, true, || retitle(&store, moved, "AA"));
+
+        let unique: HashSet<_> = seen.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            seen.len(),
+            "keyset paging must never return the same track twice: {seen:?}"
+        );
+        assert_eq!(
+            unique, expected,
+            "keyset paging must not skip a track that moved behind the cursor"
+        );
+    }
+
+    /// A client's local track ids never coincide with the hub's, so an edit pushed before
+    /// the client has learned the hub's id arrives naming a track this database has never
+    /// seen. It used to be materialised into a brand-new row — no content hash, no title,
+    /// unplayable — so choosing album artwork on a Mac quietly minted a phantom track per
+    /// track in the album, which then collected in the catalogue as an "Unknown Artist —
+    /// Unknown Album" record nobody could play or delete.
+    #[test]
+    fn a_track_state_edit_for_an_unknown_track_creates_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let stranger = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+        let timestamp = aro_sync_protocol::HybridTimestamp {
+            physical_millis: 1,
+            logical: 0,
+            device_id,
+        };
+        let mut field_versions = BTreeMap::new();
+        field_versions.insert("manual_artwork_set".to_owned(), timestamp.clone());
+        field_versions.insert("favourite".to_owned(), timestamp);
+
+        store
+            .append_operations(&[Operation {
+                operation_id: Uuid::new_v4(),
+                device_id,
+                entity_type: "track_state".into(),
+                entity_id: stranger.to_string(),
+                kind: "set_metadata".into(),
+                payload: serde_json::json!({
+                    "manual_artwork_set": true,
+                    "favourite": true,
+                }),
+                field_versions,
+            }])
+            .unwrap();
+
+        let page = store.catalog_page(0, 50, None, None).unwrap();
+        assert!(
+            page.tracks.is_empty(),
+            "an edit naming an unknown track invented one: {:?}",
+            page.tracks
+                .iter()
+                .map(|track| (&track.title, &track.content_hash))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// The guard stops new phantoms; hubs that already collected some need them cleared,
+    /// and they cannot be removed through the API because `/v1/library/tracks/remove` works
+    /// by content hash and a phantom has none.
+    #[test]
+    fn opening_a_store_clears_phantom_tracks_and_spares_real_ones() {
+        let directory = tempfile::tempdir().unwrap();
+        let real = {
+            let store = HubStore::open(directory.path()).unwrap();
+            let real = seed_titled_track(&store, "Real");
+
+            // Written straight to the table, since the code path that used to create these
+            // is exactly what has just been removed.
+            let connection = store.connection.lock();
+            connection
+                .execute(
+                    r#"INSERT INTO tracks (hub_track_id, content_hash, metadata, field_versions)
+                       VALUES (?1, NULL, '{"manual_artwork_set":true}', '{}')"#,
+                    [Uuid::new_v4().to_string()],
+                )
+                .unwrap();
+            // Forgets the repair, so reopening behaves like a hub that predates it — which
+            // is the only situation where phantoms can exist in the first place.
+            connection
+                .execute("DELETE FROM schema_migrations WHERE version = 17", [])
+                .unwrap();
+            drop(connection);
+            assert_eq!(
+                store.catalog_page(0, 50, None, None).unwrap().tracks.len(),
+                2
+            );
+            real
+        };
+
+        // Reopening runs the migration, which is where the repair lives.
+        let store = HubStore::open(directory.path()).unwrap();
+        let page = store.catalog_page(0, 50, None, None).unwrap();
+        assert_eq!(page.tracks.len(), 1, "the phantom should be gone");
+        assert_eq!(page.tracks[0].track_id, real, "the real track must survive");
+    }
+
+    /// The same edge must not break the legitimate case: an edit for a track the hub *does*
+    /// know still applies.
+    #[test]
+    fn a_track_state_edit_for_a_known_track_still_applies() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let track_id = seed_titled_track(&store, "Real");
+
+        let device_id = Uuid::new_v4();
+        let timestamp = aro_sync_protocol::HybridTimestamp {
+            physical_millis: 2,
+            logical: 0,
+            device_id,
+        };
+        let mut field_versions = BTreeMap::new();
+        field_versions.insert("favourite".to_owned(), timestamp);
+        store
+            .append_operations(&[Operation {
+                operation_id: Uuid::new_v4(),
+                device_id,
+                entity_type: "track_state".into(),
+                entity_id: track_id.to_string(),
+                kind: "set_metadata".into(),
+                payload: serde_json::json!({ "favourite": true }),
+                field_versions,
+            }])
+            .unwrap();
+
+        let page = store.catalog_page(0, 50, None, None).unwrap();
+        assert_eq!(page.tracks.len(), 1);
+        assert!(page.tracks[0].favourite);
+    }
+
+    /// A cursor naming a track that has since been removed must not strand the walk: the
+    /// comparison is `>`, so paging simply continues from wherever that id sat.
+    #[test]
+    fn a_cursor_for_a_vanished_track_continues_rather_than_stalling() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        for title in ["A", "B", "C"] {
+            seed_titled_track(&store, title);
+        }
+
+        let page = store
+            .catalog_page_from(
+                CatalogCursor::Keyset(Some(Uuid::nil().to_string())),
+                10,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            page.tracks.len(),
+            3,
+            "the nil UUID sorts before every real one, so nothing should be excluded"
+        );
+    }
+
+    /// Searching has to keep working while paging stably, since the two are independent.
+    #[test]
+    fn keyset_paging_still_honours_a_search_filter() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        seed_titled_track(&store, "Keeper");
+        seed_titled_track(&store, "Other");
+
+        let page = store
+            .catalog_page_from(CatalogCursor::Keyset(None), 10, Some("keeper"), None)
+            .unwrap();
+        assert_eq!(page.tracks.len(), 1);
+        assert_eq!(page.tracks[0].title, "Keeper");
     }
 
     #[test]

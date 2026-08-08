@@ -1,7 +1,7 @@
 use crate::{audio_metadata, sources::SourceManager};
 use aro_sync_core::{JobRegistry, PairingError, PairingManager};
 use aro_sync_protocol::*;
-use aro_sync_store::{HubStore, StoreError};
+use aro_sync_store::{CatalogCursor, HubStore, StoreError};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
@@ -255,6 +255,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/blobs/commit", post(commit_blob))
         .route("/v1/library/export-manifest", get(export_manifest))
         .route("/v1/library/sources", get(source_health))
+        .route("/v1/library/health", get(library_health))
         .route("/v1/topology", get(topology))
         .route("/v1/identify", post(identify_tracks))
         .route("/v1/identification/status", get(identification_status))
@@ -1024,10 +1025,16 @@ struct SnapshotQuery {
 
 #[derive(Deserialize)]
 struct CatalogQuery {
-    cursor: Option<u64>,
+    /// A row offset for the default paging, or the last seen `hub_track_id` for `stable`.
+    cursor: Option<String>,
     limit: Option<u32>,
     q: Option<String>,
     sort: Option<String>,
+    /// `stable` walks the catalogue by track id so a concurrent metadata write cannot make
+    /// the walk repeat or skip a track. Opt-in rather than the default because clients
+    /// released before it read `next_cursor` as an integer and stop paging when it does not
+    /// increase — handing those an id would silently truncate their library to one page.
+    paging: Option<String>,
 }
 
 async fn catalog(
@@ -1037,9 +1044,10 @@ async fn catalog(
 ) -> Result<Json<CatalogPage>, ApiError> {
     require_device_or_admin(&state, &headers)?;
     let store = state.store.clone();
+    let cursor = catalog_cursor(query.paging.as_deref(), query.cursor.as_deref());
     let page = tokio::task::spawn_blocking(move || {
-        store.catalog_page(
-            query.cursor.unwrap_or(0),
+        store.catalog_page_from(
+            cursor,
             query.limit.unwrap_or(50),
             query.q.as_deref(),
             query.sort.as_deref(),
@@ -1049,6 +1057,35 @@ async fn catalog(
     .map_err(ApiError::internal)?
     .map_err(ApiError::internal)?;
     Ok(Json(page))
+}
+
+/// A malformed offset restarts at zero rather than erroring — a client that has lost its
+/// place is better served a first page than a 400 it has no way to act on.
+fn catalog_cursor(paging: Option<&str>, cursor: Option<&str>) -> CatalogCursor {
+    if paging == Some("stable") {
+        CatalogCursor::Keyset(cursor.filter(|value| !value.is_empty()).map(str::to_owned))
+    } else {
+        CatalogCursor::Offset(cursor.and_then(|value| value.parse().ok()).unwrap_or(0))
+    }
+}
+
+/// Duplicates, alternate encodings, moved and missing files, and folders whose contents
+/// disagree about their album.
+///
+/// Reads every scanned copy and groups them, which is linear in the number of files rather
+/// than tracks — so it runs on the blocking pool like the catalogue does, rather than
+/// holding an async worker while SQLite walks the table.
+async fn library_health(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<crate::library_health::HealthReport>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    let store = state.store.clone();
+    let report = tokio::task::spawn_blocking(move || crate::library_health::review(&store))
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::internal)?;
+    Ok(Json(report))
 }
 
 async fn library_stats(
@@ -2518,6 +2555,49 @@ impl From<StoreError> for ApiError {
             aro_sync_store::StoreError::Blob(_) => Self::bad_request(&error.to_string()),
             _ => Self::internal(error),
         }
+    }
+}
+
+#[cfg(test)]
+mod catalog_paging_tests {
+    use super::*;
+
+    /// Clients released before stable paging send no `paging` at all, and read `next_cursor`
+    /// as an integer. They must keep getting offsets, or their libraries silently truncate
+    /// to a single page.
+    #[test]
+    fn a_client_that_does_not_ask_for_stable_paging_still_gets_offsets() {
+        assert_eq!(catalog_cursor(None, None), CatalogCursor::Offset(0));
+        assert_eq!(catalog_cursor(None, Some("50")), CatalogCursor::Offset(50));
+        assert_eq!(
+            catalog_cursor(Some("offset"), Some("100")),
+            CatalogCursor::Offset(100)
+        );
+    }
+
+    #[test]
+    fn stable_paging_carries_the_last_track_id() {
+        assert_eq!(
+            catalog_cursor(Some("stable"), None),
+            CatalogCursor::Keyset(None)
+        );
+        assert_eq!(
+            catalog_cursor(Some("stable"), Some("2b1f…")),
+            CatalogCursor::Keyset(Some("2b1f…".to_owned()))
+        );
+        // An empty cursor is a first page, not a track named "".
+        assert_eq!(
+            catalog_cursor(Some("stable"), Some("")),
+            CatalogCursor::Keyset(None)
+        );
+    }
+
+    #[test]
+    fn a_nonsense_offset_restarts_instead_of_failing_the_request() {
+        assert_eq!(
+            catalog_cursor(None, Some("not-a-number")),
+            CatalogCursor::Offset(0)
+        );
     }
 }
 

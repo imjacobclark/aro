@@ -5,6 +5,7 @@ mod control;
 mod dashboard;
 mod dlna;
 mod http;
+mod library_health;
 mod metadata_delta;
 mod metadata_overrides;
 mod playlists;
