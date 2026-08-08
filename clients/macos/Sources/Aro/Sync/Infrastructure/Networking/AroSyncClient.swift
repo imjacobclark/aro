@@ -671,14 +671,27 @@ actor AroSyncClient {
 
     /// Server-owned, paginated catalog read. Streaming clients should use this
     /// instead of applying the complete CRDT replica merely to browse tracks.
+    ///
+    /// `stable` asks the hub to walk by track id rather than by row offset. The hub is
+    /// rewriting titles continuously — identification, artwork backfill, other clients
+    /// editing — and any walk positioned by row count or by a title returns some tracks
+    /// twice and misses others. The cost is that pages arrive in no presentational order,
+    /// so callers assembling a whole library sort it themselves.
     func catalog(
-        cursor: UInt64 = 0,
+        cursor: String? = nil,
         limit: UInt32 = 50,
         query: String? = nil,
         sort: String = "title",
+        stablePaging: Bool = true,
         credential: HubDeviceCredential? = nil
     ) async throws -> CatalogPage {
-        var path = "v1/library/catalog?cursor=\(cursor)&limit=\(limit)&sort=\(sort)"
+        var path = "v1/library/catalog?limit=\(limit)&sort=\(sort)"
+        if stablePaging {
+            path += "&paging=stable"
+        }
+        if let cursor, let encoded = cursor.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+            path += "&cursor=\(encoded)"
+        }
         if let query, let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
             path += "&q=\(encoded)"
         }
@@ -694,10 +707,39 @@ actor AroSyncClient {
         sort: String = "title",
         credential: HubDeviceCredential? = nil
     ) async throws -> CatalogPage {
-        var cursor: UInt64 = 0
+        do {
+            return try await walkCatalog(
+                stablePaging: true,
+                pageSize: pageSize,
+                query: query,
+                sort: sort,
+                credential: credential
+            )
+        } catch AroSyncClientError.httpError(let status, _) where status == 400 {
+            // A hub older than stable paging types the cursor as an integer and rejects a
+            // track id outright. Falling back keeps this app working against either, so the
+            // app and the hub never have to be upgraded in step.
+            return try await walkCatalog(
+                stablePaging: false,
+                pageSize: pageSize,
+                query: query,
+                sort: sort,
+                credential: credential
+            )
+        }
+    }
+
+    private func walkCatalog(
+        stablePaging: Bool,
+        pageSize: UInt32,
+        query: String?,
+        sort: String,
+        credential: HubDeviceCredential?
+    ) async throws -> CatalogPage {
+        var cursor: String?
         var tracks: [CatalogTrack] = []
         var seenTrackIDs: Set<UUID> = []
-        var seenCursors: Set<UInt64> = [cursor]
+        var seenCursors: Set<String> = []
         var revision: UInt64 = 0
 
         while true {
@@ -706,6 +748,7 @@ actor AroSyncClient {
                 limit: pageSize,
                 query: query,
                 sort: sort,
+                stablePaging: stablePaging,
                 credential: credential
             )
             revision = page.revision
@@ -713,9 +756,9 @@ actor AroSyncClient {
                 tracks.append(track)
             }
 
-            guard let rawCursor = page.nextCursor,
-                  let nextCursor = UInt64(rawCursor),
-                  nextCursor > cursor,
+            // A repeated cursor would loop forever; the hub should never send one, but a
+            // walk over someone else's library is not the place to trust that.
+            guard let nextCursor = page.nextCursor,
                   seenCursors.insert(nextCursor).inserted else {
                 return CatalogPage(
                     tracks: tracks,
@@ -736,9 +779,33 @@ actor AroSyncClient {
         pageSize: UInt32 = 200,
         credential: HubDeviceCredential? = nil
     ) async throws -> CatalogPage? {
+        do {
+            return try await catalogIfChanged(
+                from: knownRevision,
+                stablePaging: true,
+                pageSize: pageSize,
+                credential: credential
+            )
+        } catch AroSyncClientError.httpError(let status, _) where status == 400 {
+            // See `completeCatalog`: an older hub cannot read a track-id cursor.
+            return try await catalogIfChanged(
+                from: knownRevision,
+                stablePaging: false,
+                pageSize: pageSize,
+                credential: credential
+            )
+        }
+    }
+
+    private func catalogIfChanged(
+        from knownRevision: UInt64?,
+        stablePaging: Bool,
+        pageSize: UInt32,
+        credential: HubDeviceCredential?
+    ) async throws -> CatalogPage? {
         let first = try await catalog(
-            cursor: 0,
             limit: pageSize,
+            stablePaging: stablePaging,
             credential: credential
         )
         if knownRevision == first.revision {
@@ -746,20 +813,20 @@ actor AroSyncClient {
         }
         var tracks = first.tracks
         var seenTrackIDs = Set(first.tracks.map(\.trackID))
-        var cursor = first.nextCursor.flatMap(UInt64.init)
-        var seenCursors: Set<UInt64> = [0]
+        var cursor = first.nextCursor
+        var seenCursors: Set<String> = []
         while let current = cursor,
-              current > 0,
               seenCursors.insert(current).inserted {
             let page = try await catalog(
                 cursor: current,
                 limit: pageSize,
+                stablePaging: stablePaging,
                 credential: credential
             )
             for track in page.tracks where seenTrackIDs.insert(track.trackID).inserted {
                 tracks.append(track)
             }
-            cursor = page.nextCursor.flatMap(UInt64.init)
+            cursor = page.nextCursor
         }
         return CatalogPage(
             tracks: tracks,

@@ -126,6 +126,13 @@ final class LibraryStore {
     ) {
         serverArtworkByHash.merge(artworkByHash) { _, newest in newest }
         serverBaseURL = baseURL
+
+        // Belt and braces against a repeated track. The hub now walks the catalogue by
+        // track id so a page cannot repeat one, but this list also arrives from caches and
+        // older hubs, and a duplicate reaching the playback queue used to crash the app.
+        var seenTrackIDs = Set<UUID>()
+        let tracks = tracks.filter { seenTrackIDs.insert($0.trackID).inserted }
+
         serverCatalogSongs = tracks.map { track in
             let mediaURL = Self.mediaURL(
                 for: track.contentHash,
@@ -180,6 +187,14 @@ final class LibraryStore {
                 serverSongsBySource[sourceID, default: []].append(song)
             }
         }
+
+        // Display order is decided here rather than by the hub. The hub walks its catalogue
+        // by track id so that a concurrent metadata edit cannot make the walk repeat or skip
+        // a track — the price is that pages arrive unordered, and the client holds the whole
+        // library anyway, so sorting it is cheap. This also makes the server-backed library
+        // order identically to a local one, which `SongLibrary.aggregate` has always sorted.
+        serverCatalogSongs = SongLibrary.sorted(serverCatalogSongs)
+        serverSongsBySource = serverSongsBySource.mapValues(SongLibrary.sorted)
         // Deliberately does not add a row per hub source. Syncs lists connected
         // libraries; `setServerSources` owns that single row, and the per-source rows
         // this used to append are what overwrote the hub's own name.
