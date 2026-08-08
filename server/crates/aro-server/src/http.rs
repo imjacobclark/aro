@@ -2088,8 +2088,7 @@ async fn identify_tracks(
     headers: HeaderMap,
     Json(request): Json<IdentifyTracksRequest>,
 ) -> Result<Json<IdentifyTracksResponse>, ApiError> {
-    let device_id = require_device(&state, &headers)?;
-    require_contributor(&state, device_id)?;
+    require_contributor_or_admin(&state, &headers)?;
 
     let identification = state.sources.identification();
     let mut queued = 0;
@@ -2139,8 +2138,7 @@ async fn identify_sweep(
     headers: HeaderMap,
     Json(request): Json<IdentifySweepRequest>,
 ) -> Result<Json<IdentifySweepResponse>, ApiError> {
-    let device_id = require_device(&state, &headers)?;
-    require_contributor(&state, device_id)?;
+    require_contributor_or_admin(&state, &headers)?;
 
     let tracks = state.store.identification_scope(
         request.artist.as_deref(),
@@ -2366,12 +2364,15 @@ mod download_tests {
     }
 }
 
+/// Polling a job is the other half of starting one: `discover_artwork` already answers an
+/// admin-token caller with a job id, and without the same allowance here that caller could
+/// start work it could never watch finish.
 async fn job_status(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<SyncJob>, ApiError> {
-    require_device(&state, &headers)?;
+    require_device_or_admin(&state, &headers)?;
     state
         .jobs
         .get(id)
@@ -2384,7 +2385,7 @@ async fn cancel_job(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<SyncJob>, ApiError> {
-    require_device(&state, &headers)?;
+    require_device_or_admin(&state, &headers)?;
     state
         .jobs
         .cancel(id)
@@ -2453,6 +2454,24 @@ fn require_device_or_admin(state: &AppState, headers: &HeaderMap) -> Result<(), 
         return Ok(());
     }
     require_device(state, headers).map(|_| ())
+}
+
+/// Authorizes an action that *changes* the library rather than merely reading it, and
+/// returns the identity to attribute the change to.
+///
+/// The admin token stands in for the hub itself — the same substitution `remove_track`
+/// and `set_manual_metadata` already make. That is what lets a client co-located with the
+/// hub, holding its admin token but no device identity of its own, edit the library at
+/// all: pairing is a PAKE handshake meant for a user sitting in front of two devices, and
+/// a server-side process has no way to complete it. A paired device still has to hold
+/// contributor rights, and a read-only linked library still refuses everyone.
+fn require_contributor_or_admin(state: &AppState, headers: &HeaderMap) -> Result<Uuid, ApiError> {
+    if bearer(headers).is_some_and(|token| admin_token_matches(state, token)) {
+        return Ok(state.hub_id);
+    }
+    let device_id = require_device(state, headers)?;
+    require_contributor(state, device_id)?;
+    Ok(device_id)
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {
