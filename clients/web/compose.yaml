@@ -1,0 +1,20 @@
+# Local development against a real hub.
+#
+# Mercury itself does not use this file — there the container is started by a systemd unit
+# the deploy script installs, so that the web client comes back after a reboot the same
+# way `aro-server` does.
+services:
+  aro-web:
+    build:
+      context: .
+    # Host networking so `https://127.0.0.1:4848` means the hub, exactly as it will on the
+    # machine that hosts both.
+    network_mode: host
+    environment:
+      ARO_HUB_URL: ${ARO_HUB_URL:-https://127.0.0.1:4848}
+      ARO_ADMIN_TOKEN: ${ARO_ADMIN_TOKEN:?set ARO_ADMIN_TOKEN from the hub aro.toml}
+      ARO_HUB_CERT: /run/secrets/hub-cert.pem
+      PORT: ${PORT:-4851}
+    volumes:
+      - ${ARO_HUB_CERT:-./hub-cert.pem}:/run/secrets/hub-cert.pem:ro
+    restart: unless-stopped

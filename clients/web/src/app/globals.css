@@ -1,0 +1,189 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-violet: var(--violet);
+  --color-coral: var(--coral);
+  --color-amber: var(--amber);
+  --color-navy: var(--navy);
+  --color-sidebar: var(--sidebar-surface);
+  --color-browser: var(--browser-surface);
+  --color-content: var(--content-surface);
+  --color-album: var(--album-surface);
+  --color-hairline: var(--hairline);
+
+  --font-sans: var(--font-montserrat);
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --radius-sm: 0.2rem;
+  --radius-md: 0.35rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
+}
+
+/*
+ * Ported from the macOS app's `AroTheme`, value for value. The brand three are sampled
+ * from the app icon's orbital ring; the four surfaces are the same calibrated RGB the
+ * SwiftUI app resolves per appearance. Keeping the numbers identical is the point — the
+ * two clients should look like one product on a desk side by side.
+ */
+:root {
+  --violet: #7359e0;
+  --coral: #ff737f;
+  --amber: #ffb03b;
+  --navy: #12172f;
+
+  --sidebar-surface: #eceff4;
+  --browser-surface: #f6f7f8;
+  --content-surface: #faf9f6;
+  --album-surface: #f8f8f5;
+
+  --background: var(--content-surface);
+  --foreground: var(--navy);
+  --card: #ffffff;
+  --card-foreground: var(--navy);
+  --popover: #ffffff;
+  --popover-foreground: var(--navy);
+  --primary: var(--violet);
+  --primary-foreground: #ffffff;
+  --secondary: var(--browser-surface);
+  --secondary-foreground: var(--navy);
+  --muted: var(--browser-surface);
+  --muted-foreground: color-mix(in oklch, var(--navy), transparent 42%);
+  --accent: var(--violet);
+  --accent-foreground: #ffffff;
+  --destructive: #c84451;
+  --hairline: color-mix(in oklch, var(--navy), transparent 91%);
+  --selected: color-mix(in oklch, var(--violet), transparent 89%);
+  --border: var(--hairline);
+  --input: var(--hairline);
+  --ring: var(--violet);
+  --radius: 0.5rem;
+
+  /* The orbit gradient, violet → coral → amber, as `AroTheme.orbitGradient` defines it. */
+  --orbit: linear-gradient(
+    120deg,
+    var(--violet) 0%,
+    var(--coral) 52%,
+    var(--amber) 100%
+  );
+
+  color-scheme: light;
+}
+
+.dark {
+  --sidebar-surface: #1b1d24;
+  --browser-surface: #202125;
+  --content-surface: #181717;
+  --album-surface: #222220;
+
+  --background: var(--content-surface);
+  --foreground: #f2f1ee;
+  --card: var(--album-surface);
+  --card-foreground: #f2f1ee;
+  --popover: #24242a;
+  --popover-foreground: #f2f1ee;
+  --primary: var(--violet);
+  --primary-foreground: #ffffff;
+  --secondary: var(--browser-surface);
+  --secondary-foreground: #f2f1ee;
+  --muted: var(--browser-surface);
+  --muted-foreground: color-mix(in oklch, #f2f1ee, transparent 45%);
+  --accent: var(--violet);
+  --accent-foreground: #ffffff;
+  --destructive: #ff707d;
+  --hairline: color-mix(in oklch, #ffffff, transparent 91%);
+  --selected: color-mix(in oklch, var(--violet), transparent 82%);
+  --border: var(--hairline);
+  --input: var(--hairline);
+  --ring: var(--violet);
+
+  color-scheme: dark;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    /* iOS bounces the document and drags the whole app with it. Each pane scrolls on its
+       own instead, which is what makes a tab bar stay put under a thumb. */
+    overscroll-behavior-y: none;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    -webkit-tap-highlight-color: transparent;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* A phone has no pointer to hover with and no room to spare, so the scrollbars that make
+     sense on a Mac only steal width here. */
+  @media (pointer: coarse) {
+    ::-webkit-scrollbar {
+      display: none;
+    }
+
+    * {
+      scrollbar-width: none;
+    }
+  }
+
+  button,
+  [role="button"] {
+    touch-action: manipulation;
+  }
+}
+
+@utility orbit-surface {
+  background-image: var(--orbit);
+  color: #ffffff;
+}
+
+@utility hide-scrollbar {
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* The area a fixed bottom bar must clear on a notched phone, so pages can pad themselves
+   by one name rather than repeating the same `env()` arithmetic. */
+@utility pb-player {
+  padding-bottom: calc(
+    var(--player-clearance, 0px) + env(safe-area-inset-bottom, 0px)
+  );
+}
+
+@keyframes aro-marquee {
+  0%,
+  12% {
+    transform: translateX(0);
+  }
+  88%,
+  100% {
+    transform: translateX(calc(-100% + var(--marquee-width, 0px)));
+  }
+}
