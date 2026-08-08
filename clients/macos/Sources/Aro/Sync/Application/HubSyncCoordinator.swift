@@ -37,10 +37,16 @@ actor HubSyncCoordinator {
         let pending = operations.pending(limit: 200)
         var outgoing = try pending.compactMap { pending -> SyncOperation? in
             if pending.entityType == "track_state" {
-                let hubTrackID = operations.hubTrackID(
+                // Held back rather than sent under this Mac's own id. Local track ids are
+                // generated independently of the hub's and never coincide, so an unmapped
+                // edit names a track the hub has never heard of — which it used to
+                // materialise into a phantom, unplayable track carrying nothing but the
+                // artwork just chosen. The edit stays in the outbox and goes out once the
+                // catalogue sync has taught this device the hub's id for the track.
+                guard let hubTrackID = operations.hubTrackID(
                     localTrackID: pending.entityID,
                     hubID: hubID
-                ) ?? pending.entityID
+                ) else { return nil }
                 return try pending.wireOperation(entityID: hubTrackID)
             }
             if pending.entityType == "listening_session" {
@@ -49,10 +55,10 @@ actor HubSyncCoordinator {
                       case .string(let localTrackID)? = payload["track_id"] else {
                     return nil
                 }
-                let hubTrackID = operations.hubTrackID(
+                guard let hubTrackID = operations.hubTrackID(
                     localTrackID: localTrackID,
                     hubID: hubID
-                ) ?? localTrackID
+                ) else { return nil }
                 payload["track_id"] = .string(hubTrackID)
                 return try pending.wireOperation(
                     payload: .object(payload)
@@ -155,10 +161,16 @@ actor HubMutationPushCoordinator {
         let pending = operations.pending(limit: 200)
         let outgoing = try pending.compactMap { pending -> SyncOperation? in
             if pending.entityType == "track_state" {
-                let hubTrackID = operations.hubTrackID(
+                // Held back rather than sent under this Mac's own id. Local track ids are
+                // generated independently of the hub's and never coincide, so an unmapped
+                // edit names a track the hub has never heard of — which it used to
+                // materialise into a phantom, unplayable track carrying nothing but the
+                // artwork just chosen. The edit stays in the outbox and goes out once the
+                // catalogue sync has taught this device the hub's id for the track.
+                guard let hubTrackID = operations.hubTrackID(
                     localTrackID: pending.entityID,
                     hubID: hubID
-                ) ?? pending.entityID
+                ) else { return nil }
                 return try pending.wireOperation(entityID: hubTrackID)
             }
             if pending.entityType == "listening_session" {
@@ -167,10 +179,10 @@ actor HubMutationPushCoordinator {
                       case .string(let localTrackID)? = payload["track_id"] else {
                     return nil
                 }
-                let hubTrackID = operations.hubTrackID(
+                guard let hubTrackID = operations.hubTrackID(
                     localTrackID: localTrackID,
                     hubID: hubID
-                ) ?? localTrackID
+                ) else { return nil }
                 payload["track_id"] = .string(hubTrackID)
                 return try pending.wireOperation(payload: .object(payload))
             }
