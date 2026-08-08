@@ -129,51 +129,17 @@ public struct LibraryStats: Codable, Sendable {
     }
 }
 
-public struct ListeningStreakCalculator: Sendable {
-    public init() {}
-
-    public func streak(
-        for dates: [Date],
-        now: Date,
-        calendar: Calendar = .current
-    ) -> Int {
-        let days = Set(dates.map { calendar.startOfDay(for: $0) })
-        var cursor = calendar.startOfDay(for: now)
-        if !days.contains(cursor),
-           let yesterday = calendar.date(
-               byAdding: .day,
-               value: -1,
-               to: cursor
-           ) {
-            cursor = yesterday
-        }
-
-        var streak = 0
-        while days.contains(cursor) {
-            streak += 1
-            guard let previous = calendar.date(
-                byAdding: .day,
-                value: -1,
-                to: cursor
-            ) else {
-                break
-            }
-            cursor = previous
-        }
-        return streak
-    }
-}
-
-public protocol StatsQuerying: Sendable {
-    func listeningStats(now: Date) -> ListeningStats
-    func libraryStats() -> LibraryStats
-}
-
+/// The hub's answer to "what is in this library and what has been played".
+///
+/// Decoded from `GET /v1/library/stats` and never computed on a client. Listening is
+/// aggregated by whichever hub a client is attached to — a Mac hosting its own library
+/// reports to the hub it is running — so there is exactly one set of numbers, and two
+/// clients looking at the same library always agree.
 public struct StatsDashboard: Codable, Sendable {
     public let listening: ListeningStats
     public let library: LibraryStats
-    /// What the library actually *is*, as opposed to how big it is. Optional because a
-    /// local library computes its dashboard without a hub, and older hubs don't report it.
+    /// What the library actually *is*, as opposed to how big it is. Optional only because
+    /// a hub older than this field does not report it.
     public let fidelity: FidelityStats?
 
     public init(
@@ -237,38 +203,5 @@ public struct DynamicRangeStats: Codable, Sendable {
         self.minCrestDb = minCrestDb
         self.maxCrestDb = maxCrestDb
         self.analyzedTracks = analyzedTracks
-    }
-}
-
-public struct LoadStatsDashboard: Sendable {
-    private let stats: any StatsQuerying
-    private let streakCalculator: ListeningStreakCalculator
-
-    public init(
-        stats: any StatsQuerying,
-        streakCalculator: ListeningStreakCalculator =
-            ListeningStreakCalculator()
-    ) {
-        self.stats = stats
-        self.streakCalculator = streakCalculator
-    }
-
-    /// Runs the underlying (synchronous, SQLite-backed) queries off the
-    /// calling actor, so repeated callers such as a UI polling loop don't
-    /// block the main thread.
-    public func execute(now: Date = Date()) async -> StatsDashboard {
-        let stats = stats
-        let streakCalculator = streakCalculator
-        return await Task.detached(priority: .utility) {
-            var listening = stats.listeningStats(now: now)
-            listening.currentStreak = streakCalculator.streak(
-                for: listening.daily.filter { $0.seconds > 0 }.map(\.date),
-                now: now
-            )
-            return StatsDashboard(
-                listening: listening,
-                library: stats.libraryStats()
-            )
-        }.value
     }
 }

@@ -5,13 +5,12 @@ import XCTest
 
 final class PlaybackApplicationTests: XCTestCase {
     @MainActor
-    func testListeningTrackerUsesOneLifecycleForHistoryAndLiveActivity() {
-        let history = RecordingHistory()
+    /// One listen produces one stream of snapshots to the hub, and nothing else. There used
+    /// to be a second, local recorder alongside this; the whole point of removing it was
+    /// that a library must not be able to answer "what have I played" two different ways.
+    func testListeningTrackerReportsOneLifecycleToTheHub() {
         let activity = RecordingActivity()
-        let tracker = ListeningSessionTracker(
-            history: history,
-            activity: activity
-        )
+        let tracker = ListeningSessionTracker(activity: activity)
         let start = Date(timeIntervalSince1970: 1_000)
         tracker.begin(
             trackID: UUID(),
@@ -29,9 +28,6 @@ final class PlaybackApplicationTests: XCTestCase {
         )
         tracker.end(completed: true)
 
-        XCTAssertEqual(history.begins, 1)
-        XCTAssertEqual(history.heartbeats, 1)
-        XCTAssertEqual(history.ends, 1)
         XCTAssertEqual(activity.snapshots.map(\.revision), [1, 2, 3])
         XCTAssertEqual(
             activity.snapshots.map(\.state),
@@ -112,6 +108,41 @@ final class PlaybackApplicationTests: XCTestCase {
         XCTAssertEqual(result.currentIndex, 0)
     }
 
+    /// The hub pages its catalogue by offset over rows ordered by metadata that background
+    /// identification is busy rewriting, so the same track can arrive on two consecutive
+    /// pages. That used to reach a `Dictionary(uniqueKeysWithValues:)` here and take the
+    /// whole app down mid-playback — a crash for a data condition the listener never sees.
+    func testQueueReconciliationSurvivesADuplicatedAvailableSong() {
+        let current = makeSong(id: "current", title: "Current")
+        let policy = PlaybackQueuePolicy()
+
+        let result = policy.reconcile(
+            queue: [current],
+            currentSong: current,
+            availableSongs: [current, current]
+        )
+
+        XCTAssertEqual(result.songs.map(\.title), ["Current"])
+        XCTAssertEqual(result.currentSong?.title, "Current")
+        XCTAssertEqual(result.currentIndex, 0)
+    }
+
+    /// A duplicate must not silently drop the *other* tracks around it either.
+    func testQueueReconciliationKeepsDistinctSongsAlongsideADuplicate() {
+        let current = makeSong(id: "current", title: "Current")
+        let other = makeSong(id: "selected", title: "Selected")
+        let policy = PlaybackQueuePolicy()
+
+        let result = policy.reconcile(
+            queue: [current, other],
+            currentSong: current,
+            availableSongs: [current, other, current]
+        )
+
+        XCTAssertEqual(result.songs.map(\.title), ["Current", "Selected"])
+        XCTAssertEqual(result.currentIndex, 0)
+    }
+
     private func makeSong(id: String, title: String) -> Song {
         let libraryID: UUID
         switch id {
@@ -132,30 +163,6 @@ final class PlaybackApplicationTests: XCTestCase {
             artist: "Artist",
             duration: 60
         )
-    }
-}
-
-private final class RecordingHistory:
-    ListeningHistoryRecording,
-    @unchecked Sendable
-{
-    var begins = 0
-    var heartbeats = 0
-    var ends = 0
-    var skips = 0
-
-    func beginSession(trackID: UUID) -> UUID {
-        begins += 1
-        return UUID()
-    }
-
-    func heartbeat(sessionID: UUID) {
-        heartbeats += 1
-    }
-
-    func endSession(sessionID: UUID, completed: Bool, skipped: Bool) {
-        ends += 1
-        if skipped { skips += 1 }
     }
 }
 

@@ -84,18 +84,8 @@ struct PersistenceAdapterChecks {
             )?.integratedLUFS == -15
         )
 
-        let history = SQLiteListeningHistoryRecorder(database: database)
-        let sessionID = history.beginSession(trackID: stored[0].libraryID)
-        Thread.sleep(forTimeInterval: 0.02)
-        history.endSession(sessionID: sessionID, completed: true)
-
-        let dashboard = LoadStatsDashboard(
-            stats: SQLiteStatsQuery(database: database)
-        ).execute()
-        precondition(dashboard.library.trackCount == 1)
-        precondition(dashboard.library.formats.first?.name == "FLAC")
-        precondition(dashboard.listening.loggedPlays == 1)
-        precondition(dashboard.listening.topTracks.first?.title == "Track")
+        // Listening and library statistics are no longer stored or computed here: they
+        // belong to the hub, which has its own coverage. See `StatsView`.
 
         try SQLiteTrackStateRepository(database: database).setHidden(
             trackID: stored[0].libraryID,

@@ -6,6 +6,13 @@ struct LibraryHealthView: View {
     @State private var report = LibraryHealthReport()
 
     let reviewLibraryHealth: ReviewLibraryHealth
+    /// The hub's own review, preferred when one is reachable.
+    ///
+    /// The local analysis only ever sees the copies on *this* machine, so a Mac used as a
+    /// remote client of a hub had almost nothing to look at. The hub holds every file, so
+    /// its answer is the complete one; the local pass remains the fallback for a library
+    /// with no hub attached.
+    var loadRemoteReport: (() async -> LibraryHealthReport?)?
 
     var body: some View {
         ScrollView {
@@ -25,8 +32,15 @@ struct LibraryHealthView: View {
         }
         .task {
             while !Task.isCancelled {
-                report = await reviewLibraryHealth.execute()
-                try? await Task.sleep(for: .seconds(5))
+                if let remote = await loadRemoteReport?() {
+                    report = remote
+                } else {
+                    report = await reviewLibraryHealth.execute()
+                }
+                // Scanning changes this slowly — a rescan, not a keystroke — and the remote
+                // form costs a round trip, so it is polled far less eagerly than the old
+                // local-only query was.
+                try? await Task.sleep(for: .seconds(30))
             }
         }
     }

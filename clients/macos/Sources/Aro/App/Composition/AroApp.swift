@@ -146,7 +146,6 @@ struct AroApp: App {
                 mediaCache: runtime.mediaCacheController,
                 libraryFiles: runtime.libraryFileManager,
                 reviewLibraryHealth: runtime.reviewLibraryHealth,
-                loadStatsDashboard: runtime.loadStatsDashboard,
                 syncStore: runtime.syncOperationStore,
                 removeSong: removeSong,
                 setSongFavourite: setSongFavourite,

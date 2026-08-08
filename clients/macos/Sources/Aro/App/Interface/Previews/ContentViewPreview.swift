@@ -28,7 +28,6 @@ struct ContentView_Previews: PreviewProvider {
             mediaCache: runtime.mediaCacheController,
             libraryFiles: runtime.libraryFileManager,
             reviewLibraryHealth: runtime.reviewLibraryHealth,
-            loadStatsDashboard: runtime.loadStatsDashboard,
             syncStore: runtime.syncOperationStore,
             removeSong: { _ in },
             setSongFavourite: { _, _ in },
@@ -43,16 +42,6 @@ struct ContentView_Previews: PreviewProvider {
 private struct PreviewLibraryHealthTracks: LibraryHealthTrackQuerying {
     func libraryHealthTracks() -> [LibraryHealthTrack] {
         []
-    }
-}
-
-private struct PreviewStatsQuery: StatsQuerying {
-    func listeningStats(now: Date) -> ListeningStats {
-        ListeningStats()
-    }
-
-    func libraryStats() -> LibraryStats {
-        LibraryStats()
     }
 }
 

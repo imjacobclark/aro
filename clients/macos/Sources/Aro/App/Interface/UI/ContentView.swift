@@ -103,7 +103,6 @@ struct ContentView: View {
     @Bindable var mediaCache: MediaCacheController
     let libraryFiles: any LibraryFileManaging
     let reviewLibraryHealth: ReviewLibraryHealth
-    let loadStatsDashboard: LoadStatsDashboard
     let syncStore: SQLiteSyncOperationStore
     let removeSong: (Song) async throws -> Void
     let setSongFavourite: (Song, Bool) async throws -> Void
@@ -194,11 +193,20 @@ struct ContentView: View {
         } else if store.selection == .stats {
             StatsView(
                 playback: playback,
-                loadStatsDashboard: loadStatsDashboard,
                 serverDashboard: cachedStatsDashboard
             )
         } else if store.selection == .libraryHealth {
-            LibraryHealthView(reviewLibraryHealth: reviewLibraryHealth)
+            LibraryHealthView(
+                reviewLibraryHealth: reviewLibraryHealth,
+                loadRemoteReport: {
+                    guard let connection = activeServerConnection else { return nil }
+                    // A hub that is briefly unreachable falls back to the local pass rather
+                    // than blanking the screen.
+                    return try? await connection.client.libraryHealth(
+                        credential: connection.credential
+                    )
+                }
+            )
         } else if store.selection == .settings {
             LibrarySettingsView(
                 library: store,

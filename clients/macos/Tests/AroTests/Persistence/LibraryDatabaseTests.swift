@@ -141,58 +141,6 @@ final class LibraryDatabaseTests: XCTestCase {
         XCTAssertTrue(reopened.songs(folderID: folderID).isEmpty)
     }
 
-    func testLibraryAndListeningStatsArePersisted() throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: directory,
-            withIntermediateDirectories: true
-        )
-        defer { try? FileManager.default.removeItem(at: directory) }
-
-        let databaseURL = directory.appendingPathComponent("Library.sqlite3")
-        let database = LibraryDatabase(url: databaseURL)
-        let folderID = UUID()
-        database.save(
-            folder: WatchedFolder(
-                id: folderID,
-                url: directory,
-                displayName: "Music",
-                bookmarkData: nil,
-                isAccessible: true,
-                didStartSecurityScope: false
-            )
-        )
-        let source = makeSong(
-            path: directory.appendingPathComponent("Track.flac").path,
-            contentHash: "stats-track"
-        )
-        let track = try XCTUnwrap(
-            database.reconcile(songs: [source], folderID: folderID).first
-        )
-
-        let recorder = SQLiteListeningHistoryRecorder(database: database)
-        let sessionID = recorder.beginSession(
-            trackID: track.libraryID
-        )
-        Thread.sleep(forTimeInterval: 0.02)
-        recorder.endSession(sessionID: sessionID, completed: true, skipped: false)
-
-        let reopened = LibraryDatabase(url: databaseURL)
-        let stats = SQLiteStatsQuery(database: reopened)
-        let library = stats.libraryStats()
-        XCTAssertEqual(library.trackCount, 1)
-        XCTAssertEqual(library.artistCount, 1)
-        XCTAssertEqual(library.formats.first?.name, "FLAC")
-        XCTAssertEqual(library.formats.first?.trackCount, 1)
-
-        let listening = stats.listeningStats(now: Date())
-        XCTAssertEqual(listening.loggedPlays, 1)
-        XCTAssertEqual(listening.uniqueTracksPlayed, 1)
-        XCTAssertEqual(listening.topTracks.first?.title, "Track")
-        XCTAssertGreaterThan(listening.totalSeconds, 0)
-    }
-
     func testArtworkIsPersistedAcrossDatabaseReopening() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

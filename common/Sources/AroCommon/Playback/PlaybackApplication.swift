@@ -108,7 +108,17 @@ public struct PlaybackQueuePolicy: Sendable {
     }
 
     public func reconcile(queue: [Song], currentSong: Song?, availableSongs: [Song]) -> ReconciledPlaybackQueue {
-        let availableByID = Dictionary(uniqueKeysWithValues: availableSongs.map { ($0.id, $0) })
+        // Deliberately not `Dictionary(uniqueKeysWithValues:)`, which traps on a repeated
+        // key. A duplicated song is a recoverable data condition, not a programming error:
+        // the hub pages its catalogue by offset over rows ordered by *mutable* metadata, so
+        // a track whose title changes between two page fetches can legitimately arrive on
+        // both pages. Trapping there kills the app mid-playback for something the listener
+        // cannot see and did not cause. `prepare` above already treats repeats as expected;
+        // this now agrees with it.
+        let availableByID = Dictionary(
+            availableSongs.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
         let songs = queue.compactMap { availableByID[$0.id] }
         let updatedCurrent = currentSong.flatMap { availableByID[$0.id] }
         return ReconciledPlaybackQueue(
@@ -148,24 +158,6 @@ public extension AudioPlaybackEngine {
     var bufferedFraction: Double { 1 }
     var isWaitingForData: Bool { false }
     func systemDefaultDeviceChanged(to device: AudioOutputDevice?) {}
-}
-
-public protocol ListeningHistoryRecording: Sendable {
-    func beginSession(trackID: UUID) -> UUID
-    func heartbeat(sessionID: UUID)
-    /// `skipped` is a real negative signal for Tier 1 behavioural playlists (see
-    /// `PlaybackController.startSong`'s doc comment for exactly when it's set) — a
-    /// track abandoned early and often should be treated differently from one simply
-    /// never played.
-    func endSession(sessionID: UUID, completed: Bool, skipped: Bool)
-}
-
-public struct NoOpListeningHistoryRecorder: ListeningHistoryRecording, Sendable {
-    public init() {}
-
-    public func beginSession(trackID: UUID) -> UUID { UUID() }
-    public func heartbeat(sessionID: UUID) {}
-    public func endSession(sessionID: UUID, completed: Bool, skipped: Bool) {}
 }
 
 public protocol PlaybackActivityReporting: Sendable {
@@ -252,7 +244,6 @@ public protocol PlaybackPreferenceStoring: Sendable {
 
 @MainActor
 public final class ListeningSessionTracker {
-    private let history: any ListeningHistoryRecording
     private let activity: any PlaybackActivityReporting
     private var sessionID: UUID?
     private var lastHeartbeat = Date.distantPast
@@ -265,11 +256,9 @@ public final class ListeningSessionTracker {
     private var output: PlaybackOutputSnapshot?
 
     public init(
-        history: any ListeningHistoryRecording,
         activity: any PlaybackActivityReporting =
             NoOpPlaybackActivityReporter()
     ) {
-        self.history = history
         self.activity = activity
     }
 
@@ -280,7 +269,7 @@ public final class ListeningSessionTracker {
         now: Date = Date()
     ) {
         guard sessionID == nil else { return }
-        sessionID = history.beginSession(trackID: trackID)
+        sessionID = UUID()
         self.contentHash = contentHash
         startedAt = now
         lastHeartbeat = now
@@ -308,7 +297,6 @@ public final class ListeningSessionTracker {
         at now: Date = Date()
     ) {
         guard now.timeIntervalSince(lastHeartbeat) >= 5, let sessionID else { return }
-        history.heartbeat(sessionID: sessionID)
         self.position = position
         self.duration = duration
         self.bufferedFraction = bufferedFraction
@@ -330,7 +318,6 @@ public final class ListeningSessionTracker {
 
     public func end(completed: Bool = false, skipped: Bool = false) {
         guard let sessionID else { return }
-        history.endSession(sessionID: sessionID, completed: completed, skipped: skipped)
         emit(state: .stopped, completed: completed, now: Date())
         self.sessionID = nil
         lastHeartbeat = .distantPast

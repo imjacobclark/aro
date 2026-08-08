@@ -7,14 +7,24 @@ private enum StatsMode: String, CaseIterable {
     case library = "Library"
 }
 
+/// Everything here comes from the hub, and nothing is computed locally.
+///
+/// Listening is aggregated by whichever hub a client is attached to — a Mac hosting its own
+/// library reports to the hub it is running, exactly as a phone reports to Mercury. There is
+/// therefore one set of numbers per library rather than one per client, which is the only
+/// way two devices looking at the same library can agree.
 struct StatsView: View {
     let playback: PlaybackController
-    let loadStatsDashboard: LoadStatsDashboard
+    /// `nil` until the hub has answered, and while it cannot be reached.
     let serverDashboard: StatsDashboard?
 
     @State private var mode: StatsMode = .listening
-    @State private var listening = ListeningStats()
-    @State private var library = LibraryStats()
+
+    // Read straight off the hub's answer rather than copied into local state. The copy was
+    // what the old five-second poll existed to keep fresh; with one authority there is
+    // nothing to reconcile, and the view simply re-renders when a newer dashboard arrives.
+    private var listening: ListeningStats { serverDashboard?.listening ?? ListeningStats() }
+    private var library: LibraryStats { serverDashboard?.library ?? LibraryStats() }
 
     var body: some View {
         ScrollView {
@@ -55,18 +65,6 @@ struct StatsView: View {
             .padding(.horizontal, 20)
             .padding(.top, 8)
             .padding(.bottom, 90)
-        }
-        .task(id: mode) {
-            while !Task.isCancelled {
-                await refresh()
-                try? await Task.sleep(for: .seconds(5))
-            }
-        }
-        .onChange(of: playback.currentSong?.id) {
-            Task { await refresh() }
-        }
-        .onChange(of: playback.state) {
-            Task { await refresh() }
         }
     }
 
@@ -333,17 +331,6 @@ struct StatsView: View {
 
     private var decadeBreakdown: some View {
         BreakdownList(title: "By Decade", values: library.decades)
-    }
-
-    private func refresh() async {
-        let dashboard: StatsDashboard
-        if let serverDashboard {
-            dashboard = serverDashboard
-        } else {
-            dashboard = await loadStatsDashboard.execute()
-        }
-        listening = dashboard.listening
-        library = dashboard.library
     }
 
     private func compactDuration(_ seconds: TimeInterval) -> String {

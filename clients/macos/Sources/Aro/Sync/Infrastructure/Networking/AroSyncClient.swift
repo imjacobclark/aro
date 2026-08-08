@@ -841,6 +841,21 @@ actor AroSyncClient {
         try await getAuthenticated("v1/library/stats", credential: credential)
     }
 
+    /// The hub's own library-health review.
+    ///
+    /// Asked of the hub rather than computed here because it is a question about *files*,
+    /// and this app only ever sees the copies on its own disk — for a remote client, almost
+    /// none of them. The hub holds them all.
+    func libraryHealth(
+        credential: HubDeviceCredential? = nil
+    ) async throws -> LibraryHealthReport {
+        let payload: HubLibraryHealthReport = try await getAuthenticated(
+            "v1/library/health",
+            credential: credential
+        )
+        return payload.asReport
+    }
+
     func topology(
         credential: HubDeviceCredential? = nil
     ) async throws -> RemoteTopologySnapshot {

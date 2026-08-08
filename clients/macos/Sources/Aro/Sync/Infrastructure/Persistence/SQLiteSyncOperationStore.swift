@@ -1388,8 +1388,8 @@ struct SQLiteSyncOperationStore {
                 // only ever contains what SourceManager scans, plus whatever this
                 // Mac itself pushes -- and this pull-only coordinator never
                 // pushes), so it would never actually appear here. Listening
-                // history stays purely local, recorded directly by
-                // SQLiteListeningHistoryRecorder.
+                // is not replicated at all: it is reported to the hub as it
+                // happens and aggregated there, so no client holds a copy.
                 for (field, version) in sequenced.fieldVersions {
                     try run(
                         """

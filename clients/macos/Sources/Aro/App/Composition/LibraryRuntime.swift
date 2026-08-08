@@ -10,7 +10,6 @@ final class LibraryRuntime {
     let playbackController: PlaybackController
     let mediaCacheController: MediaCacheController
     let reviewLibraryHealth: ReviewLibraryHealth
-    let loadStatsDashboard: LoadStatsDashboard
     let libraryFileManager: any LibraryFileManaging
     let syncOperationStore: SQLiteSyncOperationStore
     private let trackStateRepository: SQLiteTrackStateRepository
@@ -133,9 +132,6 @@ final class LibraryRuntime {
         reviewLibraryHealth = ReviewLibraryHealth(
             tracks: SQLiteLibraryHealthTrackQuery(database: database)
         )
-        loadStatsDashboard = LoadStatsDashboard(
-            stats: SQLiteStatsQuery(database: database)
-        )
         libraryStore = LibraryStore(
             manageFolders: ManageWatchedFolders(catalog: libraryCatalog),
             folderAccess: SecurityScopedFolderAccess(),
@@ -144,9 +140,6 @@ final class LibraryRuntime {
         playbackController = PlaybackController(
             preferences: playbackPreferences,
             loudnessService: loudnessService,
-            listeningHistory: SQLiteListeningHistoryRecorder(
-                database: database
-            ),
             playbackActivity: playbackActivity,
             nowPlayingPublisher: MPNowPlayingPublisher(),
             effectiveModeResolver: {
