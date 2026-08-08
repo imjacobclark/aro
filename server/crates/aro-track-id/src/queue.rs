@@ -787,6 +787,17 @@ const RECONCILE_BATCH: u32 = 25;
 /// there rather than giving up after one or two tries.
 const MAX_GROUP_RECONCILE_ATTEMPTS: i64 = 8;
 
+/// How many times a file may fail to *decode* before identification stops attempting it.
+///
+/// Deliberately much smaller than [`MAX_GROUP_RECONCILE_ATTEMPTS`], because the two failures
+/// are not alike. A rejected group match can genuinely converge later — affinity shifts,
+/// sibling folders appear — so those retries buy something. A file whose audio will not
+/// decode fails on its own bytes, identically, forever: the second attempt is already
+/// evidence, and the thousandth teaches nothing. A handful of attempts is enough to ride
+/// out a transient cause (an unreadable mount, a file still being copied in) while keeping
+/// the wasted work bounded. Cleared on any successful decode, so this is never permanent.
+const MAX_FINGERPRINT_FAILURES: i64 = 5;
+
 /// Revisits up to [`RECONCILE_BATCH`] folders whose files predate
 /// `crate::IDENTIFICATION_GENERATION` (see `HubStore::folders_needing_reconcile`), plus up
 /// to [`RECONCILE_BATCH`] more whose group match was rejected outright and hasn't yet
@@ -1070,6 +1081,21 @@ async fn prepare_file(
     let (fingerprint_base64, duration_secs) = match cached_fingerprint {
         Some(cached) => cached,
         None => {
+            // A file that has already proved undecodable this many times will prove it
+            // again; skip it before spending the decode rather than after.
+            let failures = store
+                .fingerprint_failure_count(&job.content_hash)
+                .unwrap_or(0);
+            if failures >= MAX_FINGERPRINT_FAILURES {
+                tracing::debug!(
+                    content_hash = %job.content_hash,
+                    path = %job.path.display(),
+                    failures,
+                    "skipping identification: audio has repeatedly failed to decode"
+                );
+                return Ok(None);
+            }
+
             let fingerprinted = {
                 let path = job.path.clone();
                 tokio::task::spawn_blocking(move || fingerprint::fingerprint_file(&path)).await?
@@ -1077,6 +1103,7 @@ async fn prepare_file(
             let fingerprint::FingerprintResult {
                 fingerprint_base64,
                 duration_secs,
+                truncated,
             } = match fingerprinted {
                 Ok(result) => result,
                 Err(fingerprint::Error::UnsupportedFormat(reason)) => {
@@ -1086,13 +1113,44 @@ async fn prepare_file(
                     );
                     return Ok(None);
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    // Count it before giving up, so a file that fails this way every time
+                    // eventually stops being tried at all.
+                    let attempts = store
+                        .record_fingerprint_failure(&job.content_hash, &error.to_string())
+                        .unwrap_or(0);
+                    if attempts >= MAX_FINGERPRINT_FAILURES {
+                        tracing::warn!(
+                            content_hash = %job.content_hash,
+                            path = %job.path.display(),
+                            attempts,
+                            %error,
+                            "giving up on identifying this file: audio will not decode"
+                        );
+                    }
+                    return Err(error.into());
+                }
             };
+            // Decoded this time, so any past failures are stale — a re-encoded or
+            // repaired file must not stay written off.
+            let _ = store.clear_fingerprint_failures(&job.content_hash);
+            if truncated {
+                // Worth saying out loud: the identification that follows is real, but it
+                // came from a file the decoder could not finish, so this is also the
+                // breadcrumb for anyone wondering why a track looks fine yet its file
+                // does not survive a full decode.
+                tracing::warn!(
+                    content_hash = %job.content_hash,
+                    path = %job.path.display(),
+                    "audio stream ended early; fingerprinted the part that decoded"
+                );
+            }
             tracing::info!(
                 content_hash = %job.content_hash,
                 path = %job.path.display(),
                 fingerprint_len = fingerprint_base64.len(),
                 duration_secs,
+                truncated,
                 "fingerprinted; querying acoustid"
             );
             fingerprint_cache.lock().unwrap().insert(

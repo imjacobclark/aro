@@ -82,10 +82,22 @@ pub enum Error {
     Io(#[from] std::io::Error),
 }
 
+/// The least audio worth submitting to AcoustID when a file's stream ends early. A
+/// fingerprint over a few seconds would match almost anything, so below this a truncated
+/// read is treated as the failure it is rather than quietly producing a bad identification.
+/// Chromaprint's own reference tool fingerprints 120s by default and matches well short of
+/// that; 30s is comfortably enough to be distinctive without discarding usable reads.
+const MIN_SALVAGE_SECS: u64 = 30;
+
 #[derive(Debug)]
 pub struct FingerprintResult {
     pub fingerprint_base64: String,
+    /// The track's real length, from the container where it declares one — not
+    /// necessarily the span that was fingerprinted. See `truncated`.
     pub duration_secs: u32,
+    /// Whether decoding stopped early and this fingerprint covers only the opening of
+    /// the file. The identification is still usable; the caller may want to say so.
+    pub truncated: bool,
 }
 
 /// Decodes `path` and computes its Chromaprint fingerprint, encoded exactly as the
@@ -120,6 +132,15 @@ pub fn fingerprint_file(path: &Path) -> Result<FingerprintResult, Error> {
     let track = format.default_track().ok_or(Error::NoAudioTrack)?.clone();
     let track_id = track.id;
 
+    // The container's own idea of how long the track is, which stays right even when
+    // decoding stops early. AcoustID matches on duration as well as fingerprint, so a
+    // salvaged read must still declare the track's real length rather than the length of
+    // the part that happened to decode.
+    let declared_secs = match (track.codec_params.n_frames, track.codec_params.time_base) {
+        (Some(frames), Some(time_base)) => Some(time_base.calc_time(frames).seconds),
+        _ => None,
+    };
+
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|error| match error {
@@ -142,16 +163,22 @@ pub fn fingerprint_file(path: &Path) -> Result<FingerprintResult, Error> {
     let mut sample_rate: u32 = 0;
     let mut interleaved = Vec::<i16>::new();
     let mut total_frames: u64 = 0;
-    loop {
+    // Why an error can end this loop without failing the fingerprint: see
+    // `salvage_secs`. `None` here means the stream ended cleanly.
+    let mut ended_by: Option<symphonia::core::errors::Error> = None;
+    'decode: loop {
         let packet = match format.next_packet() {
             Ok(packet) => packet,
             Err(symphonia::core::errors::Error::IoError(error))
                 if error.kind() == std::io::ErrorKind::UnexpectedEof =>
             {
-                break;
+                break 'decode;
             }
-            Err(symphonia::core::errors::Error::ResetRequired) => break,
-            Err(error) => return Err(error.into()),
+            Err(symphonia::core::errors::Error::ResetRequired) => break 'decode,
+            Err(error) => {
+                ended_by = Some(error);
+                break 'decode;
+            }
         };
         if packet.track_id() != track_id {
             continue;
@@ -159,7 +186,10 @@ pub fn fingerprint_file(path: &Path) -> Result<FingerprintResult, Error> {
         let decoded = match decoder.decode(&packet) {
             Ok(decoded) => decoded,
             Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                ended_by = Some(error);
+                break 'decode;
+            }
         };
 
         if context.is_none() {
@@ -192,6 +222,25 @@ pub fn fingerprint_file(path: &Path) -> Result<FingerprintResult, Error> {
     if total_frames == 0 {
         return Err(Error::Empty);
     }
+
+    // A stream that dies partway through is still worth identifying from, provided enough
+    // of it decoded. Chromaprint matches on the opening of a track, so the tail is the
+    // least valuable part of the file; throwing away 200 good seconds because second 201
+    // is unreadable helps nobody. Observed on the hub (armv7) and not on arm64 with the
+    // very same bytes: symphonia's ALAC decoder raises "unexpected end of bitstream"
+    // mid-file on a handful of tracks, which used to abort the whole fingerprint and,
+    // because a failed identification is retried, did so forever — one file burned 4,068
+    // decode attempts in a week. Note that error arrives as `ErrorKind::Other`, not
+    // `UnexpectedEof`, so the clean-EOF arms above never caught it.
+    let truncated = if let Some(error) = ended_by {
+        if salvage_secs(total_frames, sample_rate) < MIN_SALVAGE_SECS {
+            return Err(error.into());
+        }
+        true
+    } else {
+        false
+    };
+
     let context = context.expect("total_frames > 0 implies at least one packet was decoded");
 
     if unsafe { chromaprint_finish(context.0) } == 0 {
@@ -211,12 +260,24 @@ pub fn fingerprint_file(path: &Path) -> Result<FingerprintResult, Error> {
         chromaprint_dealloc(raw_fingerprint.cast());
         owned
     };
-    let duration_secs = (total_frames / u64::from(sample_rate)).clamp(1, u32::MAX as u64) as u32;
+    let duration_secs = declared_secs
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or_else(|| salvage_secs(total_frames, sample_rate))
+        .clamp(1, u32::MAX as u64) as u32;
 
     Ok(FingerprintResult {
         fingerprint_base64,
         duration_secs,
+        truncated,
     })
+}
+
+/// How many whole seconds of audio actually made it through the decoder.
+fn salvage_secs(total_frames: u64, sample_rate: u32) -> u64 {
+    if sample_rate == 0 {
+        return 0;
+    }
+    total_frames / u64::from(sample_rate)
 }
 
 /// Converts a decoded audio buffer of any sample format into interleaved i16 samples,
@@ -263,9 +324,23 @@ mod tests {
     /// real symphonia decode + libchromaprint FFI pipeline end to end without needing
     /// a real music file fixture.
     fn write_sine_wav(path: &Path, sample_rate: u32, channels: u16, seconds: f32) {
-        let frame_count = (sample_rate as f32 * seconds) as u32;
+        write_sine_wav_declaring(path, sample_rate, channels, seconds, seconds);
+    }
+
+    /// Writes a WAV whose header declares `declared_seconds` of audio but whose data
+    /// chunk only contains `actual_seconds` of it — a file that ends before it says it
+    /// will, which is the shape of the real failure this module now survives.
+    fn write_sine_wav_declaring(
+        path: &Path,
+        sample_rate: u32,
+        channels: u16,
+        declared_seconds: f32,
+        actual_seconds: f32,
+    ) {
+        let declared_frames = (sample_rate as f32 * declared_seconds) as u32;
+        let frame_count = (sample_rate as f32 * actual_seconds) as u32;
         let bit_depth = 16_u16;
-        let data_size = frame_count * u32::from(channels) * u32::from(bit_depth / 8);
+        let data_size = declared_frames * u32::from(channels) * u32::from(bit_depth / 8);
         let mut wav = Vec::with_capacity(44 + data_size as usize);
         wav.extend_from_slice(b"RIFF");
         wav.extend_from_slice(&(36 + data_size).to_le_bytes());
@@ -309,6 +384,41 @@ mod tests {
             result.duration_secs >= 4 && result.duration_secs <= 6,
             "expected duration close to 5s, got {}",
             result.duration_secs
+        );
+    }
+
+    /// A file that stops before its header says it should is still worth identifying, and
+    /// must still report the track's real length: AcoustID matches on duration alongside
+    /// the fingerprint, and `fpcalc` itself submits the full duration with a fingerprint
+    /// covering only the opening of the file. Reporting the decoded span instead would
+    /// quietly turn every salvaged read into a failed lookup.
+    #[test]
+    fn a_stream_that_ends_early_still_fingerprints_and_declares_its_real_length() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("truncated.wav");
+        write_sine_wav_declaring(&path, 44_100, 2, 90.0, 40.0);
+
+        let result = fingerprint_file(&path).expect("a partial read should still fingerprint");
+
+        assert!(!result.fingerprint_base64.is_empty());
+        assert!(
+            result.duration_secs >= 89 && result.duration_secs <= 91,
+            "expected the declared 90s, got {}",
+            result.duration_secs
+        );
+    }
+
+    /// The floor that stops a scrap of audio being passed off as an identification: a
+    /// fingerprint over a second or two would match almost anything in the database.
+    #[test]
+    fn the_salvage_floor_separates_a_usable_read_from_a_scrap() {
+        assert_eq!(salvage_secs(44_100 * 40, 44_100), 40);
+        assert!(salvage_secs(44_100 * 40, 44_100) >= MIN_SALVAGE_SECS);
+        assert!(salvage_secs(44_100 * 2, 44_100) < MIN_SALVAGE_SECS);
+        assert_eq!(
+            salvage_secs(44_100, 0),
+            0,
+            "an unknown sample rate must not divide by zero"
         );
     }
 

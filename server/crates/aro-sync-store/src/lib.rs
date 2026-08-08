@@ -3238,6 +3238,62 @@ impl HubStore {
         Ok(attempts)
     }
 
+    /// Records that `content_hash` could not be decoded for fingerprinting, returning how
+    /// many times that has now happened. Unlike a network or rate-limit failure, a decode
+    /// failure is a property of the bytes: the same file fails the same way every time, so
+    /// the only thing repetition buys is wasted CPU. `aro_track_id::queue` uses the count
+    /// to give up on a file rather than retrying it on every sweep for the life of the hub.
+    pub fn record_fingerprint_failure(
+        &self,
+        content_hash: &str,
+        error: &str,
+    ) -> Result<i64, StoreError> {
+        let now = chrono::Utc::now().timestamp();
+        let connection = self.connection.lock();
+        connection.execute(
+            r#"
+            INSERT INTO fingerprint_failures (content_hash, attempts, last_error, last_attempted_at)
+            VALUES (?1, 1, ?2, ?3)
+            ON CONFLICT(content_hash) DO UPDATE SET
+                attempts = fingerprint_failures.attempts + 1,
+                last_error = excluded.last_error,
+                last_attempted_at = excluded.last_attempted_at
+            "#,
+            params![content_hash, error, now],
+        )?;
+        let attempts = connection.query_row(
+            "SELECT attempts FROM fingerprint_failures WHERE content_hash = ?1",
+            [content_hash],
+            |row| row.get(0),
+        )?;
+        Ok(attempts)
+    }
+
+    /// How many times `content_hash` has failed to decode for fingerprinting.
+    pub fn fingerprint_failure_count(&self, content_hash: &str) -> Result<i64, StoreError> {
+        Ok(self
+            .connection
+            .lock()
+            .query_row(
+                "SELECT attempts FROM fingerprint_failures WHERE content_hash = ?1",
+                [content_hash],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
+    }
+
+    /// Forgets a file's decode failures, so a file that has since been repaired or
+    /// re-encoded gets a clean slate rather than staying given-up-on forever. Called on
+    /// every successful fingerprint, which is what makes recovery automatic.
+    pub fn clear_fingerprint_failures(&self, content_hash: &str) -> Result<(), StoreError> {
+        self.connection.lock().execute(
+            "DELETE FROM fingerprint_failures WHERE content_hash = ?1",
+            [content_hash],
+        )?;
+        Ok(())
+    }
+
     /// Distinct folders with at least `min_group_members` available files, none of which
     /// have ever landed a `group`-sourced (accepted) identification -- i.e. a folder whose
     /// group match was attempted and rejected outright (every member fell back to the
@@ -4619,6 +4675,21 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
         INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (12, unixepoch());
         "#,
     )?;
+    // A file whose audio cannot be decoded fails identically every time it is tried, so
+    // retrying it is pure waste — and identification retries automatically, which turned
+    // one undecodable track into 4,068 full decode attempts of a 26 MB file in a single
+    // week on a Raspberry Pi. Counting the failures per file is what lets the queue stop.
+    connection.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS fingerprint_failures (
+            content_hash TEXT PRIMARY KEY,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            last_attempted_at INTEGER NOT NULL
+        );
+        INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (18, unixepoch());
+        "#,
+    )?;
     // Affinity used to be a bare counter bumped on every identification, so re-running
     // identification inflated it without bound — a 355-track library had accumulated a
     // tally of 53,710 for one release group, which drowns out every genuine signal.
@@ -5963,6 +6034,37 @@ mod tests {
                 mood_tags: None,
             })
             .unwrap();
+    }
+
+    /// The counter that lets identification stop re-decoding a file that will never
+    /// decode. Without it one undecodable track drew 4,068 full decode attempts of a
+    /// 26 MB file in a week, because a failed identification is simply retried.
+    #[test]
+    fn fingerprint_failures_accumulate_per_file_and_reset_on_success() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let broken = "a".repeat(64);
+        let healthy = "b".repeat(64);
+
+        assert_eq!(store.fingerprint_failure_count(&broken).unwrap(), 0);
+
+        for expected in 1..=3 {
+            assert_eq!(
+                store
+                    .record_fingerprint_failure(&broken, "unexpected end of bitstream")
+                    .unwrap(),
+                expected
+            );
+        }
+        assert_eq!(store.fingerprint_failure_count(&broken).unwrap(), 3);
+
+        // One file's failures must not write off another's.
+        assert_eq!(store.fingerprint_failure_count(&healthy).unwrap(), 0);
+
+        // A file that is repaired or re-encoded gets a clean slate, so giving up is
+        // never permanent.
+        store.clear_fingerprint_failures(&broken).unwrap();
+        assert_eq!(store.fingerprint_failure_count(&broken).unwrap(), 0);
     }
 
     #[test]
