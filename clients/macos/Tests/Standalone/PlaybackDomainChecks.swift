@@ -46,19 +46,22 @@ struct PlaybackDomainChecks {
         )
     }
 
+    /// Heartbeats are rate-limited to one every five seconds, so a hub is not asked to
+    /// record a snapshot on every tick of the progress timer.
     private static func verifyListeningSessions() {
-        let history = RecordingHistory()
-        let tracker = ListeningSessionTracker(history: history)
+        let activity = RecordingActivity()
+        let tracker = ListeningSessionTracker(activity: activity)
         let trackID = UUID()
         let start = Date(timeIntervalSince1970: 100)
 
         tracker.begin(trackID: trackID, now: start)
+        precondition(activity.snapshots.count == 1)
         tracker.heartbeatIfNeeded(at: start.addingTimeInterval(4))
-        precondition(history.heartbeatCount == 0)
+        precondition(activity.snapshots.count == 1)
         tracker.heartbeatIfNeeded(at: start.addingTimeInterval(5))
-        precondition(history.heartbeatCount == 1)
+        precondition(activity.snapshots.count == 2)
         tracker.end(completed: true)
-        precondition(history.completed)
+        precondition(activity.snapshots.last?.completed == true)
     }
 
     private static func song(title: String) -> Song {
@@ -72,35 +75,18 @@ struct PlaybackDomainChecks {
     }
 }
 
-private final class RecordingHistory:
+private final class RecordingActivity:
     @unchecked Sendable,
-    ListeningHistoryRecording
+    PlaybackActivityReporting
 {
     private let lock = NSLock()
-    private var storedHeartbeatCount = 0
-    private var storedCompleted = false
+    private var stored: [PlaybackActivitySnapshot] = []
 
-    var heartbeatCount: Int {
-        lock.withLock { storedHeartbeatCount }
+    var snapshots: [PlaybackActivitySnapshot] {
+        lock.withLock { stored }
     }
 
-    var completed: Bool {
-        lock.withLock { storedCompleted }
-    }
-
-    func beginSession(trackID: UUID) -> UUID {
-        UUID()
-    }
-
-    func heartbeat(sessionID: UUID) {
-        lock.withLock {
-            storedHeartbeatCount += 1
-        }
-    }
-
-    func endSession(sessionID: UUID, completed: Bool) {
-        lock.withLock {
-            storedCompleted = completed
-        }
+    func report(_ snapshot: PlaybackActivitySnapshot) {
+        lock.withLock { stored.append(snapshot) }
     }
 }

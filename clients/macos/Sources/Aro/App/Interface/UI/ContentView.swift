@@ -298,7 +298,8 @@ struct ContentView: View {
                 loadRadio: { contentHash in
                     await homePlaylistsBridge.radio(contentHash: contentHash)
                 },
-                allSongs: store.allSongs
+                allSongs: store.allSongs,
+                setFavourite: setSongFavourite
             )
         }
     }
@@ -343,7 +344,20 @@ struct ContentView: View {
                 playback: playback,
                 preferences: preferences,
                 deviceManager: deviceManager,
-                setFavourite: setSongFavourite
+                setFavourite: setSongFavourite,
+                startRadio: { song in
+                    guard let contentHash = song.contentHash,
+                          let station = await homePlaylistsBridge.radio(
+                              contentHash: contentHash
+                          )
+                    else { return }
+                    let queue = SongLibrary.resolving(
+                        station.contentHashes,
+                        in: store.allSongs
+                    )
+                    guard let first = queue.first else { return }
+                    playback.play(song: first, queue: queue)
+                }
             )
             .padding(.horizontal, 24)
             .padding(.bottom, 16)

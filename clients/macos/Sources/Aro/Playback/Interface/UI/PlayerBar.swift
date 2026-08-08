@@ -7,6 +7,9 @@ struct PlayerBar: View {
     let preferences: PlaybackPreferences
     let deviceManager: AudioDeviceManager
     let setFavourite: (Song, Bool) async throws -> Void
+    /// Starts the hub's station for a track. `nil` where no hub is reachable, which hides
+    /// the control rather than offering one that cannot work.
+    var startRadio: ((Song) async -> Void)?
 
     @State private var isScrubbing = false
     @State private var scrubTime: TimeInterval = 0
@@ -95,6 +98,26 @@ struct PlayerBar: View {
                         .help(playback.currentSong?.title ?? "Not Playing")
 
                     Spacer(minLength: 0)
+
+                    // Radio sits beside the heart rather than among the transport
+                    // controls: both are actions on *this track*, where next/previous
+                    // act on the queue. Hidden rather than disabled when no hub can
+                    // answer, so the row does not advertise something unreachable.
+                    if startRadio != nil {
+                        Button {
+                            guard let song = playback.currentSong else { return }
+                            Task { await startRadio?(song) }
+                        } label: {
+                            Image(systemName: "dot.radiowaves.left.and.right")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(Color.secondary)
+                                .frame(width: 24, height: 24)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(playback.currentSong?.contentHash == nil)
+                        .help("Start a station from this track")
+                        .accessibilityLabel("Start radio from this track")
+                    }
 
                     Button(action: toggleFavourite) {
                         Image(

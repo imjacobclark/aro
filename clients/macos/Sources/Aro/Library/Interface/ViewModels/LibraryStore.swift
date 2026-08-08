@@ -79,6 +79,9 @@ final class LibraryStore {
     }
 
     var visibleSongs: [Song] {
+        if selection == .favourites {
+            return allSongs.filter(\.isFavourite)
+        }
         if usesServerCatalog {
             if case .folder(let id) = selection, id != Self.serverLibraryFolderID {
                 return serverSongsBySource[id] ?? []
@@ -88,7 +91,8 @@ final class LibraryStore {
         switch selection {
         case .folder(let id):
             return songsByFolder[id] ?? []
-        case .home, .songs, .artists, .albums, .stats, .libraryHealth, .settings, .metadata, .none:
+        case .home, .songs, .favourites, .artists, .albums, .stats, .libraryHealth,
+             .settings, .metadata, .none:
             return SongLibrary.aggregate(songsByFolder)
         }
     }
@@ -424,6 +428,8 @@ final class LibraryStore {
             return "Settings"
         case .metadata:
             return "Metadata"
+        case .favourites:
+            return "Favourites"
         case .songs, .none:
             return "Songs"
         }
@@ -433,7 +439,8 @@ final class LibraryStore {
         switch selection {
         case .folder(let id):
             return scanStates[id] ?? .idle
-        case .home, .songs, .artists, .albums, .stats, .libraryHealth, .settings, .metadata, .none:
+        case .home, .songs, .favourites, .artists, .albums, .stats, .libraryHealth,
+             .settings, .metadata, .none:
             if scanStates.values.contains(.scanning) {
                 return .scanning
             }

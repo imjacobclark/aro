@@ -9,13 +9,15 @@ an orchestration workspace rather than a Swift package:
 │   ├── Package.swift
 │   ├── Sources/AroCommon/
 │   └── Tests/AroCommonTests/
-├── macos/
-│   ├── Package.swift
-│   ├── Sources/Aro/
-│   ├── Tests/AroTests/
-│   ├── Assets/
-│   ├── Packaging/
-│   └── scripts/
+├── clients/
+│   ├── macos/
+│   │   ├── Package.swift
+│   │   ├── Sources/Aro/
+│   │   ├── Tests/AroTests/
+│   │   ├── Assets/
+│   │   ├── Packaging/
+│   │   └── scripts/
+│   └── web/
 └── Makefile
 ```
 
@@ -71,7 +73,7 @@ Interface -> Application -> Domain
 The source map is:
 
 ```text
-macos/Sources/Aro/
+clients/macos/Sources/Aro/
   App/
   AudioAnalysis/
   DesignSystem/
@@ -84,7 +86,7 @@ macos/Sources/Aro/
 ```
 
 The composition root is
-`macos/Sources/Aro/App/Composition/AroApp.swift`. It is the only place
+`clients/macos/Sources/Aro/App/Composition/AroApp.swift`. It is the only place
 that constructs the database and joins concrete adapters to application
 ports.
 

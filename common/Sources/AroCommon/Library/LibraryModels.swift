@@ -246,6 +246,24 @@ public enum SongLibrary {
         deduplicated(songsByFolder.values.flatMap { $0 })
     }
 
+    /// Resolves the hub's content hashes onto this library's songs.
+    ///
+    /// Everything the hub generates — playlists, radio, smart shuffle — answers in content
+    /// hashes, because that is the only identifier a client and the hub genuinely share.
+    /// Order is the hub's and is preserved: it ranked those tracks for a reason. Hashes this
+    /// library does not hold are dropped rather than faulted, since the hub's catalogue can
+    /// legitimately be wider than one client's.
+    public static func resolving(
+        _ contentHashes: [String],
+        in songs: [Song]
+    ) -> [Song] {
+        let songsByHash = Dictionary(
+            songs.compactMap { song in song.contentHash.map { ($0, song) } },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return contentHashes.compactMap { songsByHash[$0] }
+    }
+
     public static func deduplicated(_ songs: [Song]) -> [Song] {
         var uniqueSongs: [String: Song] = [:]
 

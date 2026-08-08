@@ -21,6 +21,8 @@ struct NavigationSidebar: View {
                     .tag(Destination.home)
                 navigationRow("Songs", systemImage: "music.note.list")
                     .tag(Destination.songs)
+                navigationRow("Favourites", systemImage: "heart.fill")
+                    .tag(Destination.favourites)
                 navigationRow("Artists", systemImage: "music.mic")
                     .tag(Destination.artists)
                 navigationRow("Albums", systemImage: "square.stack")

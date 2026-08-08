@@ -64,11 +64,11 @@ ditto "$info_plist" "$staged_contents/Info.plist"
     "$staged_contents/Info.plist"
 
 print "Building Aro sync helper…"
-cargo build --manifest-path "$project_dir/../server/Cargo.toml" \
+cargo build --manifest-path "$project_dir/../../server/Cargo.toml" \
     -p aro-server --release
-helper="$project_dir/../server/target/release/aro-server"
+helper="$project_dir/../../server/target/release/aro-server"
 ditto "$helper" "$staged_macos/aro-server"
-ditto "$project_dir/../server/packaging/com.aro.server.plist" \
+ditto "$project_dir/../../server/packaging/com.aro.server.plist" \
     "$staged_launch_agents/com.aro.server.plist"
 
 # aro-track-id links libchromaprint dynamically (LGPLv2.1 — see its src/fingerprint.rs

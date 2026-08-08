@@ -19,9 +19,46 @@ struct SongTableView: View {
     /// Full catalog for resolving the hub's content hashes — the visible `songs`
     /// are usually a subset (one playlist, one folder).
     var allSongs: [Song] = []
+    /// Supplied where the library is writable, so a row can be hearted without first
+    /// having to play it. Absent leaves the action off the menu entirely.
+    var setFavourite: ((Song, Bool) async throws -> Void)?
 
     @State private var songPendingRemoval: Song?
     @State private var removalError: String?
+
+    /// `nil` where no hub is reachable, which is what keeps the menu item off the row
+    /// rather than offering an action that could only fail.
+    private var startRadioAction: (@MainActor (Song) -> Void)? {
+        guard let loadRadio else { return nil }
+        return { song in
+            Task { await startRadio(from: song, using: loadRadio) }
+        }
+    }
+
+    private var toggleFavouriteAction: (@MainActor (Song) -> Void)? {
+        guard let setFavourite else { return nil }
+        return { song in
+            Task { try? await setFavourite(song, !song.isFavourite) }
+        }
+    }
+
+    /// Plays the hub's seed-track station for a row.
+    ///
+    /// Radio used to be reachable only from Home, which made it a browsing feature rather
+    /// than what it actually is: a property of any track you happen to be looking at.
+    /// Silence on failure is deliberate and matches `MoreLikeThisSection` — an unanalysed
+    /// seed or an unreachable hub is a station that does not exist yet, not an error the
+    /// listener can act on.
+    private func startRadio(
+        from song: Song,
+        using load: (String) async -> ServerGeneratedPlaylist?
+    ) async {
+        guard let contentHash = song.contentHash,
+              let station = await load(contentHash) else { return }
+        let queue = SongLibrary.resolving(station.contentHashes, in: allSongs)
+        guard let first = queue.first else { return }
+        playback.play(song: first, queue: queue)
+    }
 
     /// Prefer whatever is playing — the shelf then tracks what you're actually
     /// listening to — falling back to the top of the list so it's still populated
@@ -88,6 +125,10 @@ struct SongTableView: View {
                     onRequestRemoval: { song in
                         songPendingRemoval = song
                     },
+                    onStartRadio: startRadioAction,
+                    onToggleFavourite: toggleFavouriteAction,
+                    onPlayNext: { song in playback.playNext(song) },
+                    onAddToQueue: { song in playback.addToQueue(song) },
                     // The heading names the collection on screen, so it changes
                     // exactly when you navigate between one and another — which
                     // is when the table should re-centre on the playing track,

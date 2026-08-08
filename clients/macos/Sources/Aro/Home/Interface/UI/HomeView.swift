@@ -324,13 +324,7 @@ struct HomeView: View {
     }
 
     private func songs(for playlist: ServerGeneratedPlaylist) -> [Song] {
-        let songsByHash = Dictionary(
-            allSongs().compactMap { song in
-                song.contentHash.map { ($0, song) }
-            },
-            uniquingKeysWith: { first, _ in first }
-        )
-        return playlist.contentHashes.compactMap { songsByHash[$0] }
+        SongLibrary.resolving(playlist.contentHashes, in: allSongs())
     }
 
     private func play(_ playlist: ServerGeneratedPlaylist) {

@@ -78,8 +78,6 @@ final class PlaybackController {
         engine: (any AudioPlaybackEngine)? = nil,
         preferences: PlaybackPreferences = PlaybackPreferences(),
         loudnessService: any LoudnessAnalyzing = NoOpLoudnessAnalyzer(),
-        listeningHistory: any ListeningHistoryRecording =
-            NoOpListeningHistoryRecorder(),
         playbackActivity: any PlaybackActivityReporting =
             NoOpPlaybackActivityReporter(),
         nowPlayingPublisher: any NowPlayingPublishing =
@@ -109,10 +107,10 @@ final class PlaybackController {
         repeatMode = preferences.repeatMode
         volume = preferences.volume
         self.loudnessService = loudnessService
-        listeningSession = ListeningSessionTracker(
-            history: listeningHistory,
-            activity: playbackActivity
-        )
+        // One sink, and it is the hub's. Listening used to be written locally as well,
+        // which meant a library could answer "what have I played" two different ways
+        // depending on which client asked.
+        listeningSession = ListeningSessionTracker(activity: playbackActivity)
         self.nowPlayingPublisher = nowPlayingPublisher
         self.queuePolicy = queuePolicy
         self.visualizerSmoother = visualizerSmoother
@@ -205,6 +203,68 @@ final class PlaybackController {
         } else {
             queue = prepared.songs
             startSong(at: prepared.selectedIndex, skippingFailures: false)
+        }
+    }
+
+    /// Queues a song to play immediately after the current one.
+    func playNext(_ song: Song) {
+        insert(song, immediatelyAfterCurrent: true)
+    }
+
+    /// Queues a song at the end of the queue.
+    func addToQueue(_ song: Song) {
+        insert(song, immediatelyAfterCurrent: false)
+    }
+
+    /// Adds a song to an existing queue without disturbing what is playing.
+    ///
+    /// Two lists have to move together. `canonicalQueue` is the unshuffled order and is what
+    /// `toggleShuffle` rebuilds from, while `queue` is the order actually being played; an
+    /// insert into only one of them makes turning shuffle off resurrect a track that was
+    /// removed, or lose one that was added. `currentIndex` indexes `queue`, so it has to be
+    /// corrected whenever the insertion lands at or before the playing track.
+    ///
+    /// A song already in the queue is *moved* rather than duplicated. `PlaybackQueuePolicy`
+    /// treats a queue as unique by song id — `prepare` deduplicates on the way in — and a
+    /// duplicate would make `currentIndex` ambiguous the moment either copy was reached.
+    private func insert(_ song: Song, immediatelyAfterCurrent: Bool) {
+        // Nothing playing yet: "play next" and "add to queue" can only mean "play this".
+        guard let currentIndex, queue.indices.contains(currentIndex) else {
+            play(song: song, queue: [song])
+            return
+        }
+
+        guard !restrictsPlaybackToLocalMedia || localMediaAvailability(song) else {
+            fail("This song has not been downloaded and the library server is offline.")
+            return
+        }
+
+        var updatedIndex = currentIndex
+        if let existing = queue.firstIndex(where: { $0.id == song.id }) {
+            // Re-queueing the playing track would mean removing the ground from under it.
+            guard existing != currentIndex else { return }
+            queue.remove(at: existing)
+            if existing < updatedIndex {
+                updatedIndex -= 1
+            }
+        }
+
+        let destination = immediatelyAfterCurrent
+            ? updatedIndex + 1
+            : queue.count
+        queue.insert(song, at: min(destination, queue.count))
+        self.currentIndex = updatedIndex
+
+        canonicalQueue.removeAll { $0.id == song.id }
+        // The canonical order has no notion of "next", so an insert-after-current maps onto
+        // the position after the playing track there too, keeping the two consistent enough
+        // that turning shuffle off preserves the listener's intent.
+        if let canonicalCurrent = canonicalQueue.firstIndex(where: {
+            $0.id == queue[updatedIndex].id
+        }), immediatelyAfterCurrent {
+            canonicalQueue.insert(song, at: canonicalCurrent + 1)
+        } else {
+            canonicalQueue.append(song)
         }
     }
 
@@ -481,8 +541,12 @@ final class PlaybackController {
             availableSongs: availableSongs
         )
         queue = reconciled.songs
+        // Same reasoning as `PlaybackQueuePolicy.reconcile`: a repeated song id must not
+        // trap. This line sits one statement after that call, so a trapping variant here
+        // would simply move the crash rather than prevent it.
         let availableByID = Dictionary(
-            uniqueKeysWithValues: availableSongs.map { ($0.id, $0) }
+            availableSongs.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
         )
         canonicalQueue = canonicalQueue.compactMap {
             availableByID[$0.id]

@@ -123,17 +123,12 @@ struct MoreLikeThisSection: View {
             similar = []
             return
         }
-        let songsByHash = Dictionary(
-            allSongs.compactMap { song in
-                song.contentHash.map { ($0, song) }
-            },
-            uniquingKeysWith: { first, _ in first }
-        )
         // The station always leads with its own seed (see `playlists::radio`), which
         // would be a confusing first card in a row headed "more like *this*".
-        similar = station.contentHashes
-            .filter { $0 != contentHash }
-            .compactMap { songsByHash[$0] }
+        similar = SongLibrary.resolving(
+            station.contentHashes.filter { $0 != contentHash },
+            in: allSongs
+        )
     }
 
     private func tile(_ song: Song) -> some View {

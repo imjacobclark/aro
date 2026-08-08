@@ -700,6 +700,114 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertEqual(controller.state, .playing)
     }
 
+    func testPlayNextInsertsAfterTheCurrentTrackWithoutInterruptingIt() {
+        let engine = FakeAudioPlaybackEngine()
+        let controller = PlaybackController(engine: engine)
+        let songs = makeSongs(["Alpha", "Beta", "Gamma"])
+        let extra = makeSongs(["Delta"])[0]
+        defer { controller.stopAndClear() }
+
+        controller.play(song: songs[0], queue: songs)
+        controller.playNext(extra)
+
+        XCTAssertEqual(
+            controller.queue.map(\.title),
+            ["Alpha", "Delta", "Beta", "Gamma"]
+        )
+        // The listener's ears are the real assertion here: adding to a queue must never
+        // restart or replace what is already playing.
+        XCTAssertEqual(controller.currentSong, songs[0])
+        XCTAssertEqual(controller.currentIndex, 0)
+        XCTAssertEqual(controller.state, .playing)
+    }
+
+    func testAddToQueueAppendsWithoutInterruptingPlayback() {
+        let engine = FakeAudioPlaybackEngine()
+        let controller = PlaybackController(engine: engine)
+        let songs = makeSongs(["Alpha", "Beta"])
+        let extra = makeSongs(["Delta"])[0]
+        defer { controller.stopAndClear() }
+
+        controller.play(song: songs[0], queue: songs)
+        controller.addToQueue(extra)
+
+        XCTAssertEqual(controller.queue.map(\.title), ["Alpha", "Beta", "Delta"])
+        XCTAssertEqual(controller.currentSong, songs[0])
+        XCTAssertEqual(controller.currentIndex, 0)
+    }
+
+    /// A queue is unique by song id — `PlaybackQueuePolicy.prepare` deduplicates on the way
+    /// in, and a second copy would make `currentIndex` ambiguous the moment either was
+    /// reached. Re-queueing therefore moves rather than duplicates.
+    func testQueueingAnAlreadyQueuedTrackMovesItRatherThanDuplicating() {
+        let engine = FakeAudioPlaybackEngine()
+        let controller = PlaybackController(engine: engine)
+        let songs = makeSongs(["Alpha", "Beta", "Gamma"])
+        defer { controller.stopAndClear() }
+
+        controller.play(song: songs[0], queue: songs)
+        controller.playNext(songs[2])
+
+        XCTAssertEqual(controller.queue.map(\.title), ["Alpha", "Gamma", "Beta"])
+        XCTAssertEqual(controller.queue.count, 3, "no duplicate was introduced")
+        XCTAssertEqual(controller.currentSong, songs[0])
+        XCTAssertEqual(controller.currentIndex, 0)
+    }
+
+    /// Moving a track from *before* the playing one shifts everything after it down, so the
+    /// index has to follow or the queue would silently start pointing at a different song.
+    func testMovingATrackFromBehindKeepsTheCurrentIndexOnTheSameSong() {
+        let engine = FakeAudioPlaybackEngine()
+        let controller = PlaybackController(engine: engine)
+        let songs = makeSongs(["Alpha", "Beta", "Gamma"])
+        defer { controller.stopAndClear() }
+
+        controller.play(song: songs[2], queue: songs)
+        XCTAssertEqual(controller.currentIndex, 2)
+
+        controller.playNext(songs[0])
+
+        XCTAssertEqual(controller.currentSong, songs[2])
+        XCTAssertEqual(
+            controller.queue[try! XCTUnwrap(controller.currentIndex)].title,
+            "Gamma"
+        )
+        XCTAssertEqual(controller.queue.map(\.title), ["Beta", "Gamma", "Alpha"])
+    }
+
+    func testQueueingWithNothingPlayingSimplyPlaysTheTrack() {
+        let engine = FakeAudioPlaybackEngine()
+        let controller = PlaybackController(engine: engine)
+        let extra = makeSongs(["Delta"])[0]
+        defer { controller.stopAndClear() }
+
+        controller.addToQueue(extra)
+
+        XCTAssertEqual(controller.currentSong, extra)
+        XCTAssertEqual(controller.state, .playing)
+    }
+
+    /// Turning shuffle off rebuilds the play order from `canonicalQueue`, so a track added
+    /// while shuffled must be present there too — otherwise it vanishes the moment shuffle
+    /// is disabled.
+    func testATrackQueuedWhileShuffledSurvivesTurningShuffleOff() {
+        let engine = FakeAudioPlaybackEngine()
+        let controller = PlaybackController(engine: engine)
+        let songs = makeSongs(["Alpha", "Beta", "Gamma"])
+        let extra = makeSongs(["Delta"])[0]
+        defer { controller.stopAndClear() }
+
+        controller.play(song: songs[0], queue: songs)
+        controller.toggleShuffle()
+        controller.addToQueue(extra)
+        controller.toggleShuffle()
+
+        XCTAssertTrue(
+            controller.queue.contains(where: { $0.id == extra.id }),
+            "the queued track was lost when shuffle was turned off: \(controller.queue.map(\.title))"
+        )
+    }
+
     private func makeSongs(_ titles: [String]) -> [Song] {
         titles.map {
             Song(

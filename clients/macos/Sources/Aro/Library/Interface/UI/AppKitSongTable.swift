@@ -43,6 +43,14 @@ struct AppKitSongTable: NSViewRepresentable {
     let onSyncTrackData: @MainActor (Song) async -> Void
     let onEditMetadata: @MainActor (Song) -> Void
     let onRequestRemoval: (@MainActor (Song) -> Void)?
+    /// Seed-track radio for any row, not just the ones Home happens to show. `nil` in
+    /// contexts with no hub to ask.
+    var onStartRadio: (@MainActor (Song) -> Void)?
+    /// Favouriting from the row rather than only from the player bar — the hub builds
+    /// Favorites Mix and "recently loved" out of this, so it needs to be easy to reach.
+    var onToggleFavourite: (@MainActor (Song) -> Void)?
+    var onPlayNext: (@MainActor (Song) -> Void)?
+    var onAddToQueue: (@MainActor (Song) -> Void)?
     /// Names the collection on screen — a folder, a playlist. Each time it
     /// changes the table scrolls itself to whatever is playing; see
     /// `Coordinator.focusCurrentSongIfNeeded`. Left `nil` to opt out.
@@ -58,7 +66,11 @@ struct AppKitSongTable: NSViewRepresentable {
             onPlay: onPlay,
             onSyncTrackData: onSyncTrackData,
             onEditMetadata: onEditMetadata,
-            onRequestRemoval: onRequestRemoval
+            onRequestRemoval: onRequestRemoval,
+            onStartRadio: onStartRadio,
+            onToggleFavourite: onToggleFavourite,
+            onPlayNext: onPlayNext,
+            onAddToQueue: onAddToQueue
         )
     }
 
@@ -76,6 +88,10 @@ struct AppKitSongTable: NSViewRepresentable {
             onSyncTrackData: onSyncTrackData,
             onEditMetadata: onEditMetadata,
             onRequestRemoval: onRequestRemoval,
+            onStartRadio: onStartRadio,
+            onToggleFavourite: onToggleFavourite,
+            onPlayNext: onPlayNext,
+            onAddToQueue: onAddToQueue,
             focusToken: focusToken
         )
     }
@@ -102,6 +118,10 @@ struct AppKitSongTable: NSViewRepresentable {
         private var onSyncTrackData: @MainActor (Song) async -> Void
         private var onEditMetadata: @MainActor (Song) -> Void
         private var onRequestRemoval: (@MainActor (Song) -> Void)?
+        private var onStartRadio: (@MainActor (Song) -> Void)?
+        private var onToggleFavourite: (@MainActor (Song) -> Void)?
+        private var onPlayNext: (@MainActor (Song) -> Void)?
+        private var onAddToQueue: (@MainActor (Song) -> Void)?
         private var focusToken: String?
         /// The last token this table has already scrolled to the playing song
         /// for, so each collection focuses once rather than on every update.
@@ -123,7 +143,11 @@ struct AppKitSongTable: NSViewRepresentable {
             onSyncTrackData:
                 @escaping @MainActor (Song) async -> Void,
             onEditMetadata: @escaping @MainActor (Song) -> Void = { _ in },
-            onRequestRemoval: (@MainActor (Song) -> Void)?
+            onRequestRemoval: (@MainActor (Song) -> Void)?,
+            onStartRadio: (@MainActor (Song) -> Void)? = nil,
+            onToggleFavourite: (@MainActor (Song) -> Void)? = nil,
+            onPlayNext: (@MainActor (Song) -> Void)? = nil,
+            onAddToQueue: (@MainActor (Song) -> Void)? = nil
         ) {
             self.songs = songs
             self.currentSongID = currentSongID
@@ -134,6 +158,10 @@ struct AppKitSongTable: NSViewRepresentable {
             self.onSyncTrackData = onSyncTrackData
             self.onEditMetadata = onEditMetadata
             self.onRequestRemoval = onRequestRemoval
+            self.onStartRadio = onStartRadio
+            self.onToggleFavourite = onToggleFavourite
+            self.onPlayNext = onPlayNext
+            self.onAddToQueue = onAddToQueue
         }
 
         func makeScrollView() -> NSScrollView {
@@ -232,6 +260,44 @@ struct AppKitSongTable: NSViewRepresentable {
                     keyEquivalent: ""
                 )
             )
+            if onPlayNext != nil {
+                menu.addItem(
+                    NSMenuItem(
+                        title: "Play Next",
+                        action: #selector(playSelectedNext(_:)),
+                        keyEquivalent: ""
+                    )
+                )
+            }
+            if onAddToQueue != nil {
+                menu.addItem(
+                    NSMenuItem(
+                        title: "Add to Queue",
+                        action: #selector(addSelectedToQueue(_:)),
+                        keyEquivalent: ""
+                    )
+                )
+            }
+            if onStartRadio != nil {
+                menu.addItem(
+                    NSMenuItem(
+                        title: "Start Radio",
+                        action: #selector(startRadioForSelected(_:)),
+                        keyEquivalent: ""
+                    )
+                )
+            }
+            if onToggleFavourite != nil {
+                // Title is rewritten per selection in `validateMenuItem`, since it has to
+                // read "Remove from Favourites" on a track that is already loved.
+                menu.addItem(
+                    NSMenuItem(
+                        title: "Add to Favourites",
+                        action: #selector(toggleFavouriteForSelected(_:)),
+                        keyEquivalent: ""
+                    )
+                )
+            }
             menu.addItem(.separator())
             menu.addItem(
                 NSMenuItem(
@@ -286,12 +352,20 @@ struct AppKitSongTable: NSViewRepresentable {
                 @escaping @MainActor (Song) async -> Void,
             onEditMetadata: @escaping @MainActor (Song) -> Void = { _ in },
             onRequestRemoval: (@MainActor (Song) -> Void)?,
+            onStartRadio: (@MainActor (Song) -> Void)? = nil,
+            onToggleFavourite: (@MainActor (Song) -> Void)? = nil,
+            onPlayNext: (@MainActor (Song) -> Void)? = nil,
+            onAddToQueue: (@MainActor (Song) -> Void)? = nil,
             focusToken newFocusToken: String? = nil
         ) {
             self.onPlay = onPlay
             self.onSyncTrackData = onSyncTrackData
             self.onEditMetadata = onEditMetadata
             self.onRequestRemoval = onRequestRemoval
+            self.onStartRadio = onStartRadio
+            self.onToggleFavourite = onToggleFavourite
+            self.onPlayNext = onPlayNext
+            self.onAddToQueue = onAddToQueue
             focusToken = newFocusToken
 
             guard let tableView else {
@@ -551,8 +625,44 @@ struct AppKitSongTable: NSViewRepresentable {
             onEditMetadata(song)
         }
 
+        @objc private func playSelectedNext(_ sender: Any?) {
+            guard let song = selectedSong, let onPlayNext else { return }
+            onPlayNext(song)
+        }
+
+        @objc private func addSelectedToQueue(_ sender: Any?) {
+            guard let song = selectedSong, let onAddToQueue else { return }
+            onAddToQueue(song)
+        }
+
+        @objc private func startRadioForSelected(_ sender: Any?) {
+            guard let song = selectedSong, let onStartRadio else { return }
+            onStartRadio(song)
+        }
+
+        @objc private func toggleFavouriteForSelected(_ sender: Any?) {
+            guard let song = selectedSong, let onToggleFavourite else { return }
+            onToggleFavourite(song)
+        }
+
         func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-            selectedSong != nil
+            guard let song = selectedSong else { return false }
+
+            // Validation is also the only moment AppKit gives us with both the item and the
+            // current selection in hand, which is where a stateful title belongs.
+            if menuItem.action == #selector(toggleFavouriteForSelected(_:)) {
+                menuItem.title = song.isFavourite
+                    ? "Remove from Favourites"
+                    : "Add to Favourites"
+            }
+
+            // Radio needs a content hash to seed from; a track the hub has never seen has
+            // nothing to sound like.
+            if menuItem.action == #selector(startRadioForSelected(_:)) {
+                return song.contentHash != nil
+            }
+
+            return true
         }
 
         func tableView(
