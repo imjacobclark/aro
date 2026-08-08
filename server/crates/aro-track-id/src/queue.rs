@@ -787,16 +787,21 @@ const RECONCILE_BATCH: u32 = 25;
 /// there rather than giving up after one or two tries.
 const MAX_GROUP_RECONCILE_ATTEMPTS: i64 = 8;
 
-/// How many times a file may fail to *decode* before identification stops attempting it.
+/// How many times a file may fail to *decode* before identification rests it for
+/// [`FINGERPRINT_RETRY_AFTER_SECS`].
 ///
-/// Deliberately much smaller than [`MAX_GROUP_RECONCILE_ATTEMPTS`], because the two failures
-/// are not alike. A rejected group match can genuinely converge later — affinity shifts,
-/// sibling folders appear — so those retries buy something. A file whose audio will not
-/// decode fails on its own bytes, identically, forever: the second attempt is already
-/// evidence, and the thousandth teaches nothing. A handful of attempts is enough to ride
-/// out a transient cause (an unreadable mount, a file still being copied in) while keeping
-/// the wasted work bounded. Cleared on any successful decode, so this is never permanent.
+/// Deliberately much smaller than [`MAX_GROUP_RECONCILE_ATTEMPTS`], because the two
+/// failures are not alike. A rejected group match can genuinely converge later — affinity
+/// shifts, sibling folders appear — so those retries buy something. Repeating a decode that
+/// has just failed five times buys nothing on the same timescale, whatever the cause.
 const MAX_FINGERPRINT_FAILURES: i64 = 5;
+
+/// How long a file that keeps failing to decode is left alone before being tried again.
+///
+/// Long enough that a genuinely undecodable file costs one attempt a day rather than three
+/// hundred an hour; short enough that a file whose reads were failing for some passing
+/// reason repairs itself within a day, with nobody having to notice or intervene.
+const FINGERPRINT_RETRY_AFTER_SECS: i64 = 24 * 60 * 60;
 
 /// Revisits up to [`RECONCILE_BATCH`] folders whose files predate
 /// `crate::IDENTIFICATION_GENERATION` (see `HubStore::folders_needing_reconcile`), plus up
@@ -1081,17 +1086,21 @@ async fn prepare_file(
     let (fingerprint_base64, duration_secs) = match cached_fingerprint {
         Some(cached) => cached,
         None => {
-            // A file that has already proved undecodable this many times will prove it
-            // again; skip it before spending the decode rather than after.
-            let failures = store
-                .fingerprint_failure_count(&job.content_hash)
-                .unwrap_or(0);
-            if failures >= MAX_FINGERPRINT_FAILURES {
+            // A file that has failed to decode this many times recently is left alone for
+            // a while — skipped before spending the decode rather than after. Not
+            // permanently: see `HubStore::fingerprint_failures_exhausted`.
+            let resting = store
+                .fingerprint_failures_exhausted(
+                    &job.content_hash,
+                    MAX_FINGERPRINT_FAILURES,
+                    FINGERPRINT_RETRY_AFTER_SECS,
+                )
+                .unwrap_or(false);
+            if resting {
                 tracing::debug!(
                     content_hash = %job.content_hash,
                     path = %job.path.display(),
-                    failures,
-                    "skipping identification: audio has repeatedly failed to decode"
+                    "skipping identification for now: audio has repeatedly failed to decode"
                 );
                 return Ok(None);
             }

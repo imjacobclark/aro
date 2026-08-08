@@ -3283,6 +3283,45 @@ impl HubStore {
             .unwrap_or(0))
     }
 
+    /// Whether identification should leave `content_hash` alone *for now*: it has failed to
+    /// decode at least `max_attempts` times and the last attempt was under `cooldown_secs`
+    /// ago.
+    ///
+    /// The cooldown is the whole point. Giving up permanently would only be safe if a
+    /// decode failure were purely a property of the bytes, and that is not established —
+    /// the same file that fails on the hub decodes completely here, on both aarch64 and
+    /// armv7, from identical bytes and the same symphonia build. Whatever the hub is
+    /// hitting may well be transient (a storage mount under load is the obvious
+    /// candidate), and a file written off forever on the strength of five bad reads would
+    /// never get the successful decode that clears it. So a given-up file is retried
+    /// occasionally rather than never: rare enough that a genuinely undecodable file costs
+    /// one attempt a day instead of three hundred an hour, often enough that a transient
+    /// cause recovers on its own with nobody having to notice.
+    pub fn fingerprint_failures_exhausted(
+        &self,
+        content_hash: &str,
+        max_attempts: i64,
+        cooldown_secs: i64,
+    ) -> Result<bool, StoreError> {
+        let row: Option<(i64, i64)> = self
+            .connection
+            .lock()
+            .query_row(
+                "SELECT attempts, last_attempted_at FROM fingerprint_failures
+                 WHERE content_hash = ?1",
+                [content_hash],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((attempts, last_attempted_at)) = row else {
+            return Ok(false);
+        };
+        let elapsed = chrono::Utc::now()
+            .timestamp()
+            .saturating_sub(last_attempted_at);
+        Ok(attempts >= max_attempts && elapsed < cooldown_secs)
+    }
+
     /// Forgets a file's decode failures, so a file that has since been repaired or
     /// re-encoded gets a clean slate rather than staying given-up-on forever. Called on
     /// every successful fingerprint, which is what makes recovery automatic.
@@ -6065,6 +6104,50 @@ mod tests {
         // never permanent.
         store.clear_fingerprint_failures(&broken).unwrap();
         assert_eq!(store.fingerprint_failure_count(&broken).unwrap(), 0);
+    }
+
+    /// Giving up has to expire. The cause of these failures is not established — the same
+    /// bytes decode fine off the hub — so a file written off forever on five bad reads
+    /// would never get the successful decode that clears it.
+    #[test]
+    fn a_file_given_up_on_is_tried_again_once_it_has_rested() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let hash = "c".repeat(64);
+        let day = 24 * 60 * 60;
+
+        // Below the limit, it is never rested.
+        store.record_fingerprint_failure(&hash, "boom").unwrap();
+        assert!(!store.fingerprint_failures_exhausted(&hash, 5, day).unwrap());
+
+        for _ in 0..4 {
+            store.record_fingerprint_failure(&hash, "boom").unwrap();
+        }
+        assert!(
+            store.fingerprint_failures_exhausted(&hash, 5, day).unwrap(),
+            "five fresh failures should rest the file"
+        );
+
+        // Backdate the last attempt past the cooldown: it becomes eligible again.
+        store
+            .connection
+            .lock()
+            .execute(
+                "UPDATE fingerprint_failures SET last_attempted_at = ?1 WHERE content_hash = ?2",
+                params![chrono::Utc::now().timestamp() - day - 1, &hash],
+            )
+            .unwrap();
+        assert!(
+            !store.fingerprint_failures_exhausted(&hash, 5, day).unwrap(),
+            "a rested file must be tried again rather than written off forever"
+        );
+
+        // A file nobody has ever failed on is never rested.
+        assert!(
+            !store
+                .fingerprint_failures_exhausted(&"d".repeat(64), 5, day)
+                .unwrap()
+        );
     }
 
     #[test]

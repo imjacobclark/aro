@@ -226,12 +226,17 @@ pub fn fingerprint_file(path: &Path) -> Result<FingerprintResult, Error> {
     // A stream that dies partway through is still worth identifying from, provided enough
     // of it decoded. Chromaprint matches on the opening of a track, so the tail is the
     // least valuable part of the file; throwing away 200 good seconds because second 201
-    // is unreadable helps nobody. Observed on the hub (armv7) and not on arm64 with the
-    // very same bytes: symphonia's ALAC decoder raises "unexpected end of bitstream"
-    // mid-file on a handful of tracks, which used to abort the whole fingerprint and,
-    // because a failed identification is retried, did so forever — one file burned 4,068
-    // decode attempts in a week. Note that error arrives as `ErrorKind::Other`, not
-    // `UnexpectedEof`, so the clean-EOF arms above never caught it.
+    // is unreadable helps nobody. This is not hypothetical: on the hub, a handful of ALAC
+    // files fail with "unexpected end of bitstream" partway through, which used to abort
+    // the whole fingerprint and — because a failed identification is retried — did so
+    // again on every sweep, one file burning 4,068 decode attempts in a week.
+    //
+    // What is *not* established is why. Those same files, byte for byte, decode all the
+    // way through here on both aarch64 and armv7 with the same symphonia build, so this is
+    // something about the hub's own reads rather than the bytes or the decoder. Hence
+    // treating it as a condition to survive rather than a cause to special-case. Note the
+    // error arrives as `ErrorKind::Other`, not `UnexpectedEof`, so the clean-EOF arms
+    // above never caught it.
     let truncated = if let Some(error) = ended_by {
         if salvage_secs(total_frames, sample_rate) < MIN_SALVAGE_SECS {
             return Err(error.into());
