@@ -13,7 +13,7 @@ struct StatCard: View {
                 .font(AroFont.textStyle(.caption, weight: .semibold))
                 .foregroundStyle(.secondary)
             Text(value)
-                .font(AroFont.fixed(27, weight: .bold))
+                .font(AroFont.scaled(27, relativeTo: .largeTitle, weight: .bold))
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
                 .allowsTightening(true)

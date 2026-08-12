@@ -22,9 +22,9 @@ struct RadioActionButton: View {
             } else {
                 HStack(spacing: 5) {
                     Image(systemName: "antenna.radiowaves.left.and.right")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(AroFont.scaled(11, relativeTo: .caption, weight: .semibold))
                     Text("Radio")
-                        .font(AroFont.fixed(11, weight: .semibold))
+                        .font(AroFont.scaled(11, relativeTo: .caption, weight: .semibold))
                         .fixedSize()
                 }
                 .foregroundStyle(.primary)

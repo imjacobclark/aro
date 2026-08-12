@@ -22,7 +22,7 @@ struct SignalChainPopover: View {
     private var header: some View {
         HStack(spacing: 10) {
             Image(systemName: "point.3.connected.trianglepath.dotted")
-                .font(.system(size: 16, weight: .semibold))
+                .font(AroFont.scaled(16, relativeTo: .title3, weight: .semibold))
                 .foregroundStyle(.tint)
                 .frame(width: 34, height: 34)
                 .background(.tint.opacity(0.12), in: Circle())
@@ -53,7 +53,7 @@ struct SignalChainPopover: View {
                 SignalChainRow(step: step)
                 if index < steps.count - 1 {
                     Image(systemName: "arrow.down")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(AroFont.scaled(9, relativeTo: .caption2, weight: .bold))
                         .foregroundStyle(.secondary.opacity(0.55))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.leading, 17)

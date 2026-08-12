@@ -13,6 +13,10 @@ struct NavigationSidebar: View {
     var remoteSyncHealth: RemoteSyncHealth?
     let addSync: () -> Void
     let removeSync: (UUID) -> Void
+    /// Icon boxes grow with the labels beside them. Pinned, they would leave every icon
+    /// shrinking away from its own text as the reader turns the system size up.
+    @ScaledMetric(relativeTo: .subheadline) private var iconSize: CGFloat = 20
+    @ScaledMetric(relativeTo: .title3) private var leadingIconWidth: CGFloat = 18
 
     var body: some View {
         List(selection: $selection) {
@@ -50,7 +54,7 @@ struct NavigationSidebar: View {
                         scanState: scanStates[folder.id] ?? .idle,
                         remoteSyncHealth: remoteSyncHealth
                     )
-                    .font(AroFont.fixed(14))
+                    .font(AroFont.scaled(14, relativeTo: .headline))
                     .tag(Destination.folder(folder.id))
                     .contextMenu {
                         if canRemoveSyncs {
@@ -66,8 +70,8 @@ struct NavigationSidebar: View {
                     Spacer()
                     Button(action: addSync) {
                         Image(systemName: "plus")
-                            .font(.system(size: 12, weight: .semibold))
-                            .frame(width: 20, height: 20)
+                            .font(AroFont.scaled(12, relativeTo: .subheadline, weight: .semibold))
+                            .frame(width: iconSize, height: iconSize)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -99,18 +103,18 @@ struct NavigationSidebar: View {
     ) -> some View {
         Label {
             Text(title)
-                .font(AroFont.fixed(14, weight: .semibold))
+                .font(AroFont.scaled(14, relativeTo: .headline, weight: .semibold))
         } icon: {
             Image(systemName: systemImage)
-                .font(.system(size: 15, weight: .regular))
-                .frame(width: 18)
+                .font(AroFont.scaled(15, relativeTo: .title3))
+                .frame(width: leadingIconWidth)
         }
         .padding(.vertical, 3)
     }
 
     private func sectionHeading(_ title: String) -> some View {
         Text(title.uppercased())
-            .font(AroFont.fixed(10, weight: .semibold))
+            .font(AroFont.scaled(10, relativeTo: .caption2, weight: .semibold))
             .tracking(0.8)
             .foregroundStyle(.secondary)
     }

@@ -18,6 +18,14 @@ struct PlayerBar: View {
     @State private var isShowingRoutes = false
     @State private var isShowingQueue = false
     @State private var favouriteError: String?
+    /// The bar's height, and the artwork inside it, track the reader's text size.
+    ///
+    /// Everything in this bar is now type that grows with the system text setting, and a
+    /// pinned 92pt would simply crop the titles off at the larger sizes. `@ScaledMetric`
+    /// grows the container by the same ratio the text grows by, so the bar stays in
+    /// proportion instead of staying the same size.
+    @ScaledMetric(relativeTo: .subheadline) private var barHeight: CGFloat = 92
+    @ScaledMetric(relativeTo: .subheadline) private var artworkSize: CGFloat = 66
 
     var body: some View {
         HStack(spacing: 14) {
@@ -42,7 +50,7 @@ struct PlayerBar: View {
         }
         .padding(.horizontal, 16)
         .frame(maxWidth: .infinity)
-        .frame(height: 92)
+        .frame(height: barHeight)
         .background(.ultraThinMaterial)
         .background(Color.white.opacity(0.28))
         .clipShape(
@@ -92,12 +100,12 @@ struct PlayerBar: View {
     private var nowPlaying: some View {
         HStack(spacing: 12) {
             AlbumArtworkView(data: playback.currentSong?.artworkData, maxDimension: 66)
-                .frame(width: 66, height: 66)
+                .frame(width: artworkSize, height: artworkSize)
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 5) {
                     Text(playback.currentSong?.title ?? "Not Playing")
-                        .font(AroFont.fixed(14, weight: .semibold))
+                        .font(AroFont.scaled(14, relativeTo: .headline, weight: .semibold))
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .help(playback.currentSong?.title ?? "Not Playing")
@@ -114,7 +122,7 @@ struct PlayerBar: View {
                             Task { await startRadio?(song) }
                         } label: {
                             Image(systemName: "dot.radiowaves.left.and.right")
-                                .font(.system(size: 13, weight: .medium))
+                                .font(AroFont.scaled(13, relativeTo: .headline, weight: .semibold))
                                 .foregroundStyle(Color.secondary)
                                 .frame(width: 24, height: 24)
                         }
@@ -131,7 +139,7 @@ struct PlayerBar: View {
                                     ? "heart.fill"
                                     : "heart"
                         )
-                        .font(.system(size: 13, weight: .medium))
+                        .font(AroFont.scaled(13, relativeTo: .headline, weight: .semibold))
                         .foregroundStyle(
                             playback.currentSong?.isFavourite == true
                                 ? AroTheme.violet
@@ -154,7 +162,7 @@ struct PlayerBar: View {
                 }
 
                 Text(artistAndAlbum)
-                    .font(AroFont.fixed(11))
+                    .font(AroFont.scaled(11, relativeTo: .caption))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -172,7 +180,7 @@ struct PlayerBar: View {
                         Text(sourceFormat)
                     }
                 }
-                .font(AroFont.fixed(10))
+                .font(AroFont.scaled(10, relativeTo: .caption2))
                 .foregroundStyle(
                     playback.errorMessage == nil
                         ? Color.secondary
@@ -217,7 +225,7 @@ struct PlayerBar: View {
                                 ? "pause.fill"
                                 : "play.fill"
                         )
-                        .font(.system(size: 17, weight: .semibold))
+                        .font(AroFont.scaled(17, relativeTo: .title2, weight: .semibold))
                         .offset(x: playback.isPlaying ? 0 : 1)
                     }
                 }
@@ -296,7 +304,7 @@ struct PlayerBar: View {
             Text(formatTime(playback.duration))
                 .frame(width: 38, alignment: .leading)
         }
-        .font(AroFont.fixed(10))
+        .font(AroFont.scaled(10, relativeTo: .caption2))
         .foregroundStyle(.secondary)
         .monospacedDigit()
     }
@@ -313,7 +321,7 @@ struct PlayerBar: View {
                             ? "waveform"
                             : playback.outputStatus.transport.systemImageName
                 )
-                .font(.system(size: 13, weight: .medium))
+                .font(AroFont.scaled(13, relativeTo: .headline, weight: .semibold))
                 .foregroundStyle(
                     playback.isPlaying
                         ? AroTheme.violet
@@ -337,10 +345,10 @@ struct PlayerBar: View {
                     // matter which device was actually selected.
                     Text(deviceManager.defaultDevice?.name
                         ?? playback.outputStatus.deviceName)
-                        .font(AroFont.fixed(10, weight: .semibold))
+                        .font(AroFont.scaled(10, relativeTo: .caption2, weight: .semibold))
                         .lineLimit(1)
                     Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 7, weight: .semibold))
+                        .font(AroFont.scaled(7, relativeTo: .caption2, weight: .semibold))
                 }
                 .foregroundStyle(.primary)
                 .frame(width: 68, alignment: .leading)
@@ -361,7 +369,7 @@ struct PlayerBar: View {
 
             HStack(spacing: 4) {
                 Image(systemName: volumeSymbol)
-                    .font(.system(size: 11))
+                    .font(AroFont.scaled(11, relativeTo: .caption))
                     .foregroundStyle(.secondary)
                 Slider(value: $displayedVolume, in: 0...1)
                     .accessibilityLabel("Volume")
@@ -384,7 +392,7 @@ struct PlayerBar: View {
                     RadioModePill()
                 } else {
                     Image(systemName: "list.bullet")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(AroFont.scaled(13, relativeTo: .headline, weight: .semibold))
                         .frame(width: 26, height: 26)
                 }
             }
@@ -488,7 +496,7 @@ private struct PlayerControlButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.system(size: 12, weight: .semibold))
+                .font(AroFont.scaled(12, relativeTo: .subheadline, weight: .semibold))
                 .foregroundStyle(isActive ? AroTheme.violet : .secondary)
                 .frame(width: 26, height: 26)
                 .background(
@@ -515,7 +523,7 @@ private struct PlaybackQueuePopover: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Up Next")
-                .font(AroFont.fixed(16, weight: .semibold))
+                .font(AroFont.scaled(16, relativeTo: .title3, weight: .semibold))
                 .padding(.horizontal, 16)
                 .padding(.vertical, 14)
 
@@ -542,7 +550,7 @@ private struct PlaybackQueuePopover: View {
                                                 ? "speaker.wave.2.fill"
                                                 : "music.note"
                                     )
-                                    .font(.system(size: 11))
+                                    .font(AroFont.scaled(11, relativeTo: .caption))
                                     .foregroundStyle(
                                         playback.currentIndex == index
                                             ? AroTheme.violet
@@ -553,15 +561,16 @@ private struct PlaybackQueuePopover: View {
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(song.title)
                                             .font(
-                                                AroFont.fixed(
+                                                AroFont.scaled(
                                                     12,
+                                                    relativeTo: .subheadline,
                                                     weight: .semibold
                                                 )
                                             )
                                             .foregroundStyle(.primary)
                                             .lineLimit(1)
                                         Text(song.artist)
-                                            .font(AroFont.fixed(10))
+                                            .font(AroFont.scaled(10, relativeTo: .caption2))
                                             .foregroundStyle(.secondary)
                                             .lineLimit(1)
                                     }
@@ -569,7 +578,7 @@ private struct PlaybackQueuePopover: View {
                                     Spacer()
 
                                     Text(song.formattedDuration)
-                                        .font(AroFont.fixed(10))
+                                        .font(AroFont.scaled(10, relativeTo: .caption2))
                                         .foregroundStyle(.secondary)
                                         .monospacedDigit()
                                 }

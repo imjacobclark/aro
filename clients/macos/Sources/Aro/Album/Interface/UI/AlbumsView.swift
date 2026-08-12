@@ -74,7 +74,7 @@ struct AlbumsView: View {
     private var albumList: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Albums")
-                .font(AroFont.fixed(23, weight: .bold))
+                .font(AroFont.scaled(23, relativeTo: .title, weight: .bold))
                 .padding(.horizontal, 20)
                 .padding(.top, 24)
 
@@ -97,8 +97,9 @@ struct AlbumsView: View {
                                         VStack(alignment: .leading, spacing: 4) {
                                             Text(album.name)
                                                 .font(
-                                                    AroFont.fixed(
+                                                    AroFont.scaled(
                                                         14,
+                                                        relativeTo: .headline,
                                                         weight: .semibold
                                                     )
                                                 )
@@ -109,7 +110,7 @@ struct AlbumsView: View {
                                                 "\(album.artistName) · "
                                                     + "\(album.songs.count) songs"
                                             )
-                                            .font(AroFont.fixed(12))
+                                            .font(AroFont.scaled(12, relativeTo: .subheadline))
                                             .foregroundStyle(.secondary)
                                             .lineLimit(1)
                                         }
@@ -234,13 +235,13 @@ struct AlbumsView: View {
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
-                    .font(AroFont.fixed(34, weight: .bold))
+                    .font(AroFont.scaled(34, relativeTo: .largeTitle, weight: .bold))
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .help(title)
 
                 Text(subtitle)
-                    .font(AroFont.fixed(14))
+                    .font(AroFont.scaled(14, relativeTo: .headline))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }

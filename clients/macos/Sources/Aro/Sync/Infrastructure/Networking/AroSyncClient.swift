@@ -239,31 +239,34 @@ actor AroSyncClient {
         adminToken = nil
     }
 
+    /// The admin channel, which carries the token that can revoke devices, rewrite watched
+    /// folders, and export the library.
+    ///
+    /// The pin is required rather than optional, and that is the whole point of this
+    /// signature. It used to default to `nil`, which fell through to `PairingTLSDelegate` —
+    /// a delegate that accepts *any* certificate, correctly, because pairing is
+    /// authenticated by SPAKE2+ instead. Every caller happened to pass a fingerprint, so
+    /// nothing was actually unpinned; but "no caller currently makes the mistake" is a
+    /// property of today's callers, and this is a bad thing to leave one defaulted argument
+    /// away from. The fingerprint comes from the control socket, which is a local
+    /// `0600` Unix socket and so is trusted to say what the hub's certificate is.
     init(
         localAdminBaseURL baseURL: URL,
         adminToken: String,
-        pinnedTLSFingerprint: String? = nil
+        pinnedTLSFingerprint: String
     ) {
         self.baseURL = baseURL
         let configuration = URLSessionConfiguration.ephemeral
         configuration.waitsForConnectivity = false
         configuration.timeoutIntervalForRequest = 30
         configuration.timeoutIntervalForResource = 120
-        if let pinnedTLSFingerprint {
-            session = URLSession(
-                configuration: configuration,
-                delegate: PinnedTLSDelegate(
-                    fingerprint: pinnedTLSFingerprint
-                ),
-                delegateQueue: nil
-            )
-        } else {
-            session = URLSession(
-                configuration: configuration,
-                delegate: PairingTLSDelegate(),
-                delegateQueue: nil
-            )
-        }
+        session = URLSession(
+            configuration: configuration,
+            delegate: PinnedTLSDelegate(
+                fingerprint: pinnedTLSFingerprint
+            ),
+            delegateQueue: nil
+        )
         encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
         encoder.dateEncodingStrategy = .iso8601

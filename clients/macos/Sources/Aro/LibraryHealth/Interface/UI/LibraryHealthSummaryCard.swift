@@ -24,7 +24,7 @@ struct LibraryHealthSummaryCard: View {
                     .foregroundStyle(.tint)
             }
             Text(value)
-                .font(AroFont.fixed(25, weight: .bold))
+                .font(AroFont.scaled(25, relativeTo: .largeTitle, weight: .bold))
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
         }

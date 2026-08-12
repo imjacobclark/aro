@@ -250,7 +250,6 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/device", get(current_device))
         .route("/v1/join/preview", post(join_preview))
         .route("/v1/join/commit", post(join_commit))
-        .route("/v1/snapshot", get(snapshot))
         .route("/v1/library/catalog", get(catalog))
         .route("/v1/library/stats", get(library_stats))
         .route(
@@ -1026,12 +1025,6 @@ async fn join_commit(
 }
 
 #[derive(Deserialize)]
-struct SnapshotQuery {
-    cursor: Option<String>,
-    limit: Option<u32>,
-}
-
-#[derive(Deserialize)]
 struct CatalogQuery {
     /// A row offset for the default paging, or the last seen `hub_track_id` for `stable`.
     cursor: Option<String>,
@@ -1107,27 +1100,6 @@ async fn library_stats(
         .map_err(ApiError::internal)?
         .map_err(ApiError::internal)?;
     Ok(Json(stats))
-}
-
-async fn snapshot(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Query(query): Query<SnapshotQuery>,
-) -> Result<Json<SnapshotPage>, ApiError> {
-    require_device_or_admin(&state, &headers)?;
-    let offset = query
-        .cursor
-        .as_deref()
-        .unwrap_or("0")
-        .parse::<u64>()
-        .map_err(|_| ApiError::bad_request("invalid_cursor"))?;
-    let limit = query.limit.unwrap_or(200).clamp(1, 1_000);
-    let tracks = state.store.snapshot_tracks(offset, limit)?;
-    let next = (tracks.len() == limit as usize).then(|| (offset + tracks.len() as u64).to_string());
-    Ok(Json(SnapshotPage {
-        tracks,
-        next_cursor: next,
-    }))
 }
 
 async fn exchange(

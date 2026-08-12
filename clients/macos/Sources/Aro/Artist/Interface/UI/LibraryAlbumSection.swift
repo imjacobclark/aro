@@ -15,7 +15,7 @@ struct LibraryAlbumSection: View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 Text(name)
-                    .font(AroFont.fixed(18, weight: .semibold))
+                    .font(AroFont.scaled(18, relativeTo: .title2, weight: .semibold))
                     .lineLimit(1)
                     .help(name)
 
@@ -44,7 +44,7 @@ struct LibraryAlbumSection: View {
                     }
                 } label: {
                     Image(systemName: "ellipsis")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(AroFont.scaled(13, relativeTo: .headline, weight: .semibold))
                         .frame(width: 28, height: 28)
                         .contentShape(Circle())
                 }
@@ -107,19 +107,19 @@ struct LibraryAlbumSection: View {
 
             if let artistName {
                 Text(artistName)
-                    .font(AroFont.fixed(13))
+                    .font(AroFont.scaled(13, relativeTo: .headline))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
 
             Text(songSummary)
-                .font(AroFont.fixed(12))
+                .font(AroFont.scaled(12, relativeTo: .subheadline))
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
 
             if let releaseYear {
                 Text(String(releaseYear))
-                    .font(AroFont.fixed(12))
+                    .font(AroFont.scaled(12, relativeTo: .subheadline))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }

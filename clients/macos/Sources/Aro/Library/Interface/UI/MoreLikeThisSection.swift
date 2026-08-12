@@ -102,7 +102,7 @@ struct MoreLikeThisSection: View {
                     HStack(spacing: 8) {
                         SectionHeader(title: "More Like This", subtitle: subtitle)
                         Image(systemName: "chevron.down")
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(AroFont.scaled(11, relativeTo: .caption, weight: .semibold))
                             .foregroundStyle(.secondary)
                             .rotationEffect(.degrees(isExpanded ? 0 : -90))
                     }

@@ -19,13 +19,13 @@ struct RadioModePill: View {
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: "antenna.radiowaves.left.and.right")
-                .font(.system(size: 11, weight: .semibold))
+                .font(AroFont.scaled(11, relativeTo: .caption, weight: .semibold))
                 .symbolEffect(
                     .variableColor.iterative.reversing,
                     options: .repeating
                 )
             Text("Radio on")
-                .font(AroFont.fixed(11, weight: .semibold))
+                .font(AroFont.scaled(11, relativeTo: .caption, weight: .semibold))
                 .fixedSize()
         }
         .foregroundStyle(AroTheme.radioGlow)

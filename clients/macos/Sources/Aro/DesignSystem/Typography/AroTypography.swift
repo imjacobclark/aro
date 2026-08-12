@@ -30,8 +30,44 @@ enum AroFont {
         )
     }
 
+    /// A size that does not move when the reader changes their system text size.
+    ///
+    /// Correct for glyphs that are really pictures — a letter filling a generated cover, an
+    /// icon standing in for artwork — where the size belongs to the shape around it rather
+    /// than to reading. Wrong for anything anyone has to read, which is what `scaled` is
+    /// for. Prefer a named style over either.
     static func fixed(_ size: CGFloat, weight: Weight = .regular) -> Font {
         .custom(fontName(for: weight), fixedSize: size)
+    }
+
+    /// A specific size that still grows with the reader's system text size.
+    ///
+    /// The named styles above cover most text, but a design sometimes wants a size between
+    /// them — an 11pt badge, a 17pt transport title. Those were reaching for `.system(size:)`
+    /// or `fixed`, both of which pin the text at one size forever: someone who turns up
+    /// system text size gets a bigger everything-else and the same tiny badge.
+    ///
+    /// `relativeTo` is what makes it scale, and it should name the style the size sits
+    /// nearest — that is the axis SwiftUI grows the text along, and it also decides how far
+    /// it is allowed to grow at the accessibility sizes.
+    static func scaled(
+        _ size: CGFloat,
+        relativeTo style: Font.TextStyle,
+        weight: Weight = .regular
+    ) -> Font {
+        .custom(fontName(for: weight), size: size, relativeTo: style)
+    }
+
+    /// The named style whose size is closest to `size`, so a numeric size can be converted
+    /// to something that scales without anyone having to pick the pairing by eye.
+    static func nearestStyle(to size: CGFloat) -> Font.TextStyle {
+        let styles: [Font.TextStyle] = [
+            .caption2, .caption, .subheadline, .headline,
+            .title3, .title2, .title, .largeTitle,
+        ]
+        return styles.min(by: { first, second in
+            abs(pointSize(for: first) - size) < abs(pointSize(for: second) - size)
+        }) ?? .body
     }
 
     static func register() {

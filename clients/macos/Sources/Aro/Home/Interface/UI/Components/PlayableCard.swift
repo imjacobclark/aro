@@ -48,7 +48,7 @@ struct PlayableCard<Content: View>: View {
                     }
                     .overlay {
                         Image(systemName: "play.fill")
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(AroFont.scaled(11, relativeTo: .caption, weight: .semibold))
                             .foregroundStyle(AroTheme.violet)
                             // A play triangle centred geometrically reads as sitting
                             // slightly left, since its visual mass is off to one side.

@@ -15,7 +15,7 @@ struct SignalChainRow: View {
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: step.icon)
-                .font(.system(size: 12, weight: .semibold))
+                .font(AroFont.scaled(12, relativeTo: .subheadline, weight: .semibold))
                 .foregroundStyle(.tint)
                 .frame(width: 34, height: 34)
                 .background(
