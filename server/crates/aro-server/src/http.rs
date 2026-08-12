@@ -1233,6 +1233,7 @@ async fn download_blob(
         headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
         Some(state.telemetry.clone()),
         Some(identity),
+        BLOB_CONTENT_TYPE,
     )
     .await
 }
@@ -1545,8 +1546,14 @@ async fn stream_blob(
             .store
             .blob_path_for_download(&hash)?
             .ok_or_else(|| ApiError::not_found("blob_not_found"))?;
-        return download_range_inner(source, range, Some(state.telemetry.clone()), Some(identity))
-            .await;
+        return download_range_inner(
+            source,
+            range,
+            Some(state.telemetry.clone()),
+            Some(identity),
+            BLOB_CONTENT_TYPE,
+        )
+        .await;
     }
 
     // A cached encode is answered without ever resolving the original: nothing here reads
@@ -1566,6 +1573,7 @@ async fn stream_blob(
                 range,
                 Some(state.telemetry.clone()),
                 Some(identity),
+                TRANSCODE_CONTENT_TYPE,
             )
             .await;
         }
@@ -2404,7 +2412,7 @@ async fn audio_features_status(
 
 #[cfg(test)]
 async fn download_range(path: PathBuf, range: Option<&str>) -> Result<Response, ApiError> {
-    download_range_inner(path, range, None, None).await
+    download_range_inner(path, range, None, None, BLOB_CONTENT_TYPE).await
 }
 
 pub(crate) async fn download_range_tracked(
@@ -2412,7 +2420,7 @@ pub(crate) async fn download_range_tracked(
     range: Option<&str>,
     telemetry: RuntimeTelemetry,
 ) -> Result<Response, ApiError> {
-    download_range_inner(path, range, Some(telemetry), None).await
+    download_range_inner(path, range, Some(telemetry), None, BLOB_CONTENT_TYPE).await
 }
 
 /// A blob served with the one validator a content-addressed store gets for free.
@@ -2461,6 +2469,7 @@ async fn download_range_inner(
     range: Option<&str>,
     telemetry: Option<RuntimeTelemetry>,
     identity: Option<BlobCacheIdentity<'_>>,
+    content_type: &'static str,
 ) -> Result<Response, ApiError> {
     // Checked before the file is even opened, and ahead of `Range`: a conditional request
     // that already holds these bytes wants nothing read, seeked, or sent. RFC 9110 gives
@@ -2493,7 +2502,7 @@ async fn download_range_inner(
     let stream = ReaderStream::new(file.take(length));
     let mut response = Response::builder()
         .status(status)
-        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_TYPE, content_type)
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, length.to_string());
     if status == StatusCode::PARTIAL_CONTENT {
@@ -2516,6 +2525,16 @@ async fn download_range_inner(
             .map_err(ApiError::internal),
     }
 }
+
+/// What a content-addressed blob is, absent anything better: the store holds bytes and has
+/// no notion of file type, so an original really is opaque and the client has to supply the
+/// catalogue's codec to make sense of it.
+const BLOB_CONTENT_TYPE: &str = "application/octet-stream";
+
+/// Everything the transcoder emits is Ogg Opus, and unlike an original that *is* known here.
+/// Serving a cached encode as an opaque blob made the client guess from the source codec,
+/// which told browsers that Opus bytes were `audio/mp4`.
+const TRANSCODE_CONTENT_TYPE: &str = "audio/ogg";
 
 /// `private` rather than `public` because every blob route is behind a device credential —
 /// the bytes may live in a browser's own cache, but never in a shared one.
@@ -2618,6 +2637,7 @@ mod download_tests {
             None,
             None,
             Some(BlobCacheIdentity::new("abc123", &headers)),
+            BLOB_CONTENT_TYPE,
         )
         .await
         .unwrap();
@@ -2641,12 +2661,50 @@ mod download_tests {
             Some("bytes=0-63"),
             None,
             Some(BlobCacheIdentity::new("abc123", &headers)),
+            BLOB_CONTENT_TYPE,
         )
         .await
         .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
         assert_eq!(response.headers()[header::ETAG], "\"abc123\"");
+    }
+
+    /// A cached encode has to say what it is.
+    ///
+    /// It used to be served as an opaque blob like any other, which left the web client
+    /// naming the type from the catalogue's *source* codec — so an ALAC track's Opus encode
+    /// went to the browser labelled `audio/mp4`. Chrome refused to demux it, and because the
+    /// client had already learned it could not decode that codec, the listener was told
+    /// their browser could not play the track even re-encoded. The first play always worked,
+    /// because a stream still being encoded does set `audio/ogg`; only the cached second
+    /// play was broken, which is a nasty shape of bug to meet in the wild.
+    #[tokio::test]
+    async fn a_cached_transcode_is_served_as_the_audio_it_actually_is() {
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"OggS-not-really-but-enough").unwrap();
+        let headers = conditional(None);
+
+        let response = download_range_inner(
+            file.path().to_path_buf(),
+            None,
+            None,
+            Some(BlobCacheIdentity::new("abc123", &headers)),
+            TRANSCODE_CONTENT_TYPE,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "audio/ogg",
+            "a cached encode must not be served as an opaque blob"
+        );
+        assert_ne!(
+            response.headers()[header::CONTENT_TYPE],
+            BLOB_CONTENT_TYPE,
+            "opaque is what made the client guess from the source codec"
+        );
     }
 
     #[test]

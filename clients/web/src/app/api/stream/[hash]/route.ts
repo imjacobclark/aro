@@ -58,14 +58,26 @@ export async function GET(
   // `application/octet-stream` — it stores bytes, not file types. A browser will not play
   // that: Safari in particular decides whether it can handle a stream from the declared
   // type, and refuses an opaque one outright. The catalogue knows the codec, so the client
-  // sends it along and it is turned into a real media type here. Transcodes already come
-  // back as `audio/ogg` and are passed through untouched.
+  // sends it along and it is turned into a real media type here.
+  //
+  // A transcode is never the source codec, whatever the catalogue says. This used to assume
+  // transcodes always arrived already labelled `audio/ogg`, and they do — but only while
+  // they are being encoded. Once the encode is cached the hub serves it as an ordinary
+  // blob, which means `application/octet-stream`, and the fallback below then relabelled
+  // Opus bytes as the original's `audio/mp4`. Chrome would refuse to demux it, the client
+  // had already marked that codec undecodable, and the listener was told their browser
+  // could not play the track "even re-encoded" — when what it was handed was simply
+  // mislabelled. So the requested quality decides the type, and the source codec only gets
+  // a say when the original is what was asked for.
   const declared = response.headers.get("content-type");
+  const transcoded = isTranscodedQuality(quality);
   headers.set(
     "content-type",
-    !declared || declared === "application/octet-stream"
-      ? mediaType(codec)
-      : declared,
+    transcoded
+      ? TRANSCODE_MEDIA_TYPE
+      : !declared || declared === "application/octet-stream"
+        ? mediaType(codec)
+        : declared,
   );
 
   // A transcode is encoded on demand and cannot satisfy a range request until the cached
@@ -99,6 +111,19 @@ function cachePolicy(quality: string | undefined, hasValidator: boolean): string
   // produced must never be stored as though it were the finished article.
   if (!hasValidator) return "no-store";
   return "private, max-age=31536000, immutable";
+}
+
+/** Everything the hub's transcoder emits is Ogg Opus — see `aro_track_id::transcode`. */
+const TRANSCODE_MEDIA_TYPE = "audio/ogg";
+
+/**
+ * Whether this request asked for re-encoded audio rather than the stored file.
+ *
+ * Absent or `original` means the stored file; every other tier the hub understands is a
+ * quality ladder rung, and all of them are Opus.
+ */
+function isTranscodedQuality(quality: string | undefined): boolean {
+  return quality !== undefined && quality !== "original";
 }
 
 /**
