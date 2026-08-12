@@ -189,11 +189,15 @@ struct ArtistsView: View {
                         MoreLikeThisSection(
                             seed: collectionSeed(artist.albums.flatMap(\.songs)),
                             seedLabel: artist.name,
+                            isBesideCollection: true,
                             allSongs: songs,
                             loadRadio: loadRadio,
                             playback: playback
                         )
-                        .padding(.horizontal, 8)
+                        // Matches the album section above it, so the shelf reads as a
+                        // deliberate second block rather than a misaligned continuation.
+                        .padding(.horizontal, 28)
+                        .padding(.bottom, 24)
                     }
                 }
             }

@@ -104,6 +104,7 @@ export default function AlbumPage({
       <MoreLikeThis
         seed={album.tracks.find((track) => track.content_hash)}
         seedLabel={album.name}
+        besideCollection
       />
     </PageShell>
   );

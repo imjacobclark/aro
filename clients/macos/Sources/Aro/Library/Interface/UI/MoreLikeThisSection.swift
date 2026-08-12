@@ -20,6 +20,11 @@ struct MoreLikeThisSection: View {
     /// name when the shelf represents a whole collection. Falls back to the seed's
     /// own title.
     var seedLabel: String?
+    /// Whether this shelf sits beneath a collection's own track list, where being
+    /// mistaken for part of that collection is the specific risk. An album page showing
+    /// Oasis under The Prodigy is not a bug in the similarity ranking — it is the shelf
+    /// failing to say it is looking somewhere else.
+    var isBesideCollection: Bool = false
     /// Song/playlist views sit above a long scrolling table where a permanent shelf
     /// costs real estate, so they let it be folded away. Artist/album views are
     /// short enough not to need it.
@@ -56,7 +61,9 @@ struct MoreLikeThisSection: View {
             Color.clear.frame(height: 0)
         } else {
             VStack(alignment: .leading, spacing: 12) {
-                Divider()
+                if !isBesideCollection {
+                    Divider()
+                }
                 header
                 if !isCollapsible || isExpanded {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -77,12 +84,31 @@ struct MoreLikeThisSection: View {
                 )
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 12)
+            .padding(.horizontal, isBesideCollection ? 20 : 20)
+            .padding(.vertical, isBesideCollection ? 16 : 0)
+            .padding(.bottom, isBesideCollection ? 4 : 12)
+            // Its own surface when it follows a collection, so the eye reads a boundary
+            // rather than a continuation. Sharing the album's background is what let a
+            // shelf of other artists look like more of the record.
+            .background {
+                if isBesideCollection {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(AroTheme.albumSurface)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(AroTheme.hairline, lineWidth: 1)
+                        }
+                }
+            }
             // Definite height + priority so the shelf actually gets space in a
             // VStack shared with `AppKitSongTable`, an NSViewRepresentable that
             // otherwise takes every available point.
-            .frame(height: isCollapsible && !isExpanded ? 58 : 214, alignment: .top)
+            .frame(
+                height: isCollapsible && !isExpanded
+                    ? 58
+                    : (isBesideCollection ? 252 : 214),
+                alignment: .top
+            )
             // Keeps the row from spilling past the frame while it animates closed.
             .clipped()
             .layoutPriority(1)
@@ -92,8 +118,13 @@ struct MoreLikeThisSection: View {
     /// The section title, with a disclosure control when the shelf can be folded.
     @ViewBuilder
     private var header: some View {
-        let subtitle = (seedLabel ?? seed?.title).map { "Sounds like \($0)" }
-            ?? "Measured from the audio"
+        // "Sounds like X" reads both ways — as a description of these tracks *and* as a
+        // description of the record above them — which is exactly how a listener came to
+        // read the shelf as part of the album's own track list. Naming where the music
+        // comes from removes the ambiguity in the only place it matters.
+        let subtitle = (seedLabel ?? seed?.title).map {
+            "Other music in your library that sounds like \($0)"
+        } ?? "Other music in your library, measured from the audio"
         if isCollapsible {
             HStack(spacing: 8) {
                 Button {

@@ -23,11 +23,16 @@ import { usePlayback } from "@/lib/playback/controller";
 export function MoreLikeThis({
   seed,
   seedLabel,
+  besideCollection = false,
 }: {
   seed: CatalogTrack | undefined;
   /** What the subtitle calls the seed — an album or artist name where the shelf stands for
    *  a whole collection rather than one track. */
   seedLabel?: string;
+  /** Set where this follows a collection's own track list. Being mistaken for part of that
+   *  collection is the specific risk there: an album page showing Oasis under The Prodigy
+   *  is not the ranking misbehaving, it is the shelf failing to say it looked elsewhere. */
+  besideCollection?: boolean;
 }) {
   const { byHash } = useCatalog();
   const playback = usePlayback();
@@ -59,11 +64,25 @@ export function MoreLikeThis({
   if (similar.length === 0) return null;
 
   return (
-    <section className="mt-8">
+    <section
+      className={
+        besideCollection
+          ? // Its own surface, so the eye reads a boundary rather than a continuation of
+            // the record above. Sharing the page background is what let a shelf of other
+            // artists look like more of the album's own track list.
+            "border-hairline bg-card/60 mt-8 rounded-2xl border p-4"
+          : "mt-8"
+      }
+    >
       <SectionHeader
         title="More Like This"
         subtitle={
-          seedLabel ? `Sounds like ${seedLabel}` : "Measured from the audio itself"
+          // "Sounds like X" reads both ways — as a description of these tracks and as a
+          // description of the record above them. Naming where the music comes from is
+          // what removes the ambiguity.
+          seedLabel
+            ? `Other music in your library that sounds like ${seedLabel}`
+            : "Other music in your library, measured from the audio itself"
         }
       />
       <Carousel>

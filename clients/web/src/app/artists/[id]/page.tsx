@@ -78,6 +78,7 @@ export default function ArtistPage({
       <MoreLikeThis
         seed={everything.find((track) => track.content_hash)}
         seedLabel={artist.name}
+        besideCollection
       />
     </PageShell>
   );
