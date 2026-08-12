@@ -252,6 +252,24 @@ struct ContentView: View {
                     return (try? await remote.client.transcodeUsage(
                         credential: remote.credential
                     )) ?? []
+                },
+                compatibilityPlan: {
+                    guard let remote = await remoteSyncContext else { return nil }
+                    return try? await remote.client.compatibilityPlan(
+                        credential: remote.credential
+                    )
+                },
+                startCompatibility: {
+                    guard let remote = await remoteSyncContext else { return nil }
+                    return try? await remote.client.startCompatibilityConversion(
+                        credential: remote.credential
+                    )
+                },
+                cleanupCompatibility: {
+                    guard let remote = await remoteSyncContext else { return nil }
+                    return try? await remote.client.cleanupCompatibilityCopies(
+                        credential: remote.credential
+                    )
                 }
             )
         } else if store.selection == .metadata {

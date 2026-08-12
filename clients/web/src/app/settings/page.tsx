@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 
 import { PageShell, SectionHeader } from "@/components/page-shell";
+import { formatBytes, formatDuration } from "@/lib/format";
 import { useAsyncRefresh } from "@/hooks/use-async-refresh";
 import { Button } from "@/components/ui/button";
 import { Card, Input, Label, Switch } from "@/components/ui/primitives";
@@ -21,6 +22,7 @@ import { clearCachedCatalog } from "@/lib/catalog/cache";
 import { api } from "@/lib/hub/api";
 import { STREAM_QUALITIES } from "@/lib/hub/types";
 import type {
+  CompatibilityPlan,
   HubDevice,
   HubInfo,
   SourceHealth,
@@ -45,6 +47,9 @@ export default function SettingsPage() {
   const [folders, setFolders] = useState<WatchedFolder[]>([]);
   const [devices, setDevices] = useState<HubDevice[]>([]);
   const [writeBack, setWriteBack] = useState<boolean | null>(null);
+  const [compatibility, setCompatibility] = useState<CompatibilityPlan | null>(
+    null,
+  );
   const [newFolder, setNewFolder] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -52,13 +57,14 @@ export default function SettingsPage() {
   const load = useCallback(async () => {
     // Each of these is independent, and one failing (a hub without folders configured,
     // say) should not blank the rest of the page.
-    const [info, health, watched, paired, writeBackState] =
+    const [info, health, watched, paired, writeBackState, compatibilityPlan] =
       await Promise.allSettled([
         api.hub(),
         api.sources(),
         api.folders(),
         api.devices(),
         api.writeBackEnabled(),
+        api.compatibilityPlan(),
       ]);
 
     if (info.status === "fulfilled") setHub(info.value);
@@ -67,6 +73,10 @@ export default function SettingsPage() {
     if (paired.status === "fulfilled") setDevices(paired.value);
     if (writeBackState.status === "fulfilled")
       setWriteBack(writeBackState.value.enabled);
+    // A hub older than this feature answers 403 from the proxy allowlist; the section
+    // simply does not appear rather than the page erroring.
+    if (compatibilityPlan.status === "fulfilled")
+      setCompatibility(compatibilityPlan.value);
   }, []);
 
   useAsyncRefresh(load);
@@ -122,6 +132,111 @@ export default function SettingsPage() {
             </p>
           ) : null}
         </section>
+
+        {compatibility ? (
+          <section>
+            <SectionHeader
+              title="Compatibility"
+              subtitle="Applies to your whole library, on every device"
+            />
+            <Card className="flex flex-col gap-4 p-4">
+              <div>
+                <p className="text-sm font-medium">
+                  Convert library for maximum cross-device compatibility
+                </p>
+                <p className="text-muted-foreground mt-1 text-xs leading-relaxed">
+                  Some formats only play on some devices — Apple Lossless, for one, plays
+                  on a Mac and in Safari but in no other browser. Aro can keep a second,
+                  lossless FLAC copy of those tracks so every Aro can play them without
+                  falling back to a lossy re-encode.
+                </p>
+                <p className="text-muted-foreground mt-2 text-xs leading-relaxed">
+                  Your music is never modified or replaced. The copies live separately and
+                  can be deleted at any time. At worst this uses about as much space again
+                  as the tracks that need converting — not your whole library.
+                </p>
+              </div>
+
+              <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+                <div>
+                  <dt className="text-muted-foreground text-xs">Converted</dt>
+                  <dd className="font-medium tabular-nums">
+                    {compatibility.tracks_converted}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground text-xs">To convert</dt>
+                  <dd className="font-medium tabular-nums">
+                    {compatibility.tracks_pending}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground text-xs">
+                    Already compatible
+                  </dt>
+                  <dd className="font-medium tabular-nums">
+                    {compatibility.tracks_already_compatible}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground text-xs">Space used</dt>
+                  <dd className="font-medium tabular-nums">
+                    {formatBytes(compatibility.used_bytes)}
+                  </dd>
+                </div>
+              </dl>
+
+              {compatibility.tracks_pending > 0 ? (
+                <p className="text-muted-foreground text-xs leading-relaxed">
+                  {formatDuration(compatibility.pending_audio_seconds)} of music to
+                  convert, needing about {formatBytes(compatibility.estimated_bytes)}.
+                  Your hub does this in the background, one track at a time, and stays
+                  usable throughout.
+                </p>
+              ) : (
+                <p className="text-muted-foreground text-xs leading-relaxed">
+                  Everything that needs a compatible copy has one.
+                </p>
+              )}
+
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  onClick={() =>
+                    run("compatibility", () => api.startCompatibility())
+                  }
+                  disabled={
+                    busy === "compatibility" || compatibility.tracks_pending === 0
+                  }
+                >
+                  {busy === "compatibility" ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <HardDrive className="size-4" />
+                  )}
+                  Convert {compatibility.tracks_pending} tracks
+                </Button>
+                {compatibility.tracks_converted > 0 ? (
+                  <Button
+                    variant="ghost"
+                    onClick={() =>
+                      run("compatibility-cleanup", () =>
+                        api.cleanupCompatibility(),
+                      )
+                    }
+                    disabled={busy === "compatibility-cleanup"}
+                  >
+                    {busy === "compatibility-cleanup" ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <Trash2 className="size-4" />
+                    )}
+                    Delete copies
+                  </Button>
+                ) : null}
+              </div>
+            </Card>
+          </section>
+        ) : null}
 
         <section>
           <SectionHeader title="Appearance" />

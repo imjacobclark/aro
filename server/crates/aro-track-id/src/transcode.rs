@@ -158,6 +158,8 @@ pub enum Error {
     Opus(String),
     #[error("resampling failed: {0}")]
     Resample(String),
+    #[error("flac encoding failed: {0}")]
+    Flac(String),
     #[error(transparent)]
     Symphonia(#[from] symphonia::core::errors::Error),
     #[error(transparent)]

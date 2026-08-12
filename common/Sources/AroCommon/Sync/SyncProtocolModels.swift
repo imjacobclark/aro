@@ -591,6 +591,46 @@ public struct RemoteTranscodePlan: Codable, Sendable {
     public let concurrency: Int
 }
 
+/// What converting the library for cross-device compatibility would cost, and what it has
+/// cost so far — see the hub's `compatibility_plan`.
+public struct RemoteCompatibilityPlan: Codable, Sendable {
+    public let tracksAlreadyCompatible: UInt64
+    public let tracksPending: UInt64
+    public let tracksConverted: UInt64
+    public let pendingAudioSeconds: Double
+    public let estimatedSeconds: Double
+    public let estimatedBytes: UInt64
+    public let usedBytes: UInt64
+
+    public init(
+        tracksAlreadyCompatible: UInt64,
+        tracksPending: UInt64,
+        tracksConverted: UInt64,
+        pendingAudioSeconds: Double,
+        estimatedSeconds: Double,
+        estimatedBytes: UInt64,
+        usedBytes: UInt64
+    ) {
+        self.tracksAlreadyCompatible = tracksAlreadyCompatible
+        self.tracksPending = tracksPending
+        self.tracksConverted = tracksConverted
+        self.pendingAudioSeconds = pendingAudioSeconds
+        self.estimatedSeconds = estimatedSeconds
+        self.estimatedBytes = estimatedBytes
+        self.usedBytes = usedBytes
+    }
+}
+
+public struct RemoteCompatibilityCleanupResponse: Codable, Sendable {
+    public let removed: UInt64
+    public let freedBytes: UInt64
+
+    public init(removed: UInt64, freedBytes: UInt64) {
+        self.removed = removed
+        self.freedBytes = freedBytes
+    }
+}
+
 public struct RemoteTranscodeStartRequest: Codable, Sendable {
     public let quality: String
 

@@ -24,6 +24,9 @@ struct LibrarySettingsView: View {
     var transcodeProgress: ((UUID) async -> RemoteSyncJob?)?
     var cleanupTranscodes: ((StreamQuality) async -> RemoteTranscodeCleanupResponse?)?
     var transcodeUsage: (() async -> [RemoteTranscodeUsage])?
+    var compatibilityPlan: (() async -> RemoteCompatibilityPlan?)?
+    var startCompatibility: (() async -> RemoteSyncJob?)?
+    var cleanupCompatibility: (() async -> RemoteCompatibilityCleanupResponse?)?
 
     @State private var localServers = LocalAroServerMonitor()
     @State private var pairedDevices: [ControlledHubDevice] = []
@@ -35,6 +38,7 @@ struct LibrarySettingsView: View {
     @State private var connectionInitialAddress = ""
     @State private var showingOfflineSettings = false
     @State private var showingLowDataSettings = false
+    @State private var showingCompatibilitySettings = false
     @State private var deviceToRemove: ControlledHubDevice?
     @State private var profileToForget: LibraryProfile?
     @State private var statusMessage: String?
@@ -108,6 +112,23 @@ struct LibrarySettingsView: View {
                 }
             }
             .frame(minWidth: 460, minHeight: 420)
+        }
+        .sheet(isPresented: $showingCompatibilitySettings) {
+            NavigationStack {
+                CompatibilitySettingsView(
+                    plan: compatibilityPlan,
+                    start: startCompatibility,
+                    progress: transcodeProgress,
+                    cleanup: cleanupCompatibility
+                )
+                .navigationTitle("Compatibility")
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { showingCompatibilitySettings = false }
+                    }
+                }
+            }
+            .frame(minWidth: 460, minHeight: 480)
         }
         .sheet(isPresented: $showingOfflineSettings) {
             if let profile = registry.activeProfile {
@@ -527,6 +548,23 @@ struct LibrarySettingsView: View {
                         Spacer()
                         Button("Manage Storage") {
                             showingOfflineSettings = true
+                        }
+                    }
+                    if compatibilityPlan != nil {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Compatibility")
+                                Text(
+                                    "Keep lossless copies of tracks some devices "
+                                    + "cannot play"
+                                )
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("Convert") {
+                                showingCompatibilitySettings = true
+                            }
                         }
                     }
                     if planTranscode != nil {

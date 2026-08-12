@@ -966,6 +966,39 @@ actor AroSyncClient {
         )
     }
 
+    /// What making the library playable on every Aro would cost on this hub.
+    ///
+    /// Separate from `transcodePlan` because it answers a different question: that one is
+    /// about spending less bandwidth, this one is about a format some devices simply cannot
+    /// decode, and its output is lossless rather than a quality tier.
+    func compatibilityPlan(
+        credential: HubDeviceCredential? = nil
+    ) async throws -> RemoteCompatibilityPlan {
+        try await getAuthenticated("v1/compatibility/plan", credential: credential)
+    }
+
+    func startCompatibilityConversion(
+        credential: HubDeviceCredential? = nil
+    ) async throws -> RemoteSyncJob {
+        // An empty object rather than no body: the hub takes no options here, and sending
+        // one keeps this on the same JSON-in/JSON-out path as every other POST.
+        try await postAuthenticated(
+            "v1/compatibility/start",
+            body: EmptyRequest(),
+            credential: credential
+        )
+    }
+
+    func cleanupCompatibilityCopies(
+        credential: HubDeviceCredential? = nil
+    ) async throws -> RemoteCompatibilityCleanupResponse {
+        try await postAuthenticated(
+            "v1/compatibility/cleanup",
+            body: EmptyRequest(),
+            credential: credential
+        )
+    }
+
     func startTranscode(
         quality: StreamQuality,
         credential: HubDeviceCredential? = nil

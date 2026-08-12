@@ -13,6 +13,7 @@ pub mod artwork;
 pub mod audio_features;
 #[cfg(test)]
 mod characterization;
+pub mod compatibility;
 pub mod fingerprint;
 #[cfg(test)]
 mod fixtures;

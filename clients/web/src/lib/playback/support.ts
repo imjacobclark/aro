@@ -135,3 +135,23 @@ export function effectiveQuality(
   if (isUndecodable(track) || refusesUpFront(track)) return FALLBACK_QUALITY;
   return "original";
 }
+
+/**
+ * Whether to ask the hub for its lossless compatibility copy instead of the stored file.
+ *
+ * This is the better answer to a format the browser cannot decode. The Opus fallback above
+ * exists because there was nothing else; where a hub has made a FLAC copy, a listener who
+ * asked for lossless should get lossless rather than a 192 kbps stand-in. Only sent when the
+ * browser has actually shown it cannot cope — a browser that reads ALAC still gets the exact
+ * bytes the listener owns.
+ *
+ * Harmless against a hub that has never heard of it: an unknown query parameter is ignored
+ * and the original comes back, which is precisely the old behaviour.
+ */
+export function prefersCompatibleCopy(
+  track: CatalogTrack,
+  chosen: StreamQuality,
+): boolean {
+  if (chosen !== "original") return false;
+  return isUndecodable(track) || refusesUpFront(track);
+}

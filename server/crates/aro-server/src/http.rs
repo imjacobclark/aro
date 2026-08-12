@@ -272,6 +272,13 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/transcode/start", post(start_transcode))
         .route("/v1/transcode/cleanup", post(cleanup_transcodes))
         .route("/v1/transcode/usage", get(transcode_usage))
+        .route("/v1/compatibility/plan", get(compatibility_plan))
+        .route(
+            "/v1/compatibility/start",
+            post(start_compatibility_conversion),
+        )
+        .route("/v1/compatibility/usage", get(compatibility_usage))
+        .route("/v1/compatibility/cleanup", post(cleanup_compatibility))
         .route("/v1/artwork/candidates", get(artwork_candidates))
         .route("/v1/artwork/discover", post(discover_artwork))
         .route("/v1/artwork/resolve", post(resolve_artwork))
@@ -1370,6 +1377,202 @@ async fn start_transcode(
     Ok(Json(job))
 }
 
+/// What converting the library for cross-device compatibility would cost, before anyone
+/// commits to it.
+#[derive(Serialize)]
+struct CompatibilityPlan {
+    /// Tracks whose own format already plays everywhere and so need nothing.
+    tracks_already_compatible: u64,
+    /// Tracks that would be converted.
+    tracks_pending: u64,
+    /// Tracks already converted.
+    tracks_converted: u64,
+    /// Music still to convert, so a caller can say "3 hours" rather than only a count.
+    pending_audio_seconds: f64,
+    /// Wall time on *this* hub, from the same measured throughput the Opus ladder uses.
+    estimated_seconds: f64,
+    /// Roughly what the new copies will occupy. FLAC of a lossless source lands near 60% of
+    /// the original, which is the honest number to quote rather than a doubling.
+    estimated_bytes: u64,
+    /// What the existing copies already occupy.
+    used_bytes: u64,
+}
+
+/// The cost of making a library playable everywhere, quoted before it is paid.
+///
+/// Deliberately its own call, and deliberately counting `tracks_already_compatible`: on a
+/// library that is mostly FLAC the answer is "almost nothing to do", and the setting should
+/// be able to say so rather than implying every library doubles.
+async fn compatibility_plan(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<CompatibilityPlan>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    let store = state.store.clone();
+    let plan = tokio::task::spawn_blocking(move || {
+        let missing = store.tracks_missing_compatibility_copy()?;
+        let (converted, used_bytes) = store.compatibility_usage()?;
+
+        let mut pending = 0u64;
+        let mut already = 0u64;
+        let mut pending_seconds = 0f64;
+        let mut pending_source_bytes = 0u64;
+        for (_, codec, duration, byte_count) in &missing {
+            if aro_track_id::compatibility::needs_compatibility_copy(codec) {
+                pending += 1;
+                pending_seconds += duration.max(0.0);
+                pending_source_bytes += byte_count;
+            } else {
+                already += 1;
+            }
+        }
+        Ok::<_, aro_sync_store::StoreError>(CompatibilityPlan {
+            tracks_already_compatible: already,
+            tracks_pending: pending,
+            tracks_converted: converted,
+            pending_audio_seconds: pending_seconds,
+            // Encoding FLAC is far cheaper than Opus, but the Opus measurement is the only
+            // throughput this host has actually demonstrated, so it is used as a floor
+            // rather than inventing a number.
+            estimated_seconds: aro_track_id::transcode::estimate_seconds(
+                pending_seconds,
+                aro_track_id::transcode::StreamQuality::High,
+                1,
+            ),
+            estimated_bytes: (pending_source_bytes as f64 * 0.6) as u64,
+            used_bytes,
+        })
+    })
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))??;
+    Ok(Json(plan))
+}
+
+#[derive(Serialize)]
+struct CompatibilityUsage {
+    tracks: u64,
+    bytes: u64,
+}
+
+async fn compatibility_usage(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<CompatibilityUsage>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    let (tracks, bytes) = state.store.compatibility_usage()?;
+    Ok(Json(CompatibilityUsage { tracks, bytes }))
+}
+
+/// Converts everything that cannot already be played everywhere, reporting progress through
+/// the usual job registry.
+///
+/// One track at a time, unlike the Opus ladder which fills every spare core. This is
+/// background work nobody is waiting on, and the reference hub has 917 MB and no swap — the
+/// encoder streams rather than buffering a whole track, but running several at once is still
+/// how that machine gets pushed over. Slow and certain beats fast and offline.
+async fn start_compatibility_conversion(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<SyncJob>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    let pending: Vec<(String, String)> = {
+        let store = state.store.clone();
+        tokio::task::spawn_blocking(move || store.tracks_missing_compatibility_copy())
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))??
+            .into_iter()
+            .filter(|(_, codec, _, _)| aro_track_id::compatibility::needs_compatibility_copy(codec))
+            .map(|(hash, codec, _, _)| (hash, codec))
+            .collect()
+    };
+
+    let job = state
+        .jobs
+        .create("compatibility".to_string(), pending.len() as u64);
+    let job_id = job.job_id;
+    state.jobs.start(job_id);
+
+    let jobs = state.jobs.clone();
+    let store = state.store.clone();
+    tokio::spawn(async move {
+        for (content_hash, codec) in pending {
+            // A cancelled job stops at the next track rather than mid-encode, so nothing
+            // half-written is ever recorded.
+            if jobs
+                .get(job_id)
+                .is_some_and(|job| job.state == aro_sync_protocol::JobState::Cancelled)
+            {
+                return;
+            }
+            let store = store.clone();
+            let hash = content_hash.clone();
+            let source_codec = codec.clone();
+            let converted = tokio::task::spawn_blocking(move || {
+                let Some(source) = store.blob_path_for_download(&hash)? else {
+                    return Ok::<bool, anyhow::Error>(false);
+                };
+                let destination = store.compatibility_path(&hash);
+                if let Some(parent) = destination.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                // Written beside its destination and renamed, so a hub that loses power
+                // mid-encode leaves a stray temp file rather than a truncated FLAC that
+                // would be served as though it were whole.
+                let temp =
+                    tempfile::NamedTempFile::new_in(destination.parent().unwrap_or(&destination))?;
+                {
+                    let mut file = std::io::BufWriter::new(temp.as_file());
+                    aro_track_id::compatibility::convert_to_flac(&source, &mut file)?;
+                    file.flush()?;
+                }
+                let size = temp.as_file().metadata()?.len();
+                temp.persist(&destination)?;
+                store.record_compatibility_blob(&hash, &destination, size, Some(&source_codec))?;
+                Ok(true)
+            })
+            .await;
+            match converted {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, hash = %content_hash, "compatibility: track failed");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "compatibility: worker panicked");
+                }
+            }
+            // A track that failed still advances the job: one unreadable file shouldn't
+            // strand progress at 99% forever.
+            jobs.advance(job_id, 1);
+        }
+        jobs.complete(job_id);
+    });
+    Ok(Json(job))
+}
+
+#[derive(Serialize)]
+struct CompatibilityCleanupResponse {
+    removed: u64,
+    freed_bytes: u64,
+}
+
+/// Deletes every compatibility copy. Safe by construction: they are derived files, and the
+/// originals were never touched.
+async fn cleanup_compatibility(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<CompatibilityCleanupResponse>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    let store = state.store.clone();
+    let (removed, freed_bytes) =
+        tokio::task::spawn_blocking(move || store.purge_compatibility_copies())
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))??;
+    Ok(Json(CompatibilityCleanupResponse {
+        removed,
+        freed_bytes,
+    }))
+}
+
 #[derive(Deserialize)]
 struct CleanupTranscodesRequest {
     /// The quality to keep. Everything else is removed.
@@ -1503,6 +1706,11 @@ fn parse_quality(value: Option<&str>) -> Result<aro_track_id::transcode::StreamQ
 struct StreamQualityQuery {
     #[serde(default)]
     quality: Option<String>,
+    /// Set by a client that cannot decode the stored format and would rather have the
+    /// lossless compatibility copy than a lossy re-encode. Absent means "give me exactly
+    /// what is stored", which is what a bit-perfect client always wants.
+    #[serde(default)]
+    compatible: Option<bool>,
 }
 
 /// Serves a track at a chosen quality, transcoding to Opus when one below `original` is
@@ -1538,6 +1746,27 @@ async fn stream_blob(
     let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
 
     if quality == aro_track_id::transcode::StreamQuality::Original {
+        // A client that has told us it cannot decode the stored format gets the lossless
+        // copy instead of the lossy ladder, when one exists. This is the whole point of
+        // making them: a browser that cannot read ALAC should still hear the record rather
+        // than a 192 kbps approximation of it.
+        if query.compatible.unwrap_or(false)
+            && let Some(compatible) = state.store.compatibility_blob(&hash)?
+        {
+            let identity = BlobCacheIdentity::new(&hash, &headers);
+            if identity.is_fresh() {
+                return Ok(not_modified(&identity));
+            }
+            return download_range_inner(
+                compatible,
+                range,
+                Some(state.telemetry.clone()),
+                Some(identity),
+                COMPATIBILITY_CONTENT_TYPE,
+            )
+            .await;
+        }
+
         let identity = BlobCacheIdentity::new(&hash, &headers);
         if identity.is_fresh() {
             return Ok(not_modified(&identity));
@@ -2530,6 +2759,9 @@ async fn download_range_inner(
 /// no notion of file type, so an original really is opaque and the client has to supply the
 /// catalogue's codec to make sense of it.
 const BLOB_CONTENT_TYPE: &str = "application/octet-stream";
+
+/// Compatibility copies are always FLAC — see `aro_track_id::compatibility`.
+const COMPATIBILITY_CONTENT_TYPE: &str = "audio/flac";
 
 /// Everything the transcoder emits is Ogg Opus, and unlike an original that *is* known here.
 /// Serving a cached encode as an opaque blob made the client guess from the source codec,

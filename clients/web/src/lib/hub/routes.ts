@@ -30,6 +30,10 @@ const ALLOWED: Record<string, readonly string[]> = {
   "audio-features/status": ["GET"],
   "transcode/plan": ["GET"],
   "transcode/usage": ["GET"],
+  "compatibility/plan": ["GET"],
+  "compatibility/usage": ["GET"],
+  "compatibility/start": ["POST"],
+  "compatibility/cleanup": ["POST"],
 
   // Listening.
   "playback/activity": ["POST"],

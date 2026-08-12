@@ -4060,6 +4060,147 @@ impl HubStore {
         Ok((removed, freed))
     }
 
+    /// Where this track's compatibility copy lives, if one has been made.
+    ///
+    /// Returns `None` rather than a stale path when the file has gone: the copy is entirely
+    /// derived, so a missing one means "make it again", never "the track is broken".
+    pub fn compatibility_blob(&self, content_hash: &str) -> Result<Option<PathBuf>, StoreError> {
+        validate_hash(content_hash)?;
+        let path: Option<String> = self
+            .connection
+            .lock()
+            .query_row(
+                "SELECT path FROM compatibility_blobs WHERE content_hash = ?1",
+                [content_hash],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(path.map(PathBuf::from).filter(|path| path.is_file()))
+    }
+
+    /// Where a compatibility copy for `content_hash` should be written.
+    ///
+    /// Its own root — not `blobs/` — so that the space this feature costs is visible as a
+    /// directory someone can measure, and reclaimable by deleting it.
+    pub fn compatibility_path(&self, content_hash: &str) -> PathBuf {
+        self.root
+            .join("compatibility")
+            .join(&content_hash[..2])
+            .join(format!("{content_hash}.flac"))
+    }
+
+    pub fn record_compatibility_blob(
+        &self,
+        content_hash: &str,
+        path: &Path,
+        byte_count: u64,
+        source_codec: Option<&str>,
+    ) -> Result<(), StoreError> {
+        validate_hash(content_hash)?;
+        self.connection.lock().execute(
+            r#"
+            INSERT INTO compatibility_blobs(content_hash, path, byte_count, source_codec, created_at)
+            VALUES (?1, ?2, ?3, ?4, unixepoch())
+            ON CONFLICT(content_hash) DO UPDATE SET
+                path = excluded.path,
+                byte_count = excluded.byte_count,
+                source_codec = excluded.source_codec,
+                created_at = excluded.created_at
+            "#,
+            params![
+                content_hash,
+                path.to_string_lossy(),
+                byte_count as i64,
+                source_codec
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Live tracks with no compatibility copy yet, with their codec and duration so the
+    /// caller can decide which actually need one and quote the work before starting it.
+    pub fn tracks_missing_compatibility_copy(
+        &self,
+    ) -> Result<Vec<(String, String, f64, u64)>, StoreError> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            r#"
+            SELECT tracks.content_hash,
+                   COALESCE(json_extract(tracks.metadata, '$.codec'), ''),
+                   -- The field is `duration`; `duration_seconds` is the catalog projection's
+                   -- name for it, and reading the wrong one quotes every job as instant.
+                   COALESCE(
+                       json_extract(tracks.metadata, '$.duration'),
+                       json_extract(tracks.metadata, '$.duration_seconds'),
+                       0
+                   ),
+                   COALESCE(json_extract(tracks.metadata, '$.byte_count'), 0)
+            FROM tracks
+            WHERE tracks.tombstoned_at IS NULL
+              AND tracks.purged_at IS NULL
+              AND tracks.content_hash IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM compatibility_blobs
+                  WHERE compatibility_blobs.content_hash = tracks.content_hash
+              )
+            "#,
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, f64>(2)?,
+                    row.get::<_, i64>(3)?.max(0) as u64,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// How many compatibility copies exist and what they occupy.
+    pub fn compatibility_usage(&self) -> Result<(u64, u64), StoreError> {
+        let connection = self.connection.lock();
+        let row = connection.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(byte_count), 0) FROM compatibility_blobs",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        Ok((row.0.max(0) as u64, row.1.max(0) as u64))
+    }
+
+    /// Deletes every compatibility copy, returning how many went and how much was freed.
+    ///
+    /// Safe by construction — these are derived files and the originals are untouched — so
+    /// this is the "give me the disk back" the setting offers.
+    pub fn purge_compatibility_copies(&self) -> Result<(u64, u64), StoreError> {
+        let doomed: Vec<(String, u64)> = {
+            let connection = self.connection.lock();
+            let mut statement =
+                connection.prepare("SELECT path, byte_count FROM compatibility_blobs")?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?.max(0) as u64,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        self.connection
+            .lock()
+            .execute("DELETE FROM compatibility_blobs", [])?;
+        let mut removed = 0u64;
+        let mut freed = 0u64;
+        for (path, bytes) in doomed {
+            if std::fs::remove_file(&path).is_ok() {
+                removed += 1;
+                freed += bytes;
+            }
+        }
+        Ok((removed, freed))
+    }
+
     /// How much disk the encodes at each quality are using, for the settings screen and the
     /// dashboard.
     pub fn transcode_usage(&self) -> Result<Vec<(String, u64, u64)>, StoreError> {
@@ -4985,6 +5126,16 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
     )?;
     connection.execute_batch(
         r#"
+        -- Lossless FLAC copies of tracks whose own format cannot be played everywhere.
+        -- A third location alongside the library and the managed blobs, deliberately: the
+        -- original is never touched, and this can be deleted whole without losing anything.
+        CREATE TABLE IF NOT EXISTS compatibility_blobs (
+            content_hash TEXT PRIMARY KEY,
+            path TEXT NOT NULL,
+            byte_count INTEGER NOT NULL,
+            source_codec TEXT,
+            created_at INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS transcoded_blobs (
             content_hash TEXT NOT NULL,
             quality TEXT NOT NULL,

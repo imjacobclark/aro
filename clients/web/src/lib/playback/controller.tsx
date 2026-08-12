@@ -18,6 +18,7 @@ import { ActivityReporter } from "./activity";
 import {
   effectiveQuality,
   isUndecodable,
+  prefersCompatibleCopy,
   rememberUndecodable,
 } from "./support";
 
@@ -242,7 +243,11 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
       // Not necessarily the quality the listener picked: a browser that cannot decode this
       // format gets the hub's transcode instead of silence. See `lib/playback/support`.
       const resolved = effectiveQuality(track, quality);
-      const source = streamUrl(track, resolved);
+      const source = streamUrl(
+        track,
+        resolved,
+        prefersCompatibleCopy(track, quality),
+      );
       const isActive = slot === activeSlotRef.current;
 
       if (loadedRef.current[slot] !== source) {
@@ -288,7 +293,11 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
       const idle = playerAt(idleSlot);
       if (!idle || !track.content_hash) return false;
 
-      const source = streamUrl(track, effectiveQuality(track, quality));
+      const source = streamUrl(
+        track,
+        effectiveQuality(track, quality),
+        prefersCompatibleCopy(track, quality),
+      );
       if (loadedRef.current[idleSlot] !== source) return false;
 
       const outgoing = activePlayer();

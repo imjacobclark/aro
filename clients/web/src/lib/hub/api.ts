@@ -1,5 +1,6 @@
 import type {
   ArtworkCandidate,
+  CompatibilityPlan,
   HealthReport,
   TrackDelta,
   WriteBackOutcome,
@@ -124,6 +125,18 @@ export const api = {
     call<string[]>("shuffle", {
       method: "POST",
       body: JSON.stringify({ content_hashes: contentHashes, start }),
+    }),
+
+  /** What converting the library for cross-device compatibility would cost. */
+  compatibilityPlan: () => call<CompatibilityPlan>("compatibility/plan"),
+
+  /** Starts the background conversion; progress arrives through the usual job registry. */
+  startCompatibility: () => call<SyncJob>("compatibility/start", { method: "POST" }),
+
+  /** Deletes every compatibility copy. The originals are untouched by construction. */
+  cleanupCompatibility: () =>
+    call<{ removed: number; freed_bytes: number }>("compatibility/cleanup", {
+      method: "POST",
     }),
 
   reportActivity: (snapshot: PlaybackActivitySnapshot) =>
@@ -255,12 +268,20 @@ export const api = {
  * content hash with no notion of file type, so the proxy needs the catalogue's answer to
  * declare a media type a browser will accept.
  */
-export function streamUrl(track: CatalogTrack, quality: string): string {
+export function streamUrl(
+  track: CatalogTrack,
+  quality: string,
+  compatible = false,
+): string {
   if (!track.content_hash) return "";
 
   const parameters = new URLSearchParams();
   if (quality !== "original") parameters.set("quality", quality);
   if (track.codec) parameters.set("codec", track.codec);
+  // Asks the hub for its lossless FLAC copy rather than the stored file. Only sent when
+  // this browser has proved it cannot decode the original, so a browser that can play
+  // ALAC still gets the actual bytes the listener owns.
+  if (compatible) parameters.set("compatible", "true");
 
   const query = parameters.toString();
   return `/api/stream/${track.content_hash}${query ? `?${query}` : ""}`;

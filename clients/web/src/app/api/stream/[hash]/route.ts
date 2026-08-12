@@ -32,11 +32,12 @@ export async function GET(
 
   const quality = request.nextUrl.searchParams.get("quality") ?? undefined;
   const codec = request.nextUrl.searchParams.get("codec") ?? undefined;
+  const compatible = request.nextUrl.searchParams.get("compatible") ?? undefined;
   const range = request.headers.get("range");
 
   const response = await hubFetch({
     path: `blobs/${hash}/stream`,
-    query: { quality },
+    query: { quality, compatible },
     headers: range ? { range } : undefined,
     signal: request.signal,
   });
@@ -71,13 +72,18 @@ export async function GET(
   // a say when the original is what was asked for.
   const declared = response.headers.get("content-type");
   const transcoded = isTranscodedQuality(quality);
+  // A compatibility copy is FLAC, and the hub says so — but an older hub that does not
+  // know the parameter will have served the original instead, and its opaque blob must
+  // still be named from the source codec. Trusting what came back covers both.
+  const declaredAudio = declared?.startsWith("audio/") ? declared : undefined;
   headers.set(
     "content-type",
     transcoded
       ? TRANSCODE_MEDIA_TYPE
-      : !declared || declared === "application/octet-stream"
-        ? mediaType(codec)
-        : declared,
+      : (declaredAudio ??
+        (!declared || declared === "application/octet-stream"
+          ? mediaType(codec)
+          : declared)),
   );
 
   // A transcode is encoded on demand and cannot satisfy a range request until the cached

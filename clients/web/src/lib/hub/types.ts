@@ -356,3 +356,17 @@ export interface HealthReport {
   /** Only exact duplicates count: an alternate encoding is a judgement call, not a saving. */
   exact_reclaimable_bytes: number;
 }
+
+/**
+ * What converting the library for cross-device compatibility would cost, and what it has
+ * cost so far — see the hub's `compatibility_plan`.
+ */
+export interface CompatibilityPlan {
+  tracks_already_compatible: number;
+  tracks_pending: number;
+  tracks_converted: number;
+  pending_audio_seconds: number;
+  estimated_seconds: number;
+  estimated_bytes: number;
+  used_bytes: number;
+}
