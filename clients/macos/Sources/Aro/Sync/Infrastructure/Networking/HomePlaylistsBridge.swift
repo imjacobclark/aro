@@ -59,12 +59,17 @@ struct HomePlaylistsBridge {
     /// Tier 3 "seed-track radio" (see `aro-server`'s `playlists::radio`) — the tracks
     /// most similar to `contentHash`, nearest first, seed itself in front. `nil` if
     /// no server is reachable or the seed hasn't been analyzed yet.
-    func radio(contentHash: String, limit: Int = 30) async -> ServerGeneratedPlaylist? {
+    func radio(
+        contentHash: String,
+        limit: Int = 30,
+        offset: Int = 0
+    ) async -> ServerGeneratedPlaylist? {
         guard let connection else { return nil }
         do {
             return try await connection.client.radio(
                 contentHash: contentHash,
                 limit: limit,
+                offset: offset,
                 credential: connection.credential
             )
         } catch {

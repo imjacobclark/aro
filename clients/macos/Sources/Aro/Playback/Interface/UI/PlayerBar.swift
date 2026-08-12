@@ -32,8 +32,13 @@ struct PlayerBar: View {
                 .frame(minWidth: 135, maxWidth: .infinity)
                 .layoutPriority(1)
 
+            // Sized to its contents rather than pinned: the queue control grows into a
+            // "Radio on" pill while a station plays, and a fixed width simply clipped it
+            // off the end of the bar. The timeline beside it is the flexible element, so
+            // it gives the width back when the pill is not there.
             outputControls
-                .frame(width: 198)
+                .fixedSize(horizontal: true, vertical: false)
+                .layoutPriority(3)
         }
         .padding(.horizontal, 16)
         .frame(maxWidth: .infinity)
@@ -373,14 +378,25 @@ struct PlayerBar: View {
             Button {
                 isShowingQueue.toggle()
             } label: {
-                Image(systemName: "list.bullet")
-                    .font(.system(size: 13, weight: .medium))
-                    .frame(width: 26, height: 26)
+                // Still the queue control either way — a station is a queue, so this
+                // stays one button rather than growing a second thing to click.
+                if playback.isPlayingRadio {
+                    RadioModePill()
+                } else {
+                    Image(systemName: "list.bullet")
+                        .font(.system(size: 13, weight: .medium))
+                        .frame(width: 26, height: 26)
+                }
             }
             .buttonStyle(.plain)
             .disabled(playback.queue.isEmpty)
-            .help("Queue")
-            .accessibilityLabel("Playback queue")
+            .help(playback.isPlayingRadio ? "Radio queue" : "Queue")
+            .accessibilityLabel(
+                playback.isPlayingRadio ? "Radio queue" : "Playback queue"
+            )
+            // The pill is wider than the icon it replaces, so without this the controls
+            // to its left jump sideways the moment a station starts.
+            .animation(.easeInOut(duration: 0.28), value: playback.isPlayingRadio)
             .popover(isPresented: $isShowingQueue, arrowEdge: .bottom) {
                 PlaybackQueuePopover(playback: playback)
             }

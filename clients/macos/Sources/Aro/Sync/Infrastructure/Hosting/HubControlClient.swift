@@ -429,14 +429,19 @@ struct HubControlClient: Sendable {
     /// Tier 3 "seed-track radio" (see `aro-server`'s `playlists::radio`) — the tracks
     /// most similar to `contentHash` by measured audio-feature vector, nearest first,
     /// with `contentHash` itself in front. `nil` if the seed hasn't been analyzed yet.
+    ///
+    /// `offset` walks further out from the seed, which is what lets a station continue
+    /// rather than end — the ranking is a stable total order, so paging it needs no state.
     func radio(
         contentHash: String,
-        limit: Int = 30
+        limit: Int = 30,
+        offset: Int = 0
     ) async throws -> ServerGeneratedPlaylist? {
         let result = try await sendValue([
             "command": "radio",
             "content_hash": contentHash,
             "limit": limit,
+            "offset": offset,
         ])
         if result is NSNull { return nil }
         let data = try JSONSerialization.data(withJSONObject: result)

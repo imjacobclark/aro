@@ -333,15 +333,14 @@ struct HomeView: View {
         playback.play(song: first, queue: songs)
     }
 
-    /// Fetches Tier 3 "seed-track radio" from `song` and starts playing it — a no-op
-    /// (rather than an error) if the seed hasn't been analyzed yet or no server is
-    /// reachable, since this is a context-menu convenience, not a critical action.
+    /// Fetches Tier 3 "seed-track radio" from `song` and starts playing it.
     private func startRadio(from song: Song) async {
-        guard let contentHash = song.contentHash,
-              let radioPlaylist = await loadRadio(contentHash) else { return }
-        let queue = songs(for: radioPlaylist)
-        guard let first = queue.first else { return }
-        playback.play(song: first, queue: queue)
+        await RadioStation.start(
+            seededBy: song,
+            in: allSongs(),
+            loadRadio: loadRadio,
+            playback: playback
+        )
     }
 
     private func refresh() async {

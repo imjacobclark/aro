@@ -379,6 +379,18 @@ struct ContentView: View {
                     start: start
                 )
             }
+            // Turning the hub's answer back into songs needs the library, which is here
+            // rather than in the controller — same reason as the transport above.
+            playback.stationExtender = { seedHash, offset in
+                guard let station = await homePlaylistsBridge.radio(
+                    contentHash: seedHash,
+                    offset: offset
+                ) else { return [] }
+                return SongLibrary.resolving(
+                    station.contentHashes,
+                    in: store.allSongs
+                )
+            }
         }
         .onChange(of: cachedPlaylists) { _, newValue in
             ScreenDataCache.savePlaylists(

@@ -177,7 +177,11 @@ pub struct ListeningEventSummary {
 #[derive(Clone, Debug, Default)]
 pub struct PlaylistSeeds {
     /// Every live, content-addressed track, in stable `hub_track_id` order.
-    pub tracks: Vec<PlaylistSeedTrack>,
+    ///
+    /// Shared rather than owned: building this is the expensive part of a rebuild, and it
+    /// changes only when the library does — so the server caches one copy and hands it to
+    /// every request until a track, its metadata, or its analysis actually changes.
+    pub tracks: Arc<Vec<PlaylistSeedTrack>>,
     /// Listening-event aggregates, present only for content hashes with at least one
     /// logged event — absence means never played.
     pub listening: HashMap<String, ListeningEventSummary>,
@@ -1601,9 +1605,65 @@ impl HubStore {
     /// and first-seen time, plus decayed-affinity/skip/time-of-day aggregates from
     /// `listening_events` — all keyed by content hash, since that's the only identifier
     /// client libraries share with this database.
+    ///
+    /// Both halves at once, which is what a caller with no cache wants. The server splits
+    /// them — see [`Self::playlist_seed_tracks`] and [`Self::listening_summaries`] — because
+    /// they change on completely different schedules.
     pub fn playlist_seeds(&self) -> Result<PlaylistSeeds, StoreError> {
+        let tracks = self.playlist_seed_tracks()?;
+        let (listening, engagement) = self.listening_summaries()?;
+        Ok(PlaylistSeeds {
+            tracks,
+            listening,
+            engagement,
+        })
+    }
+
+    /// A cheap fingerprint of everything [`Self::playlist_seed_tracks`] is derived from.
+    ///
+    /// The expensive half of the seeds re-reads and re-parses the whole library, so it is
+    /// cached — and the cache is only as good as the question "has anything changed?".
+    /// Asking that with `MAX(sequence)` over the whole operation log was too blunt: a
+    /// completed listen is an operation too, so the answer was "yes" after almost every
+    /// track played, and Home rebuilt the entire catalogue on nearly every open.
+    ///
+    /// Listening is deliberately excluded here because it feeds only the *cheap* half.
+    /// Analysis progress is deliberately included: audio features are written by background
+    /// workers that never touch the operation log, so without a count a freshly analyzed
+    /// track would stay invisible to radio and the mixes until something unrelated happened
+    /// to bump a sequence.
+    pub fn seed_generation(&self) -> Result<SeedGeneration, StoreError> {
         let connection = self.connection.lock();
-        let mut seeds = PlaylistSeeds::default();
+        // Grouped rather than filtered with `<>`, so the index on (entity_type, sequence)
+        // can answer it by touching one row per entity type instead of scanning a log that
+        // only ever grows. There are a handful of entity types.
+        let mut statement = connection
+            .prepare("SELECT entity_type, MAX(sequence) FROM operations GROUP BY entity_type")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+        })?;
+        let mut track_sequence = 0;
+        for row in rows {
+            let (entity_type, sequence) = row?;
+            if entity_type != LISTENING_SESSION_ENTITY {
+                track_sequence = track_sequence.max(sequence);
+            }
+        }
+        let analyzed_tracks =
+            connection.query_row("SELECT COUNT(*) FROM audio_features", [], |row| row.get(0))?;
+        Ok(SeedGeneration {
+            track_sequence,
+            analyzed_tracks,
+        })
+    }
+
+    /// The expensive half: every live track, its metadata, and its analysis.
+    ///
+    /// Shared behind an `Arc` because the whole point of computing it separately is to hand
+    /// the same copy to every request until the library actually changes.
+    pub fn playlist_seed_tracks(&self) -> Result<Arc<Vec<PlaylistSeedTrack>>, StoreError> {
+        let connection = self.connection.lock();
+        let mut tracks_out: Vec<PlaylistSeedTrack> = Vec::new();
 
         // Loaded up front (rather than a per-track lookup) so the tracks loop below
         // stays a single pass; `audio_features` is typically much smaller than
@@ -1678,7 +1738,7 @@ impl HubStore {
                     .map(str::to_owned)
             };
             let audio_features_json = audio_features_by_hash.get(&content_hash).cloned();
-            seeds.tracks.push(PlaylistSeedTrack {
+            tracks_out.push(PlaylistSeedTrack {
                 content_hash,
                 favourite,
                 mood_tags,
@@ -1691,6 +1751,15 @@ impl HubStore {
             });
         }
         drop(tracks);
+        Ok(Arc::new(tracks_out))
+    }
+
+    /// The cheap half: what the listener has actually done, from the event log and the
+    /// playback heartbeats. Rebuilt per request, because it changes on every played track
+    /// and is a fraction of the cost of the half above.
+    pub fn listening_summaries(&self) -> Result<ListeningSummaries, StoreError> {
+        let connection = self.connection.lock();
+        let mut seeds = PlaylistSeeds::default();
 
         const DECAY_HALF_LIFE_DAYS: f64 = 45.0;
         let now_utc = chrono::Utc::now();
@@ -1800,7 +1869,7 @@ impl HubStore {
         drop(rows);
         drop(engagement);
 
-        Ok(seeds)
+        Ok((seeds.listening, seeds.engagement))
     }
 
     pub fn dashboard_stats(&self) -> Result<Value, StoreError> {
@@ -2321,7 +2390,12 @@ impl HubStore {
         validate_hash(hash)?;
         let final_path = self.blob_path(hash);
         let upload_path = self.upload_path(hash);
-        let referenced = self.referenced_blob_path(hash)?;
+        // Existence only, so the recorded identity does not matter here — but the file does
+        // have to actually be there, which is the check the query itself cannot make.
+        let referenced = self
+            .referenced_blob(hash)?
+            .map(|reference| reference.path)
+            .filter(|path| path.is_file());
         let committed = final_path
             .metadata()
             .map(|metadata| metadata.len())
@@ -2551,17 +2625,25 @@ impl HubStore {
     pub fn import_referenced(&self, source: &Path) -> Result<(String, u64), StoreError> {
         let canonical = source.canonicalize()?;
         let (hash, size) = hash_file(&canonical)?;
+        // Read the mtime after hashing, not before: a file rewritten mid-hash then gets an
+        // mtime that will not match on the next check, so the next request re-hashes rather
+        // than trusting bytes that were changing as they were read.
+        let mtime = std::fs::metadata(&canonical)
+            .as_ref()
+            .map(modified_nanos)
+            .unwrap_or(-1);
         self.connection.lock().execute(
             r#"
-            INSERT INTO referenced_blobs(hash, path, size, available, verified_at)
-            VALUES (?1, ?2, ?3, 1, unixepoch())
+            INSERT INTO referenced_blobs(hash, path, size, available, verified_at, verified_mtime)
+            VALUES (?1, ?2, ?3, 1, unixepoch(), ?4)
             ON CONFLICT(hash) DO UPDATE SET
                 path = excluded.path,
                 size = excluded.size,
                 available = 1,
-                verified_at = excluded.verified_at
+                verified_at = excluded.verified_at,
+                verified_mtime = excluded.verified_mtime
             "#,
-            params![hash, canonical.to_string_lossy(), size],
+            params![hash, canonical.to_string_lossy(), size, mtime],
         )?;
         Ok((hash, size))
     }
@@ -2823,23 +2905,65 @@ impl HubStore {
         rows.collect::<Result<_, _>>().map_err(Into::into)
     }
 
+    /// Where a blob's bytes can be read from right now, or `None` if they cannot be trusted.
+    ///
+    /// This is on the hot path for playback: a client streaming a track asks once per byte
+    /// range, which for a 24 MB album track is a few hundred calls. A managed blob answers
+    /// from its content-addressed path and is done. A referenced blob points at a file the
+    /// hub does not own — something else can rewrite or replace it at any time — so it has
+    /// to be re-checked, and the check used to be a full SHA-256 of the entire file. On a
+    /// Raspberry Pi that is around a second of CPU, per range request, several at a time:
+    /// enough on its own to make lossless playback impossible.
+    ///
+    /// So the identity of the verified file is recorded alongside the hash. Unchanged size
+    /// and mtime means unchanged bytes, which is the same assumption every incremental
+    /// backup tool makes, and it costs one `stat`. Anything else — a different size, a
+    /// touched mtime, or a row from before that identity was recorded — falls through to
+    /// the real hash, exactly as before.
     pub fn blob_path_for_download(&self, hash: &str) -> Result<Option<PathBuf>, StoreError> {
         validate_hash(hash)?;
         let path = self.blob_path(hash);
         if path.is_file() {
             return Ok(Some(path));
         }
-        let referenced = self.referenced_blob_path(hash)?;
-        if let Some(path) = &referenced
-            && verify_file(path, hash).is_err()
-        {
-            self.connection.lock().execute(
-                "UPDATE referenced_blobs SET available = 0 WHERE hash = ?1",
-                [hash],
-            )?;
+        let Some(reference) = self.referenced_blob(hash)? else {
+            return Ok(None);
+        };
+        let Ok(metadata) = std::fs::metadata(&reference.path) else {
+            self.mark_reference_unavailable(hash)?;
+            return Ok(None);
+        };
+        if reference.matches(&metadata) {
+            return Ok(Some(reference.path));
+        }
+        if verify_file(&reference.path, hash).is_err() {
+            self.mark_reference_unavailable(hash)?;
             return Ok(None);
         }
-        Ok(referenced)
+        self.record_reference_identity(hash, &metadata)?;
+        Ok(Some(reference.path))
+    }
+
+    fn mark_reference_unavailable(&self, hash: &str) -> Result<(), StoreError> {
+        self.connection.lock().execute(
+            "UPDATE referenced_blobs SET available = 0 WHERE hash = ?1",
+            [hash],
+        )?;
+        Ok(())
+    }
+
+    fn record_reference_identity(
+        &self,
+        hash: &str,
+        metadata: &std::fs::Metadata,
+    ) -> Result<(), StoreError> {
+        self.connection.lock().execute(
+            "UPDATE referenced_blobs \
+             SET size = ?2, verified_mtime = ?3, verified_at = unixepoch() \
+             WHERE hash = ?1",
+            params![hash, metadata.len() as i64, modified_nanos(metadata)],
+        )?;
+        Ok(())
     }
 
     /// The full metadata map for a track, as materialized from its operation history.
@@ -4256,17 +4380,22 @@ impl HubStore {
             .join(format!("{}.partial", hash.to_ascii_lowercase()))
     }
 
-    fn referenced_blob_path(&self, hash: &str) -> Result<Option<PathBuf>, StoreError> {
-        let path: Option<String> = self
+    fn referenced_blob(&self, hash: &str) -> Result<Option<ReferencedBlob>, StoreError> {
+        let row: Option<(String, i64, Option<i64>)> = self
             .connection
             .lock()
             .query_row(
-                "SELECT path FROM referenced_blobs WHERE hash = ?1 AND available = 1",
+                "SELECT path, size, verified_mtime FROM referenced_blobs \
+                 WHERE hash = ?1 AND available = 1",
                 [hash],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
-        Ok(path.map(PathBuf::from).filter(|path| path.is_file()))
+        Ok(row.map(|(path, size, verified_mtime)| ReferencedBlob {
+            path: PathBuf::from(path),
+            size,
+            verified_mtime,
+        }))
     }
 
     fn all_snapshot_tracks(&self) -> Result<Vec<ManifestEntry>, StoreError> {
@@ -4280,6 +4409,62 @@ impl HubStore {
             }
         }
     }
+}
+
+/// The entity type carried by an operation that records a completed listen.
+///
+/// Named because it is the one operation kind that says nothing about the library itself —
+/// see [`HubStore::seed_generation`], which exists entirely to tell it apart from the rest.
+pub const LISTENING_SESSION_ENTITY: &str = "listening_session";
+
+/// What a listener has done with their library: play aggregates from the event log, and
+/// how far through tracks were actually played from the heartbeats.
+pub type ListeningSummaries = (
+    HashMap<String, ListeningEventSummary>,
+    HashMap<String, EngagementSummary>,
+);
+
+/// What the expensive half of the playlist seeds was built from, cheap enough to ask on
+/// every request. Equal generations mean a cached build is still current.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SeedGeneration {
+    /// Highest operation sequence, ignoring listening.
+    pub track_sequence: u64,
+    /// How many tracks have audio features, so finishing an analysis pass invalidates too.
+    pub analyzed_tracks: u64,
+}
+
+/// A blob that lives in someone else's file, plus what that file looked like when its
+/// bytes were last hashed. See `blob_path_for_download`.
+struct ReferencedBlob {
+    path: PathBuf,
+    size: i64,
+    verified_mtime: Option<i64>,
+}
+
+impl ReferencedBlob {
+    /// True when this is recognisably the same file that was verified.
+    ///
+    /// A missing `verified_mtime` never matches: the row predates the column, so nothing is
+    /// known about which bytes were hashed and the only honest answer is to hash them.
+    fn matches(&self, metadata: &std::fs::Metadata) -> bool {
+        self.verified_mtime
+            .is_some_and(|mtime| mtime == modified_nanos(metadata))
+            && self.size == metadata.len() as i64
+    }
+}
+
+/// A file's modification time as nanoseconds since the epoch, or `-1` where the filesystem
+/// declines to report one. `-1` is safe as a sentinel because it can never equal a real
+/// timestamp read back from a file that exists, so an unreportable mtime simply keeps
+/// failing the identity check and falls through to a real hash.
+fn modified_nanos(metadata: &std::fs::Metadata) -> i64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|elapsed| i64::try_from(elapsed.as_nanos()).ok())
+        .unwrap_or(-1)
 }
 
 fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
@@ -4417,7 +4602,8 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
             path TEXT NOT NULL,
             size INTEGER NOT NULL,
             available INTEGER NOT NULL DEFAULT 1,
-            verified_at INTEGER NOT NULL
+            verified_at INTEGER NOT NULL,
+            verified_mtime INTEGER
         );
         CREATE TABLE IF NOT EXISTS sources (
             source_id TEXT PRIMARY KEY,
@@ -4606,6 +4792,27 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
     );
     let _ = connection.execute(
         "ALTER TABLE device_credentials ADD COLUMN can_contribute INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    // Lets `seed_generation` find the newest operation per entity type by touching one row
+    // each, rather than scanning a log that only grows. Without it, the query that decides
+    // whether Home's playlists need rebuilding would itself get slower every time anyone
+    // listened to anything.
+    let _ = connection.execute(
+        "CREATE INDEX IF NOT EXISTS operations_entity_sequence \
+         ON operations(entity_type, sequence)",
+        [],
+    );
+    // What the file looked like the last time its bytes were actually hashed. A referenced
+    // blob lives at a path the hub does not own, so it has to be re-checked before being
+    // served — but re-checking used to mean a full SHA-256 of the whole track on *every*
+    // range request, and a client streaming a 24 MB album track asks ~375 times. Recording
+    // (size, mtime) at the moment of verification turns the common case into a `stat`, and
+    // the hash back into what it should be: the thing that runs when the file has changed.
+    // A row written before this column existed has a NULL mtime and so verifies exactly
+    // once, then records its identity.
+    let _ = connection.execute(
+        "ALTER TABLE referenced_blobs ADD COLUMN verified_mtime INTEGER",
         [],
     );
     let _ = connection.execute("ALTER TABLE sources ADD COLUMN owner_device_id TEXT", []);
@@ -4825,6 +5032,20 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
     // The condition can only match that garbage. A contributed track always carries a
     // content hash, and a scanned one always has a `source_files` row, so a track with
     // neither has no bytes behind it anywhere and never had.
+    // Listening history recorded before ids were canonicalised on the way in. These rows
+    // are joined against `tracks.hub_track_id` to name what was played, and an uppercase
+    // spelling matched nothing: 88 of one library's 108 plays showed as "Unknown Track",
+    // and a track played under both spellings appeared twice with its count split. The
+    // events themselves were always fine — only how they were written down.
+    run_once(connection, 19, |connection| {
+        connection.execute_batch(
+            r#"
+            UPDATE listening_events
+            SET track_id = lower(track_id)
+            WHERE track_id <> lower(track_id);
+            "#,
+        )
+    })?;
     run_once(connection, 17, |connection| {
         connection.execute_batch(
             r#"
@@ -4893,6 +5114,17 @@ fn ratio(value: u64, total: u64) -> f64 {
     }
 }
 
+/// A UUID as this database spells them, leaving anything that isn't one untouched.
+///
+/// Clients disagree about case — `UUID.uuidString` is uppercase in Swift, `Uuid` renders
+/// lowercase in Rust — and SQLite's text comparison does not, so the spelling has to be
+/// settled on the way in rather than at every place that compares one.
+fn canonical_uuid(value: &str) -> String {
+    Uuid::parse_str(value)
+        .map(|uuid| uuid.to_string())
+        .unwrap_or_else(|_| value.to_owned())
+}
+
 fn materialize_operation(
     transaction: &rusqlite::Transaction<'_>,
     operation: &Operation,
@@ -4916,10 +5148,15 @@ fn materialize_operation(
             "#,
             params![
                 operation.entity_id,
+                // Canonicalised for the same reason as a track edit's id below: stats join
+                // these against `tracks.hub_track_id`, and an uppercase spelling silently
+                // matched nothing — 88 of one library's 108 plays resolved to "Unknown
+                // Track", and the same track counted twice under two spellings.
                 operation
                     .payload
                     .get("track_id")
                     .and_then(Value::as_str)
+                    .map(canonical_uuid)
                     .unwrap_or_default(),
                 operation.device_id.to_string(),
                 operation.payload.to_string(),
@@ -4969,10 +5206,17 @@ fn materialize_operation(
     if operation.entity_type != "track" && operation.entity_type != "track_state" {
         return Ok(());
     }
-    let track_id = operation.entity_id.clone();
-    if Uuid::parse_str(&track_id).is_err() {
+    // Canonical form, not whatever case the client happened to use. Swift renders a UUID
+    // uppercase and Rust lowercase, and SQLite compares text exactly — so a Mac naming a
+    // track the hub already had still missed it, and the `tracks` upsert below duly
+    // created a second row under the uppercase spelling. That is where the phantoms came
+    // from: not unmapped ids, but correctly mapped ones the hub could not recognise as
+    // its own. Parsing already proves it is a UUID; using the parsed value costs nothing
+    // and makes the spelling the client chose irrelevant.
+    let Ok(parsed_track_id) = Uuid::parse_str(&operation.entity_id) else {
         return Ok(());
-    }
+    };
+    let track_id = parsed_track_id.to_string();
 
     // `track_state` is state *about* a track — a favourite, a manual correction, chosen
     // artwork. It must never bring a track into existence.
@@ -6075,6 +6319,106 @@ mod tests {
             .unwrap();
     }
 
+    /// Swift spells a UUID uppercase and Rust lowercase, and SQLite compares text exactly.
+    /// A Mac naming a track the hub already had therefore missed it, and the upsert created
+    /// a second row under the uppercase spelling — which is where phantom tracks came from,
+    /// and why listening history resolved to "Unknown Track".
+    #[test]
+    fn a_track_edit_finds_its_track_whatever_case_the_client_spelled_the_id_in() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let track_id = Uuid::new_v4();
+
+        let stamp = |logical: u32| HybridTimestamp {
+            physical_millis: 1_000,
+            logical,
+            device_id: Uuid::nil(),
+        };
+
+        let mut create = operation(Uuid::new_v4());
+        create.entity_id = track_id.to_string();
+        create.payload = serde_json::json!({
+            "content_hash": "a".repeat(64),
+            "metadata": {"title": "Real Track", "artist": "Real Artist"},
+        });
+        create.field_versions = BTreeMap::from([
+            ("content_hash".to_owned(), stamp(1)),
+            ("metadata".to_owned(), stamp(1)),
+        ]);
+        store.append_operations(&[create]).unwrap();
+
+        let count = |store: &HubStore| -> i64 {
+            store
+                .connection
+                .lock()
+                .query_row("SELECT count(*) FROM tracks", [], |row| row.get(0))
+                .unwrap()
+        };
+        assert_eq!(count(&store), 1);
+
+        // The same track, named the way a Mac names it.
+        let mut edit = operation(Uuid::new_v4());
+        edit.entity_type = "track_state".into();
+        edit.entity_id = track_id.to_string().to_uppercase();
+        edit.payload = serde_json::json!({"favourite": true});
+        edit.field_versions = BTreeMap::from([("favourite".to_owned(), stamp(2))]);
+        store.append_operations(&[edit]).unwrap();
+
+        assert_eq!(
+            count(&store),
+            1,
+            "an uppercase id must not conjure a second track"
+        );
+        let favourite: Option<Value> = store
+            .connection
+            .lock()
+            .query_row(
+                "SELECT json_extract(metadata, '$.favourite') FROM tracks
+                 WHERE hub_track_id = ?1",
+                [track_id.to_string()],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .unwrap()
+            .map(Value::from);
+        assert_eq!(
+            favourite,
+            Some(Value::from(1)),
+            "the edit must land on the track it named"
+        );
+    }
+
+    /// Listening history is joined against `tracks.hub_track_id` to say what was played,
+    /// so an uppercase spelling is a play that cannot be attributed to anything.
+    #[test]
+    fn listening_history_records_the_track_id_canonically() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let track_id = Uuid::new_v4();
+
+        let mut listen = operation(Uuid::new_v4());
+        listen.entity_type = "listening_session".into();
+        listen.entity_id = Uuid::new_v4().to_string();
+        listen.payload = serde_json::json!({
+            "track_id": track_id.to_string().to_uppercase(),
+            "listened_seconds": 42.0,
+            "completed": true,
+        });
+        store.append_operations(&[listen]).unwrap();
+
+        let stored: String = store
+            .connection
+            .lock()
+            .query_row("SELECT track_id FROM listening_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            stored,
+            track_id.to_string(),
+            "stored in the hub's own spelling"
+        );
+    }
+
     /// The counter that lets identification stop re-decoding a file that will never
     /// decode. Without it one undecodable track drew 4,068 full decode attempts of a
     /// 26 MB file in a week, because a failed identification is simply retried.
@@ -6731,6 +7075,108 @@ mod tests {
         );
     }
 
+    /// Sets a file's modification time, so a test can say whether a rewrite is meant to
+    /// look like a change to the hub or not.
+    fn set_mtime(path: &Path, time: std::time::SystemTime) {
+        let handle = fs::OpenOptions::new().write(true).open(path).unwrap();
+        handle
+            .set_times(fs::FileTimes::new().set_modified(time))
+            .unwrap();
+    }
+
+    #[test]
+    fn unchanged_referenced_blobs_are_served_without_rehashing() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_directory = tempfile::tempdir().unwrap();
+        let referenced = source_directory.path().join("referenced.flac");
+        fs::write(&referenced, b"referenced audio").unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let (hash, _) = store.import_referenced(&referenced).unwrap();
+        let imported_mtime = referenced.metadata().unwrap().modified().unwrap();
+
+        // Same length, different bytes, and the mtime put back exactly as it was — a file
+        // that is lying about not having changed. Serving it anyway is the deliberate
+        // trade: (size, mtime) is what makes playback possible at all, because the
+        // alternative is hashing the whole track on every one of the hundreds of range
+        // requests a single play makes. This test exists to pin that trade down, so that
+        // if anyone ever tightens it back up they do it knowingly.
+        fs::write(&referenced, b"REFERENCED AUDIO").unwrap();
+        set_mtime(&referenced, imported_mtime);
+
+        assert_eq!(
+            store.blob_path_for_download(&hash).unwrap(),
+            Some(referenced.canonicalize().unwrap()),
+            "an unchanged size and mtime must not trigger a re-hash"
+        );
+    }
+
+    #[test]
+    fn referenced_blobs_rewritten_in_place_are_caught_by_their_mtime() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_directory = tempfile::tempdir().unwrap();
+        let referenced = source_directory.path().join("referenced.flac");
+        fs::write(&referenced, b"referenced audio").unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let (hash, _) = store.import_referenced(&referenced).unwrap();
+
+        // Byte for byte the same length as before, so size alone would miss it entirely.
+        fs::write(&referenced, b"REFERENCED AUDIO").unwrap();
+        set_mtime(
+            &referenced,
+            std::time::SystemTime::now() + std::time::Duration::from_secs(60),
+        );
+
+        assert_eq!(
+            store.blob_path_for_download(&hash).unwrap(),
+            None,
+            "a moved mtime must fall through to a real hash, which must then fail"
+        );
+        assert!(
+            !store.blob_status(&hash).unwrap().0,
+            "and the reference must be marked unavailable rather than retried forever"
+        );
+    }
+
+    #[test]
+    fn referenced_blobs_from_before_the_identity_column_verify_once_then_settle() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_directory = tempfile::tempdir().unwrap();
+        let referenced = source_directory.path().join("referenced.flac");
+        fs::write(&referenced, b"referenced audio").unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let (hash, _) = store.import_referenced(&referenced).unwrap();
+
+        // Exactly what an upgraded database looks like: verified once, long ago, with no
+        // record of what was verified.
+        store
+            .connection
+            .lock()
+            .execute(
+                "UPDATE referenced_blobs SET verified_mtime = NULL WHERE hash = ?1",
+                [&hash],
+            )
+            .unwrap();
+
+        assert!(
+            store.blob_path_for_download(&hash).unwrap().is_some(),
+            "a row with no recorded identity must still be served after verifying"
+        );
+        let recorded: Option<i64> = store
+            .connection
+            .lock()
+            .query_row(
+                "SELECT verified_mtime FROM referenced_blobs WHERE hash = ?1",
+                [&hash],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            recorded,
+            Some(modified_nanos(&referenced.metadata().unwrap())),
+            "and that one verification must record the identity, so it never repeats"
+        );
+    }
+
     #[test]
     fn join_preview_detects_conflicts_and_commit_is_single_use() {
         let directory = tempfile::tempdir().unwrap();
@@ -7350,6 +7796,108 @@ mod tests {
 
         // One session is not a rate: a single abandoned play is not evidence of dislike.
         assert_eq!(EngagementSummary::default().completion_rate(), None);
+    }
+
+    /// The rebuild that `seed_generation` guards re-reads and re-parses the whole library,
+    /// so what does *not* move it matters as much as what does. Listening is by far the most
+    /// frequent thing that happens to a hub, and it feeds only the cheap half of the seeds.
+    #[test]
+    fn listening_does_not_invalidate_the_library_half_of_the_seeds() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let device_id = Uuid::new_v4();
+        let track_id = Uuid::new_v4();
+
+        store
+            .append_operations(&[Operation {
+                operation_id: Uuid::new_v4(),
+                device_id,
+                entity_type: "track".into(),
+                entity_id: track_id.to_string(),
+                kind: "upsert".into(),
+                payload: serde_json::json!({
+                    "content_hash": "a".repeat(64),
+                    "title": "A Track",
+                }),
+                field_versions: BTreeMap::new(),
+            }])
+            .unwrap();
+
+        let after_track = store.seed_generation().unwrap();
+
+        store
+            .append_operations(&[Operation {
+                operation_id: Uuid::new_v4(),
+                device_id,
+                entity_type: LISTENING_SESSION_ENTITY.into(),
+                entity_id: Uuid::new_v4().to_string(),
+                kind: "upsert".into(),
+                payload: serde_json::json!({
+                    "track_id": track_id.to_string(),
+                    "started_at": 1_000.0,
+                    "listened_seconds": 180.0,
+                    "completed": true,
+                }),
+                field_versions: BTreeMap::new(),
+            }])
+            .unwrap();
+
+        assert_eq!(
+            store.seed_generation().unwrap(),
+            after_track,
+            "a completed listen must not force the whole library to be re-read"
+        );
+
+        // But a real library change still must.
+        store
+            .append_operations(&[Operation {
+                operation_id: Uuid::new_v4(),
+                device_id,
+                entity_type: "track".into(),
+                entity_id: Uuid::new_v4().to_string(),
+                kind: "upsert".into(),
+                payload: serde_json::json!({
+                    "content_hash": "b".repeat(64),
+                    "title": "Another Track",
+                }),
+                field_versions: BTreeMap::new(),
+            }])
+            .unwrap();
+
+        assert_ne!(
+            store.seed_generation().unwrap(),
+            after_track,
+            "a new track must invalidate the cached library half"
+        );
+    }
+
+    /// Audio features are written by background analysis, which never touches the operation
+    /// log. Before analysis progress was part of the generation, the only reason a freshly
+    /// analyzed track ever became visible to radio was that some *unrelated* operation
+    /// happened to move the sequence.
+    #[test]
+    fn finishing_analysis_invalidates_the_cached_library_half() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let before = store.seed_generation().unwrap();
+
+        store
+            .connection
+            .lock()
+            .execute(
+                "INSERT INTO audio_features(content_hash, algorithm_version, payload) \
+                 VALUES (?1, 1, '{}')",
+                [&"c".repeat(64)],
+            )
+            .unwrap();
+
+        let after = store.seed_generation().unwrap();
+        assert_eq!(after.track_sequence, before.track_sequence);
+        assert_eq!(
+            after.analyzed_tracks,
+            before.analyzed_tracks + 1,
+            "analysis progress has to be part of the generation, or new analysis stays invisible"
+        );
     }
 
     /// The whole point of planning a conversion is telling someone how long it will take,

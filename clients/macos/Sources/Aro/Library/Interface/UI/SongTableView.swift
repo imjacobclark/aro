@@ -46,18 +46,16 @@ struct SongTableView: View {
     ///
     /// Radio used to be reachable only from Home, which made it a browsing feature rather
     /// than what it actually is: a property of any track you happen to be looking at.
-    /// Silence on failure is deliberate and matches `MoreLikeThisSection` — an unanalysed
-    /// seed or an unreachable hub is a station that does not exist yet, not an error the
-    /// listener can act on.
     private func startRadio(
         from song: Song,
         using load: (String) async -> ServerGeneratedPlaylist?
     ) async {
-        guard let contentHash = song.contentHash,
-              let station = await load(contentHash) else { return }
-        let queue = SongLibrary.resolving(station.contentHashes, in: allSongs)
-        guard let first = queue.first else { return }
-        playback.play(song: first, queue: queue)
+        await RadioStation.start(
+            seededBy: song,
+            in: allSongs,
+            loadRadio: load,
+            playback: playback
+        )
     }
 
     /// Prefer whatever is playing — the shelf then tracks what you're actually

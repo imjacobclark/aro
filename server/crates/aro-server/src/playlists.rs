@@ -12,6 +12,7 @@
 use aro_sync_store::{ListeningEventSummary, PlaylistSeeds};
 use chrono::{DateTime, Datelike, Utc, Weekday};
 use serde::Serialize;
+use std::collections::{HashMap, HashSet};
 
 /// Playlists with fewer songs than this are dropped entirely — a "playlist" of 1-2
 /// tracks reads as broken rather than useful.
@@ -200,7 +201,8 @@ pub fn generate(
         PlaylistKind::ForYou,
         "heavy-rotation",
         "Heavy Rotation",
-        "In heavy rotation lately",
+        // Not "in heavy rotation lately", which only restated the title.
+        "What you keep going back to",
         ranked_by(seeds, |summary| summary.decayed_affinity),
     );
 
@@ -352,7 +354,7 @@ type ArtistTally = (
 fn artist_aggregates(seeds: &PlaylistSeeds) -> Vec<ArtistAggregate> {
     let mut by_artist: Vec<ArtistTally> = Vec::new();
     let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for track in &seeds.tracks {
+    for track in seeds.tracks.iter() {
         let Some(artist) = track.artist.as_ref().filter(|a| !a.is_empty()) else {
             continue;
         };
@@ -408,13 +410,18 @@ fn push_artist_sections(playlists: &mut Vec<GeneratedPlaylist>, seeds: &Playlist
             .then_with(|| a.artist.cmp(&b.artist))
     });
     for (index, artist) in by_recent.into_iter().take(2).enumerate() {
+        // The title already says whose mix this is, and "because you've been playing them
+        // lately" was true of both cards at once. Which records it draws on answers "more
+        // what?", and differs between cards by construction.
+        let subtitle = albums_in(seeds, &artist.content_hashes)
+            .unwrap_or_else(|| pluralise(artist.content_hashes.len(), "song"));
         push(
             playlists,
             seeds,
             PlaylistKind::ArtistMix,
             &format!("artist-mix-{index}-{}", slugify(&artist.artist)),
             &format!("More From {}", artist.artist),
-            "Because you've been playing them lately",
+            &subtitle,
             order_by_affinity(seeds, &artist.content_hashes),
         );
     }
@@ -427,13 +434,21 @@ fn push_artist_sections(playlists: &mut Vec<GeneratedPlaylist>, seeds: &Playlist
             .then_with(|| a.artist.cmp(&b.artist))
     });
     for (index, artist) in by_lifetime.into_iter().take(8).enumerate() {
+        // Eight cards captioned "Favourite artist" told you the shelf they were on, not
+        // which one to pick. These are ranked by lifetime plays, so saying the count both
+        // distinguishes every card and shows the ordering the row is already in.
+        let subtitle = format!(
+            "{} · {}",
+            pluralise(artist.lifetime_plays.max(0) as usize, "play"),
+            pluralise(artist.content_hashes.len(), "song")
+        );
         push(
             playlists,
             seeds,
             PlaylistKind::FavouriteArtist,
             &format!("favourite-artist-{index}-{}", slugify(&artist.artist)),
             &artist.artist,
-            "Favourite artist",
+            &subtitle,
             order_by_affinity(seeds, &artist.content_hashes),
         );
     }
@@ -452,7 +467,7 @@ fn push_recently_played_albums(playlists: &mut Vec<GeneratedPlaylist>, seeds: &P
     }
     let mut by_album: Vec<AlbumAggregate> = Vec::new();
     let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for track in &seeds.tracks {
+    for track in seeds.tracks.iter() {
         let Some(album) = track.album.as_ref().filter(|a| !a.is_empty()) else {
             continue;
         };
@@ -511,7 +526,7 @@ fn push_lost_albums(
     }
     let mut by_album: Vec<AlbumAggregate> = Vec::new();
     let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for track in &seeds.tracks {
+    for track in seeds.tracks.iter() {
         let Some(album) = track.album.as_ref().filter(|a| !a.is_empty()) else {
             continue;
         };
@@ -645,7 +660,7 @@ type YearlyTrack<'a> = (&'a String, i64, f64, Option<&'a String>);
 fn push_hits_by_year(playlists: &mut Vec<GeneratedPlaylist>, seeds: &PlaylistSeeds) {
     let mut by_year: std::collections::HashMap<i64, Vec<YearlyTrack<'_>>> =
         std::collections::HashMap::new();
-    for track in &seeds.tracks {
+    for track in seeds.tracks.iter() {
         let Some(year) = track.release_year else {
             continue;
         };
@@ -684,17 +699,20 @@ fn push_hits_by_year(playlists: &mut Vec<GeneratedPlaylist>, seeds: &PlaylistSee
     for (year, _, _) in years.into_iter().take(3) {
         let mut tracks = by_year.remove(&year).unwrap_or_default();
         tracks.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-        let hashes = tracks
+        let hashes: Vec<String> = tracks
             .into_iter()
             .map(|(hash, _, _, _)| hash.clone())
             .collect();
+        // "That year" made the reader look back up at the title to find out which.
+        let subtitle = artists_in(seeds, &hashes)
+            .unwrap_or_else(|| "Your most played from this year".to_owned());
         push(
             playlists,
             seeds,
             PlaylistKind::HitsByYear,
             &format!("hits-{year}"),
             &format!("Hits of {year}"),
-            "Your most-played tracks from that year",
+            &subtitle,
             hashes,
         );
     }
@@ -826,7 +844,7 @@ const BROAD_GENRES: [&str; 4] = ["rock", "pop", "alternative rock", "pop rock"];
 /// distinguishes nothing; "shoegaze" is a shelf worth having.
 fn push_genre_shelves(playlists: &mut Vec<GeneratedPlaylist>, seeds: &PlaylistSeeds) {
     let mut by_genre: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
-    for track in &seeds.tracks {
+    for track in seeds.tracks.iter() {
         for genre in &track.genres {
             by_genre
                 .entry(genre.as_str())
@@ -853,13 +871,17 @@ fn push_genre_shelves(playlists: &mut Vec<GeneratedPlaylist>, seeds: &PlaylistSe
     for (genre, hashes) in ranked.into_iter().take(MAX_GENRE_SHELVES) {
         let mut hashes: Vec<String> = hashes.into_iter().map(str::to_owned).collect();
         hashes.sort();
+        // The title already says the genre; repeating "from your library's genres" on all
+        // four shelves said nothing and said it four times.
+        let subtitle =
+            artists_in(seeds, &hashes).unwrap_or_else(|| pluralise(hashes.len(), "song"));
         push(
             playlists,
             seeds,
             PlaylistKind::ForYou,
             &format!("genre-{}", genre.replace(' ', "-")),
             &title_case(genre),
-            "From your library's genres",
+            &subtitle,
             hashes,
         );
     }
@@ -1131,13 +1153,18 @@ fn push_daily_mixes(playlists: &mut Vec<GeneratedPlaylist>, seeds: &PlaylistSeed
                 .map(|hash| hash.to_string())
                 .collect::<Vec<_>>(),
         );
+        // "Daily Mix 1..4" are indistinguishable by name, so the subtitle is the only
+        // thing telling them apart — which the old shared caption did not do. Naming who
+        // is in each one is also the only honest answer to "why would I tap this one?".
+        let subtitle =
+            artists_in(seeds, &hashes).unwrap_or_else(|| pluralise(hashes.len(), "song"));
         push(
             playlists,
             seeds,
             PlaylistKind::ForYou,
             &format!("daily-mix-{}", index + 1),
             &format!("Daily Mix {}", index + 1),
-            "Grouped by how your music actually sounds",
+            &subtitle,
             hashes,
         );
     }
@@ -1240,7 +1267,7 @@ pub fn smart_shuffle(
         content_hashes.iter().map(String::as_str).collect();
 
     let mut vectors: std::collections::HashMap<&str, Vec<f64>> = std::collections::HashMap::new();
-    for track in &seeds.tracks {
+    for track in seeds.tracks.iter() {
         if requested.contains(track.content_hash.as_str())
             && let Some(features) = decoded_features(track)
         {
@@ -1298,7 +1325,18 @@ pub fn smart_shuffle(
 /// (see [`RADIO_MAX_SKIP_RATE`]) — timbrally similar isn't a good suggestion if the
 /// listener has actively rejected it before. Returns `None` if the seed hasn't been
 /// analyzed yet, or no other analyzed tracks exist to recommend.
-pub fn radio(seeds: &PlaylistSeeds, seed_hash: &str, limit: usize) -> Option<GeneratedPlaylist> {
+///
+/// `offset` walks further out from the seed, which is what turns a playlist into a station:
+/// a client approaching the end of its queue asks for the next page and keeps going, rather
+/// than running out after the first thirty. The ranking is a total order over the library
+/// for a given seed, so paging it is stable without the hub remembering anything about who
+/// asked — no session, no cursor, no exclusion list to send back.
+pub fn radio(
+    seeds: &PlaylistSeeds,
+    seed_hash: &str,
+    limit: usize,
+    offset: usize,
+) -> Option<GeneratedPlaylist> {
     let seed_track = seeds
         .tracks
         .iter()
@@ -1328,11 +1366,32 @@ pub fn radio(seeds: &PlaylistSeeds, seed_hash: &str, limit: usize) -> Option<Gen
     if ranked.is_empty() {
         return None;
     }
+    // Ties broken by hash, which is what makes the ordering total and therefore stable:
+    // `offset` below is only meaningful because the same seed ranks the same library the
+    // same way every time.
     ranked.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(b.0)));
-    ranked.truncate(limit.max(1));
 
-    let mut content_hashes = vec![seed_hash.to_string()];
-    content_hashes.extend(ranked.into_iter().map(|(hash, _)| hash.to_string()));
+    // Past the end of the neighbourhood — the station has played everything this seed can
+    // reach. `None` rather than an empty playlist, so a caller can tell "no more" apart
+    // from "nothing here at all".
+    if offset >= ranked.len() {
+        return None;
+    }
+    let page: Vec<&str> = ranked
+        .into_iter()
+        .skip(offset)
+        .take(limit.max(1))
+        .map(|(hash, _)| hash)
+        .collect();
+
+    // The seed leads its own station, but only at the start of it. Continuing a station is
+    // asking for what comes next, and what comes next is never the track it began with.
+    let mut content_hashes = if offset == 0 {
+        vec![seed_hash.to_string()]
+    } else {
+        Vec::new()
+    };
+    content_hashes.extend(page.into_iter().map(str::to_string));
 
     Some(GeneratedPlaylist {
         id: format!("radio-{seed_hash}"),
@@ -1342,6 +1401,64 @@ pub fn radio(seeds: &PlaylistSeeds, seed_hash: &str, limit: usize) -> Option<Gen
         kind: PlaylistKind::ForYou,
         last_played_at: seeds.listening.get(seed_hash).map(|s| s.last_played_at),
     })
+}
+
+/// Who a shelf is mostly made of — "Blink-182, Sum 41 and 3 more".
+///
+/// Shelves grouped by something the listener cannot see (a genre string, an audio-feature
+/// cluster) all end up captioned with the rule that built them, which is the same sentence
+/// on every card and answers a question nobody asked. Naming the artists inside says what
+/// is actually on the shelf, and differs per card by construction.
+///
+/// Ranked by how many tracks each artist contributes, so the two named are the ones the
+/// shelf is really about, with ties broken by name to keep repeated generation identical.
+fn artists_in(seeds: &PlaylistSeeds, hashes: &[String]) -> Option<String> {
+    names_in(seeds, hashes, |track| track.artist.as_deref())
+}
+
+/// The records a shelf draws on — "Definitely Maybe, Heathen Chemistry and 2 more".
+///
+/// What "More From X" wants, where the title has already said who: the answer to "more
+/// what?" is which albums, not a restatement of why the card is there.
+fn albums_in(seeds: &PlaylistSeeds, hashes: &[String]) -> Option<String> {
+    names_in(seeds, hashes, |track| track.album.as_deref())
+}
+
+fn names_in(
+    seeds: &PlaylistSeeds,
+    hashes: &[String],
+    pick: impl Fn(&aro_sync_store::PlaylistSeedTrack) -> Option<&str>,
+) -> Option<String> {
+    let wanted: HashSet<&str> = hashes.iter().map(String::as_str).collect();
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for track in seeds.tracks.iter() {
+        if !wanted.contains(track.content_hash.as_str()) {
+            continue;
+        }
+        if let Some(name) = pick(track).filter(|value| !value.is_empty()) {
+            *counts.entry(name).or_default() += 1;
+        }
+    }
+    let mut ranked: Vec<(&str, usize)> = counts.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+
+    match ranked.as_slice() {
+        [] => None,
+        [(only, _)] => Some((*only).to_owned()),
+        [(first, _), (second, _)] => Some(format!("{first} and {second}")),
+        [(first, _), (second, _), rest @ ..] => {
+            Some(format!("{first}, {second} and {} more", rest.len()))
+        }
+    }
+}
+
+/// `count` of `noun`, pluralised the boring English way.
+fn pluralise(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("{count} {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
 }
 
 /// Content hashes ordered by descending decayed affinity (unplayed hashes sort last, at
@@ -1624,6 +1741,79 @@ mod tests {
         }
     }
 
+    /// Home is a page of cards, and a caption that appears on six of them is not telling
+    /// anyone which to open. The worst offenders were the ones grouped by something the
+    /// listener cannot see — favourite artists, genre shelves, the four Daily Mixes — where
+    /// every card carried the rule that built it instead of what was on it.
+    #[test]
+    fn shelves_of_the_same_kind_do_not_share_one_caption() {
+        let artists = ["Elbow", "Grimes", "Oasis", "Keane", "Editors"];
+        let mut seeds = PlaylistSeeds {
+            tracks: (0..40)
+                .map(|index| {
+                    let mut seed = track(&format!("hash-{index}"), false, &[]);
+                    seed.artist = Some(artists[index % artists.len()].to_string());
+                    seed.album = Some(format!("Album {}", index % 7));
+                    seed
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            ..Default::default()
+        };
+        for index in 0..40 {
+            seeds.listening.insert(
+                format!("hash-{index}"),
+                ListeningEventSummary {
+                    play_count: (40 - index) as i64,
+                    decayed_affinity: (40 - index) as f64,
+                    ..Default::default()
+                },
+            );
+        }
+
+        let playlists = generate_utc(&seeds, wednesday());
+
+        for kind in [PlaylistKind::FavouriteArtist, PlaylistKind::ArtistMix] {
+            let subtitles: Vec<&str> = playlists
+                .iter()
+                .filter(|playlist| playlist.kind == kind)
+                .map(|playlist| playlist.subtitle.as_str())
+                .collect();
+            let distinct: HashSet<&str> = subtitles.iter().copied().collect();
+            assert_eq!(
+                distinct.len(),
+                subtitles.len(),
+                "{kind:?} shelves repeat a caption: {subtitles:?}"
+            );
+        }
+
+        // The Daily Mixes are named "Daily Mix 1..4", so the caption is the only thing
+        // distinguishing them at all.
+        let mixes: Vec<&str> = playlists
+            .iter()
+            .filter(|playlist| playlist.title.starts_with("Daily Mix"))
+            .map(|playlist| playlist.subtitle.as_str())
+            .collect();
+        if mixes.len() > 1 {
+            let distinct: HashSet<&str> = mixes.iter().copied().collect();
+            assert_eq!(
+                distinct.len(),
+                mixes.len(),
+                "Daily Mixes repeat a caption: {mixes:?}"
+            );
+        }
+
+        // And nothing should simply say its own title back.
+        for playlist in &playlists {
+            assert_ne!(
+                playlist.subtitle.to_lowercase(),
+                playlist.title.to_lowercase(),
+                "{} restates its title",
+                playlist.title
+            );
+        }
+    }
+
     /// A chroma dominated by one triad should resolve to that key. Estimation runs over
     /// twelve rotations of two profiles, so an off-by-one in the rotation still produces a
     /// plausible-looking key — asserting the actual pitch class is what catches it.
@@ -1671,7 +1861,8 @@ mod tests {
         let mut seeds = PlaylistSeeds {
             tracks: (0..6)
                 .map(|index| track(&format!("hash-{index}"), false, &[]))
-                .collect(),
+                .collect::<Vec<_>>()
+                .into(),
             ..Default::default()
         };
         seeds.engagement.insert(
@@ -1735,7 +1926,7 @@ mod tests {
             tracks.push(seed);
         }
         let seeds = PlaylistSeeds {
-            tracks,
+            tracks: tracks.into(),
             ..Default::default()
         };
 
@@ -1838,7 +2029,8 @@ mod tests {
                 track("b", true, &[]),
                 track("c", true, &[]),
                 track("d", false, &[]),
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
 
@@ -1847,7 +2039,7 @@ mod tests {
         assert_eq!(loved.content_hashes, vec!["a", "b", "c"]);
 
         let two_favourites = PlaylistSeeds {
-            tracks: vec![track("a", true, &[]), track("b", true, &[])],
+            tracks: vec![track("a", true, &[]), track("b", true, &[])].into(),
             ..Default::default()
         };
         assert!(
@@ -1885,7 +2077,8 @@ mod tests {
                 track("b", false, &["relaxed"]),
                 track("c", false, &["relaxed"]),
                 track("d", false, &[]),
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
 
@@ -1901,7 +2094,7 @@ mod tests {
         assert!(!weekday_mood.content_hashes.contains(&"d".to_string()));
 
         let sparse = PlaylistSeeds {
-            tracks: vec![track("a", false, &["relaxed"])],
+            tracks: vec![track("a", false, &["relaxed"])].into(),
             ..Default::default()
         };
         assert!(
@@ -1920,7 +2113,8 @@ mod tests {
         let seeds = PlaylistSeeds {
             tracks: (0..10)
                 .map(|i| track(&format!("hash-{i}"), false, &[]))
-                .collect(),
+                .collect::<Vec<_>>()
+                .into(),
             listening,
             ..Default::default()
         };
@@ -2012,7 +2206,7 @@ mod tests {
         listening.insert("overplayed".to_string(), summary(2, 0.0, 0.0));
 
         let seeds = PlaylistSeeds {
-            tracks,
+            tracks: tracks.into(),
             listening,
             ..Default::default()
         };
@@ -2102,7 +2296,7 @@ mod tests {
         }
 
         let seeds = PlaylistSeeds {
-            tracks,
+            tracks: tracks.into(),
             listening,
             ..Default::default()
         };
@@ -2148,7 +2342,7 @@ mod tests {
         }
 
         let seeds = PlaylistSeeds {
-            tracks,
+            tracks: tracks.into(),
             listening,
             ..Default::default()
         };
@@ -2185,7 +2379,7 @@ mod tests {
         }
 
         let seeds = PlaylistSeeds {
-            tracks,
+            tracks: tracks.into(),
             listening,
             ..Default::default()
         };
@@ -2254,7 +2448,7 @@ mod tests {
 
         let playlists = generate(
             &PlaylistSeeds {
-                tracks,
+                tracks: tracks.into(),
                 listening,
                 ..Default::default()
             },
@@ -2367,7 +2561,7 @@ mod tests {
         }
 
         let seeds = PlaylistSeeds {
-            tracks,
+            tracks: tracks.into(),
             listening,
             ..Default::default()
         };
@@ -2448,7 +2642,7 @@ mod tests {
         }
 
         let seeds = PlaylistSeeds {
-            tracks,
+            tracks: tracks.into(),
             listening,
             ..Default::default()
         };
@@ -2488,7 +2682,7 @@ mod tests {
         }
 
         let seeds = PlaylistSeeds {
-            tracks,
+            tracks: tracks.into(),
             listening,
             ..Default::default()
         };
@@ -2525,7 +2719,7 @@ mod tests {
         }
 
         let seeds = PlaylistSeeds {
-            tracks,
+            tracks: tracks.into(),
             listening,
             ..Default::default()
         };
@@ -2629,7 +2823,7 @@ mod tests {
             track_with_features("slow-but-bright", &features(75.0, 0.03, 0.9, 5.0)),
         ];
         let seeds = PlaylistSeeds {
-            tracks,
+            tracks: tracks.into(),
             ..Default::default()
         };
 
@@ -2643,13 +2837,13 @@ mod tests {
 
         // Add a third qualifying workout track so the minimum-count gate passes, and
         // verify ordering flows slowest-to-fastest.
-        let mut tracks_with_third = seeds.tracks.clone();
+        let mut tracks_with_third = seeds.tracks.as_ref().clone();
         tracks_with_third.push(track_with_features(
             "workout-mid",
             &features(135.0, 0.1, 0.5, 6.0),
         ));
         let seeds = PlaylistSeeds {
-            tracks: tracks_with_third,
+            tracks: tracks_with_third.into(),
             ..Default::default()
         };
         let playlists = generate_utc(&seeds, wednesday());
@@ -2699,7 +2893,7 @@ mod tests {
             }
         }
         let seeds = PlaylistSeeds {
-            tracks: tracks.clone(),
+            tracks: tracks.clone().into(),
             ..Default::default()
         };
 
@@ -2730,7 +2924,7 @@ mod tests {
         let mut sparse_tracks = tracks;
         sparse_tracks.pop();
         let sparse_seeds = PlaylistSeeds {
-            tracks: sparse_tracks,
+            tracks: sparse_tracks.into(),
             ..Default::default()
         };
         let sparse_playlists = generate_utc(&sparse_seeds, wednesday());
@@ -2762,7 +2956,7 @@ mod tests {
         tracks.push(track_full("unanalyzed", None, None, None));
 
         let seeds = PlaylistSeeds {
-            tracks,
+            tracks: tracks.into(),
             ..Default::default()
         };
         let hashes: Vec<String> = ["calm-a", "loud-a", "mid", "loud-b", "calm-b", "unanalyzed"]
@@ -2827,12 +3021,12 @@ mod tests {
             },
         );
         let seeds = PlaylistSeeds {
-            tracks,
+            tracks: tracks.into(),
             listening,
             ..Default::default()
         };
 
-        let result = radio(&seeds, "seed", 10).unwrap();
+        let result = radio(&seeds, "seed", 10, 0).unwrap();
 
         assert_eq!(result.content_hashes[0], "seed");
         assert!(result.content_hashes.contains(&"close".to_string()));
@@ -2855,6 +3049,63 @@ mod tests {
             .unwrap();
         assert!(close_index < far_index);
 
-        assert!(radio(&seeds, "unknown-hash", 10).is_none());
+        assert!(radio(&seeds, "unknown-hash", 10, 0).is_none());
+    }
+
+    /// A station is a station because it does not run out. Paging the ranking is what makes
+    /// that possible, and it only works if the order is the same every time it is asked for
+    /// and if the pages do not overlap or skip.
+    #[test]
+    fn radio_pages_further_out_without_repeating_or_restarting() {
+        // Twenty tracks at increasing distance from the seed, so the ranking is unambiguous.
+        let mut tracks = vec![track_with_features("seed", &features(120.0, 0.1, 0.5, 0.0))];
+        for index in 0..20 {
+            tracks.push(track_with_features(
+                &format!("n{index:02}"),
+                &features(120.0 + index as f64, 0.1, 0.5, 0.0),
+            ));
+        }
+        let seeds = PlaylistSeeds {
+            tracks: tracks.into(),
+            ..Default::default()
+        };
+
+        let first = radio(&seeds, "seed", 5, 0).unwrap().content_hashes;
+        // The seed leads its own station, then four neighbours.
+        assert_eq!(first[0], "seed");
+        assert_eq!(first.len(), 6);
+
+        let second = radio(&seeds, "seed", 5, 5).unwrap().content_hashes;
+        assert_eq!(
+            second.len(),
+            5,
+            "a continuation is neighbours only — the seed already played"
+        );
+        assert!(
+            !second.contains(&"seed".to_string()),
+            "continuing a station must not replay the track it began with"
+        );
+
+        let overlap: Vec<_> = second.iter().filter(|hash| first.contains(hash)).collect();
+        assert!(
+            overlap.is_empty(),
+            "pages must not repeat tracks, got {overlap:?}"
+        );
+
+        // Contiguous: page two picks up exactly where page one stopped.
+        let mut walked = first[1..].to_vec();
+        walked.extend(second.clone());
+        let straight_through = radio(&seeds, "seed", 10, 0).unwrap().content_hashes;
+        assert_eq!(
+            walked,
+            straight_through[1..],
+            "walking the station in pages must visit the same tracks in the same order"
+        );
+
+        // And it ends rather than looping, so a client knows to stop asking.
+        assert!(
+            radio(&seeds, "seed", 5, 500).is_none(),
+            "past the end of the neighbourhood there is nothing left to play"
+        );
     }
 }

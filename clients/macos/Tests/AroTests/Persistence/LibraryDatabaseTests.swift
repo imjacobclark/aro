@@ -355,6 +355,73 @@ final class LibraryDatabaseTests: XCTestCase {
         )
     }
 
+
+    /// A hub this Mac has joined lives in `watched_folders` too, so replicated songs have
+    /// something to group under — but it is a URL, not a directory. Reporting it as one of
+    /// our folders told the hub about itself: it came back as a `referenced` source with no
+    /// path, which no filesystem check can find, so the hub marked it unavailable and
+    /// handed the warning straight back. The app then complained, permanently, about a
+    /// folder that only existed because it had mentioned it.
+    func testHubLinksAreNotReportedToTheHubAsOurOwnFolders() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let database = LibraryDatabase(
+            url: directory.appendingPathComponent("Library.sqlite3")
+        )
+        let realFolder = directory.appendingPathComponent("Music", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: realFolder,
+            withIntermediateDirectories: true
+        )
+        database.save(
+            folder: WatchedFolder(
+                id: UUID(),
+                url: realFolder,
+                displayName: "Music",
+                bookmarkData: nil,
+                isAccessible: true,
+                didStartSecurityScope: false
+            )
+        )
+
+        let store = SQLiteSyncOperationStore(database: database)
+        let hubID = UUID()
+        store.upsertMembership(
+            hub: AroHubInfo(
+                hubID: hubID,
+                displayName: "mercury",
+                protocolMin: 2,
+                protocolMax: 4,
+                pairingAvailable: false
+            ),
+            baseURL: URL(string: "https://aro-hub.local.:4848")!,
+            tlsFingerprint: "fingerprint",
+            replicaMode: .onDemand
+        )
+
+        let reports = store.sourceHealthReports(mode: "referenced")
+
+        XCTAssertEqual(
+            reports.map(\.name),
+            ["Music"],
+            "only real directories on this Mac are ours to report"
+        )
+        XCTAssertFalse(
+            reports.contains { $0.sourceID == hubID },
+            "the hub must not be reported back to itself as one of our folders"
+        )
+        XCTAssertTrue(
+            reports.allSatisfy { $0.available },
+            "a folder that exists must not be reported unavailable"
+        )
+    }
+
     func testAlbumCandidatesFollowSelectedArtistAndKeepIdentifiedResult() {
         let song = makeSong(path: "/tmp/Track.flac", contentHash: "candidate-track")
         let snapshot = TrackMetadataSnapshot(

@@ -85,6 +85,25 @@ enum AroTheme {
     static let hairline = Color.primary.opacity(0.09)
     static let selectedTint = violet.opacity(0.11)
 
+    /// The warmth on the player's queue control while a hub station is playing — amber
+    /// against the app's violet, so "this queue chose itself" reads at a glance without
+    /// another label in a bar that has no room for one. Lifted in dark mode, where an
+    /// amber dark enough to sit on white disappears entirely.
+    static let radioGlow = adaptiveColor(
+        light: NSColor(
+            calibratedRed: 0.85,
+            green: 0.47,
+            blue: 0.11,
+            alpha: 1
+        ),
+        dark: NSColor(
+            calibratedRed: 1.0,
+            green: 0.68,
+            blue: 0.26,
+            alpha: 1
+        )
+    )
+
     /// AppKit equivalent of `violet`, for views (e.g. `NSTableView` selection,
     /// `NSImageView` tints) that read `NSColor` directly rather than SwiftUI's
     /// environment `.tint()`. `.controlAccentColor`/`.selectedContentBackgroundColor`

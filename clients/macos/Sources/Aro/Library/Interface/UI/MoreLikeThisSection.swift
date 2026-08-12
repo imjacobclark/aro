@@ -95,22 +95,49 @@ struct MoreLikeThisSection: View {
         let subtitle = (seedLabel ?? seed?.title).map { "Sounds like \($0)" }
             ?? "Measured from the audio"
         if isCollapsible {
-            Button {
-                withAnimation(.easeInOut(duration: 0.18)) { isExpanded.toggle() }
-            } label: {
-                HStack(spacing: 8) {
-                    SectionHeader(title: "More Like This", subtitle: subtitle)
-                    Spacer()
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .rotationEffect(.degrees(isExpanded ? 0 : -90))
+            HStack(spacing: 8) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) { isExpanded.toggle() }
+                } label: {
+                    HStack(spacing: 8) {
+                        SectionHeader(title: "More Like This", subtitle: subtitle)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .rotationEffect(.degrees(isExpanded ? 0 : -90))
+                    }
+                    .contentShape(Rectangle())
                 }
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                Spacer()
+                playStationButton
             }
-            .buttonStyle(.plain)
         } else {
-            SectionHeader(title: "More Like This", subtitle: subtitle)
+            HStack(spacing: 8) {
+                SectionHeader(title: "More Like This", subtitle: subtitle)
+                Spacer()
+                playStationButton
+            }
+        }
+    }
+
+    /// Plays the shelf itself, rather than making you click a tile and hope the rest
+    /// follows. These tracks *are* a station — the hub ranked them by distance from the
+    /// seed — so the whole point is being able to start the lot.
+    ///
+    /// The seed leads the queue, since a station that opens on a track you did not ask
+    /// for reads as a jump rather than a continuation.
+    private var playStationButton: some View {
+        RadioActionButton(
+            isOn: playback.isPlayingStation(seededBy: seed?.contentHash)
+        ) {
+            let station = [seed].compactMap { $0 } + similar
+            guard let first = station.first else { return }
+            playback.playStation(
+                song: first,
+                queue: station,
+                seededBy: seed?.contentHash
+            )
         }
     }
 

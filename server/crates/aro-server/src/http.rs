@@ -18,12 +18,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
+    // Anonymous, so the encode spill files can be flushed without introducing a `Write`
+    // name that would collide with the trait implemented further down this module.
+    io::Write as _,
     net::{IpAddr, SocketAddr},
     path::{Component, Path as FilePath, PathBuf},
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     task::{Context, Poll},
@@ -93,6 +96,10 @@ pub struct AppState {
     /// free to keep serving requests, and means neither machine is designed around the
     /// other's limits.
     pub transcode_slots: Arc<tokio::sync::Semaphore>,
+    /// Encodes currently being warmed ahead of a listener reaching them, so two clients —
+    /// or one client asking twice — cannot spend the same CPU twice over. Keyed by
+    /// (content hash, quality), the same key the cache itself uses.
+    pub warming_transcodes: Arc<Mutex<HashSet<(String, String)>>>,
 }
 
 /// Concurrent transcodes permitted, derived from the host rather than assumed.
@@ -261,6 +268,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/identification/status", get(identification_status))
         .route("/v1/identification/results", get(identification_results))
         .route("/v1/blobs/{hash}/stream", get(stream_blob))
+        .route("/v1/blobs/{hash}/transcode", post(warm_transcode))
         .route("/v1/transcode/plan", get(transcode_plan))
         .route("/v1/transcode/start", post(start_transcode))
         .route("/v1/transcode/cleanup", post(cleanup_transcodes))
@@ -1237,14 +1245,22 @@ async fn download_blob(
     Path(hash): Path<String>,
 ) -> Result<Response, ApiError> {
     require_device_or_admin(&state, &headers)?;
+    // The conditional check comes before the path lookup: a client that already holds these
+    // bytes should not make the hub touch the disk at all, and on a referenced library that
+    // lookup can mean hashing the file.
+    let identity = BlobCacheIdentity::new(&hash, &headers);
+    if identity.is_fresh() {
+        return Ok(not_modified(&identity));
+    }
     let path = state
         .store
         .blob_path_for_download(&hash)?
         .ok_or_else(|| ApiError::not_found("blob_not_found"))?;
-    download_range_tracked(
+    download_range_inner(
         path,
         headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
-        state.telemetry.clone(),
+        Some(state.telemetry.clone()),
+        Some(identity),
     )
     .await
 }
@@ -1439,38 +1455,64 @@ async fn transcode_usage(
     ))
 }
 
-/// Playlist seeds alongside the operation-log sequence they were built at, so a cheap
-/// sequence read can decide whether the expensive rebuild is needed.
-pub type CachedPlaylistSeeds =
-    Arc<parking_lot::Mutex<Option<(u64, Arc<aro_sync_store::PlaylistSeeds>)>>>;
+/// The library half of the playlist seeds, alongside the generation it was built at.
+///
+/// Only the expensive half is cached. The listening half is rebuilt on every request
+/// because it changes on every played track — see [`cached_playlist_seeds`].
+pub type CachedPlaylistSeeds = Arc<
+    parking_lot::Mutex<
+        Option<(
+            aro_sync_store::SeedGeneration,
+            Arc<Vec<aro_sync_store::PlaylistSeedTrack>>,
+        )>,
+    >,
+>;
 
-/// Playlist seeds, rebuilt only when the library has actually changed.
+/// Playlist seeds, re-reading the library only when the library has actually changed.
+///
+/// This used to cache the seeds whole, keyed on the operation log's highest sequence. The
+/// intent was right and the effect was not: a completed listen is an operation, so the
+/// sequence had almost always moved by the time anyone opened Home, and the "cache" re-read
+/// and re-parsed every track in the library nearly every time.
+///
+/// The two halves keep different company. Tracks, their metadata and their analysis change
+/// when someone edits or scans; listening changes constantly and is a small aggregate query.
+/// Caching them on the same key meant the cheap thing kept invalidating the expensive one.
 async fn cached_playlist_seeds(
     state: &Arc<AppState>,
 ) -> Result<Arc<aro_sync_store::PlaylistSeeds>, ApiError> {
     let cached = state.playlist_seeds.lock().clone();
     let store = state.store.clone();
-    let cached_sequence = cached.as_ref().map(|(sequence, _)| *sequence);
-    let (sequence, rebuilt) = tokio::task::spawn_blocking(move || {
-        let sequence = store.latest_sequence()?;
-        if Some(sequence) == cached_sequence {
-            return Ok::<_, aro_sync_store::StoreError>((sequence, None));
-        }
-        Ok((sequence, Some(store.playlist_seeds()?)))
+    let cached_generation = cached.as_ref().map(|(generation, _)| *generation);
+
+    let (generation, rebuilt, listening, engagement) = tokio::task::spawn_blocking(move || {
+        let generation = store.seed_generation()?;
+        let rebuilt = if Some(generation) == cached_generation {
+            None
+        } else {
+            Some(store.playlist_seed_tracks()?)
+        };
+        let (listening, engagement) = store.listening_summaries()?;
+        Ok::<_, aro_sync_store::StoreError>((generation, rebuilt, listening, engagement))
     })
     .await
     .map_err(|error| ApiError::internal(error.to_string()))??;
 
-    match rebuilt {
-        Some(seeds) => {
-            let seeds = Arc::new(seeds);
-            *state.playlist_seeds.lock() = Some((sequence, seeds.clone()));
-            Ok(seeds)
+    let tracks = match rebuilt {
+        Some(tracks) => {
+            *state.playlist_seeds.lock() = Some((generation, tracks.clone()));
+            tracks
         }
         // Unchanged since the cached build, so reuse it. The `expect` cannot fire: a
-        // matching sequence is only reported when something was cached.
-        None => Ok(cached.expect("cache hit implies a cached value").1),
-    }
+        // matching generation is only reported when something was cached.
+        None => cached.expect("cache hit implies a cached value").1,
+    };
+
+    Ok(Arc::new(aro_sync_store::PlaylistSeeds {
+        tracks,
+        listening,
+        engagement,
+    }))
 }
 
 fn parse_quality(value: Option<&str>) -> Result<aro_track_id::transcode::StreamQuality, ApiError> {
@@ -1520,29 +1562,47 @@ async fn stream_blob(
         .transpose()?
         .unwrap_or(aro_track_id::transcode::StreamQuality::Original);
 
+    let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+
+    if quality == aro_track_id::transcode::StreamQuality::Original {
+        let identity = BlobCacheIdentity::new(&hash, &headers);
+        if identity.is_fresh() {
+            return Ok(not_modified(&identity));
+        }
+        let source = state
+            .store
+            .blob_path_for_download(&hash)?
+            .ok_or_else(|| ApiError::not_found("blob_not_found"))?;
+        return download_range_inner(source, range, Some(state.telemetry.clone()), Some(identity))
+            .await;
+    }
+
+    // A cached encode is answered without ever resolving the original: nothing here reads
+    // the source file, so making the store find and check it would be work for bytes this
+    // request will not send.
+    if let Some(cached) = state.store.transcoded_blob(&hash, quality.as_str())? {
+        // The encode's own hash, not the track's — these are different bytes, and giving
+        // both the same validator would let a client hold a low-quality encode and be told
+        // its copy of the original was current.
+        let identity = BlobCacheIdentity::new(&cached, &headers);
+        if identity.is_fresh() {
+            return Ok(not_modified(&identity));
+        }
+        if let Some(path) = state.store.blob_path_for_download(&cached)? {
+            return download_range_inner(
+                path,
+                range,
+                Some(state.telemetry.clone()),
+                Some(identity),
+            )
+            .await;
+        }
+    }
+
     let source = state
         .store
         .blob_path_for_download(&hash)?
         .ok_or_else(|| ApiError::not_found("blob_not_found"))?;
-    if quality == aro_track_id::transcode::StreamQuality::Original {
-        return download_range_tracked(
-            source,
-            headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
-            state.telemetry.clone(),
-        )
-        .await;
-    }
-
-    if let Some(cached) = state.store.transcoded_blob(&hash, quality.as_str())?
-        && let Some(path) = state.store.blob_path_for_download(&cached)?
-    {
-        return download_range_tracked(
-            path,
-            headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
-            state.telemetry.clone(),
-        )
-        .await;
-    }
 
     // Waiting here rather than inside the blocking task is deliberate: it applies
     // backpressure at the point a listener asks, instead of piling up encodes that each
@@ -1560,16 +1620,23 @@ async fn stream_blob(
     // Encoding is CPU-bound and blocking, so it belongs off the async runtime's threads.
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let mut sink = ChannelSink {
-            sender,
-            spill: Vec::new(),
+        let mut sink = match ChannelSink::new(sender) {
+            Ok(sink) => sink,
+            Err(error) => {
+                tracing::warn!(%error, "could not open a spill file for the encode");
+                return;
+            }
         };
         let result = aro_track_id::transcode::transcode_to_ogg_opus(&source, quality, &mut sink);
         match result {
             Ok(()) => {
                 // Only a complete encode is worth caching: a half-written stream would be
                 // served forever as though it were the whole track.
-                if let Err(error) = cache_encoded(&store, &cache_hash, quality, &sink.spill) {
+                if let Err(error) = sink
+                    .flush()
+                    .map_err(anyhow::Error::from)
+                    .and_then(|()| cache_encoded(&store, &cache_hash, quality, &sink.spill))
+                {
                     tracing::warn!(%error, "failed to cache transcoded audio");
                 }
             }
@@ -1595,15 +1662,128 @@ async fn stream_blob(
     Ok(response)
 }
 
+#[derive(Serialize)]
+struct TranscodeWarmth {
+    /// True when the encode is cached *now* — meaning a play of this track will be a
+    /// seekable blob read rather than an encode-while-streaming.
+    ready: bool,
+    /// True when this request started an encode. False with `ready: false` means the hub
+    /// was too busy and the client should simply carry on.
+    started: bool,
+}
+
+/// Prepares one track's encode before anyone asks to hear it.
+///
+/// `stream_blob` will happily encode while streaming, but that first play is degraded in a
+/// way nothing downstream can paper over: the length is unknown until the encode finishes,
+/// so the response cannot answer a range request and the listener gets no seek bar and no
+/// duration. Warming the *next* track in a queue while the current one plays turns that
+/// into a cached, seekable blob by the time it is reached.
+///
+/// Speculative work, so it behaves like it: it takes a transcode slot only if one is free
+/// rather than queueing for one, and a hub busy serving actual listeners simply says no.
+/// Nothing breaks when it does — the track still plays, just on the slower path.
+async fn warm_transcode(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(hash): Path<String>,
+    Query(query): Query<StreamQualityQuery>,
+) -> Result<Json<TranscodeWarmth>, ApiError> {
+    require_device_or_admin(&state, &headers)?;
+    let quality = parse_quality(query.quality.as_deref())?;
+    if quality == aro_track_id::transcode::StreamQuality::Original {
+        // Nothing to prepare: the original is already on disk, by definition.
+        return Ok(Json(TranscodeWarmth {
+            ready: true,
+            started: false,
+        }));
+    }
+
+    if state
+        .store
+        .transcoded_blob(&hash, quality.as_str())?
+        .is_some()
+    {
+        return Ok(Json(TranscodeWarmth {
+            ready: true,
+            started: false,
+        }));
+    }
+
+    let source = state
+        .store
+        .blob_path_for_download(&hash)?
+        .ok_or_else(|| ApiError::not_found("blob_not_found"))?;
+
+    let Ok(permit) = state.transcode_slots.clone().try_acquire_owned() else {
+        return Ok(Json(TranscodeWarmth {
+            ready: false,
+            started: false,
+        }));
+    };
+
+    let key = (hash.clone(), quality.as_str().to_string());
+    {
+        let mut warming = state
+            .warming_transcodes
+            .lock()
+            .expect("warming set poisoned");
+        if !warming.insert(key.clone()) {
+            return Ok(Json(TranscodeWarmth {
+                ready: false,
+                started: false,
+            }));
+        }
+    }
+
+    let store = state.store.clone();
+    let warming = state.warming_transcodes.clone();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        // Straight to a temporary file for the same reason `ChannelSink` uses one: nothing
+        // should need a whole track's worth of memory, least of all speculative work.
+        match tempfile::NamedTempFile::new() {
+            Ok(mut encoded) => {
+                match aro_track_id::transcode::transcode_to_ogg_opus(&source, quality, &mut encoded)
+                {
+                    Ok(()) => {
+                        if let Err(error) = encoded
+                            .flush()
+                            .map_err(anyhow::Error::from)
+                            .and_then(|()| cache_encoded(&store, &key.0, quality, &encoded))
+                        {
+                            tracing::warn!(%error, hash = %key.0, "failed to cache warmed audio");
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, hash = %key.0, "warm transcode failed");
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not open a spill file for the warm encode");
+            }
+        }
+        warming.lock().expect("warming set poisoned").remove(&key);
+    });
+
+    Ok(Json(TranscodeWarmth {
+        ready: false,
+        started: true,
+    }))
+}
+
+/// Imports a finished encode from the temporary file it was written to.
+///
+/// Takes the file rather than its bytes so that nothing ever has to hold a whole track in
+/// memory to cache it — see `ChannelSink`.
 fn cache_encoded(
     store: &HubStore,
     content_hash: &str,
     quality: aro_track_id::transcode::StreamQuality,
-    bytes: &[u8],
+    encoded: &tempfile::NamedTempFile,
 ) -> anyhow::Result<()> {
-    let temp = tempfile::NamedTempFile::new()?;
-    std::fs::write(temp.path(), bytes)?;
-    let (blob_hash, size) = store.import_managed(temp.path())?;
+    let (blob_hash, size) = store.import_managed(encoded.path())?;
     store.record_transcoded_blob(content_hash, quality.as_str(), &blob_hash, size)?;
     Ok(())
 }
@@ -1611,14 +1791,32 @@ fn cache_encoded(
 /// Forwards encoded bytes to the HTTP response as they are produced, while keeping a copy
 /// so the finished encode can be cached. The copy is the whole point of doing both at once:
 /// the listener gets audio immediately *and* the next play is a cheap, seekable blob read.
+///
+/// The copy goes to a temporary file rather than a `Vec`. Most tracks would fit in memory
+/// comfortably, but "most tracks" is the wrong thing to size for: an hour-long DJ set or an
+/// unsplit classical recording is around 86 MB at 192 kbps, one encode may run per core, and
+/// the reference hub has 917 MB in total. Spilling to disk costs nothing here because the
+/// bytes were going to a temporary file anyway — `cache_encoded` writes one before importing
+/// it — so this removes a copy rather than adding one.
 struct ChannelSink {
     sender: tokio::sync::mpsc::Sender<Result<Vec<u8>, std::io::Error>>,
-    spill: Vec<u8>,
+    spill: tempfile::NamedTempFile,
+}
+
+impl ChannelSink {
+    fn new(
+        sender: tokio::sync::mpsc::Sender<Result<Vec<u8>, std::io::Error>>,
+    ) -> std::io::Result<Self> {
+        Ok(Self {
+            sender,
+            spill: tempfile::NamedTempFile::new()?,
+        })
+    }
 }
 
 impl std::io::Write for ChannelSink {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.spill.extend_from_slice(buf);
+        self.spill.write_all(buf)?;
         // A closed receiver means the listener skipped or disconnected. Reporting success
         // lets the encode run to completion so the work still lands in the cache.
         let _ = self.sender.blocking_send(Ok(buf.to_vec()));
@@ -1626,7 +1824,7 @@ impl std::io::Write for ChannelSink {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+        self.spill.flush()
     }
 }
 
@@ -1670,6 +1868,10 @@ async fn playlists(
 struct RadioQuery {
     #[serde(default = "default_radio_limit")]
     limit: usize,
+    /// How far out from the seed to start, so a station can be continued rather than
+    /// restarted. Absent means the beginning, which is what starting a station wants.
+    #[serde(default)]
+    offset: usize,
 }
 
 fn default_radio_limit() -> usize {
@@ -1716,7 +1918,12 @@ async fn radio(
 ) -> Result<Json<Option<crate::playlists::GeneratedPlaylist>>, ApiError> {
     require_device_or_admin(&state, &headers)?;
     let seeds = cached_playlist_seeds(&state).await?;
-    Ok(Json(crate::playlists::radio(&seeds, &hash, query.limit)))
+    Ok(Json(crate::playlists::radio(
+        &seeds,
+        &hash,
+        query.limit,
+        query.offset,
+    )))
 }
 
 async fn source_health(
@@ -2225,7 +2432,7 @@ async fn audio_features_status(
 
 #[cfg(test)]
 async fn download_range(path: PathBuf, range: Option<&str>) -> Result<Response, ApiError> {
-    download_range_inner(path, range, None).await
+    download_range_inner(path, range, None, None).await
 }
 
 pub(crate) async fn download_range_tracked(
@@ -2233,14 +2440,65 @@ pub(crate) async fn download_range_tracked(
     range: Option<&str>,
     telemetry: RuntimeTelemetry,
 ) -> Result<Response, ApiError> {
-    download_range_inner(path, range, Some(telemetry)).await
+    download_range_inner(path, range, Some(telemetry), None).await
+}
+
+/// A blob served with the one validator a content-addressed store gets for free.
+///
+/// The hash *is* the version: bytes that hash to it cannot change, so the response can say
+/// so and let every client below stop asking for what it already has. Without this a
+/// browser re-downloads an entire track to replay it, and the Next proxy re-pulls it from
+/// the hub to hand back bytes it just handed back.
+pub(crate) struct BlobCacheIdentity<'a> {
+    /// The hash of the bytes *this response* carries — for a transcode, the encoded blob's
+    /// own hash rather than the original track's, since the two are different bytes.
+    hash: &'a str,
+    if_none_match: Option<&'a str>,
+}
+
+impl<'a> BlobCacheIdentity<'a> {
+    fn new(hash: &'a str, headers: &'a HeaderMap) -> Self {
+        Self {
+            hash,
+            if_none_match: headers
+                .get(header::IF_NONE_MATCH)
+                .and_then(|value| value.to_str().ok()),
+        }
+    }
+
+    fn entity_tag(&self) -> String {
+        format!("\"{}\"", self.hash)
+    }
+
+    /// Whether the client already holds these exact bytes. `*` matches anything the client
+    /// has, per RFC 9110; otherwise any tag in the list matching ours is enough.
+    fn is_fresh(&self) -> bool {
+        let Some(candidates) = self.if_none_match else {
+            return false;
+        };
+        let tag = self.entity_tag();
+        candidates.split(',').any(|candidate| {
+            let candidate = candidate.trim().trim_start_matches("W/");
+            candidate == "*" || candidate == tag
+        })
+    }
 }
 
 async fn download_range_inner(
     path: PathBuf,
     range: Option<&str>,
     telemetry: Option<RuntimeTelemetry>,
+    identity: Option<BlobCacheIdentity<'_>>,
 ) -> Result<Response, ApiError> {
+    // Checked before the file is even opened, and ahead of `Range`: a conditional request
+    // that already holds these bytes wants nothing read, seeked, or sent. RFC 9110 gives
+    // `If-None-Match` precedence over `Range` for exactly this reason.
+    if let Some(identity) = &identity
+        && identity.is_fresh()
+    {
+        return Ok(not_modified(identity));
+    }
+
     let mut file = fs::File::open(path).await.map_err(ApiError::internal)?;
     let total = file.metadata().await.map_err(ApiError::internal)?.len();
     let requested = match range {
@@ -2272,6 +2530,11 @@ async fn download_range_inner(
             format!("bytes {start}-{end}/{total}"),
         );
     }
+    if let Some(identity) = &identity {
+        response = response
+            .header(header::ETAG, identity.entity_tag())
+            .header(header::CACHE_CONTROL, BLOB_CACHE_CONTROL);
+    }
     match telemetry {
         Some(telemetry) => response
             .body(Body::from_stream(telemetry.track(stream)))
@@ -2280,6 +2543,20 @@ async fn download_range_inner(
             .body(Body::from_stream(stream))
             .map_err(ApiError::internal),
     }
+}
+
+/// `private` rather than `public` because every blob route is behind a device credential —
+/// the bytes may live in a browser's own cache, but never in a shared one.
+const BLOB_CACHE_CONTROL: &str = "private, max-age=31536000, immutable";
+
+fn not_modified(identity: &BlobCacheIdentity<'_>) -> Response {
+    Response::builder()
+        .status(StatusCode::NOT_MODIFIED)
+        .header(header::ETAG, identity.entity_tag())
+        .header(header::CACHE_CONTROL, BLOB_CACHE_CONTROL)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .body(Body::empty())
+        .expect("static not-modified response is valid")
 }
 
 fn parse_byte_range(value: &str, total: u64) -> Result<(u64, u64), ()> {
@@ -2348,6 +2625,75 @@ mod download_tests {
         assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 2-4/8");
         let body = to_bytes(response.into_body(), 16).await.unwrap();
         assert_eq!(&body[..], b"cde");
+    }
+
+    fn conditional(value: Option<&str>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        if let Some(value) = value {
+            headers.insert(header::IF_NONE_MATCH, value.parse().unwrap());
+        }
+        headers
+    }
+
+    #[tokio::test]
+    async fn content_addressed_responses_carry_their_hash_as_a_validator() {
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"abcdefgh").unwrap();
+        let headers = conditional(None);
+
+        let response = download_range_inner(
+            file.path().to_path_buf(),
+            None,
+            None,
+            Some(BlobCacheIdentity::new("abc123", &headers)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::ETAG], "\"abc123\"");
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            BLOB_CACHE_CONTROL
+        );
+    }
+
+    #[tokio::test]
+    async fn a_client_holding_the_bytes_is_told_so_without_reading_the_file() {
+        // Deliberately a path that does not exist: a fresh conditional request must be
+        // answered before anything is opened, so this would fail loudly if it were not.
+        let headers = conditional(Some("\"abc123\""));
+
+        let response = download_range_inner(
+            PathBuf::from("/nonexistent/blob"),
+            Some("bytes=0-63"),
+            None,
+            Some(BlobCacheIdentity::new("abc123", &headers)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(response.headers()[header::ETAG], "\"abc123\"");
+    }
+
+    #[test]
+    fn freshness_understands_lists_wildcards_and_weak_tags() {
+        let one = conditional(Some("\"abc123\""));
+        assert!(BlobCacheIdentity::new("abc123", &one).is_fresh());
+        assert!(!BlobCacheIdentity::new("def456", &one).is_fresh());
+
+        let many = conditional(Some("\"other\", \"abc123\""));
+        assert!(BlobCacheIdentity::new("abc123", &many).is_fresh());
+
+        let wildcard = conditional(Some("*"));
+        assert!(BlobCacheIdentity::new("anything", &wildcard).is_fresh());
+
+        let weak = conditional(Some("W/\"abc123\""));
+        assert!(BlobCacheIdentity::new("abc123", &weak).is_fresh());
+
+        let absent = conditional(None);
+        assert!(!BlobCacheIdentity::new("abc123", &absent).is_fresh());
     }
 
     #[tokio::test]

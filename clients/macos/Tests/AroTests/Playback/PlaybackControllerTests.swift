@@ -49,6 +49,78 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertEqual(controller.elapsedTime, controller.duration)
     }
 
+
+    /// The station indicator is only worth showing if it is true, so anything the listener
+    /// starts by hand has to clear it. A sticky "radio" light would be worse than none:
+    /// it would be claiming the queue chose itself long after they picked an album.
+    func testRadioModeEndsAsSoonAsSomethingIsPlayedByHand() {
+        let engine = FakeAudioPlaybackEngine()
+        let controller = PlaybackController(engine: engine)
+        let songs = makeSongs(["Seed", "Near", "Nearer"])
+        defer { controller.stopAndClear() }
+
+        XCTAssertFalse(controller.isPlayingRadio, "nothing is playing yet")
+
+        controller.playStation(song: songs[0], queue: songs)
+        XCTAssertTrue(controller.isPlayingRadio)
+        XCTAssertEqual(controller.currentSong, songs[0])
+
+        controller.play(song: songs[2], queue: songs)
+        XCTAssertFalse(
+            controller.isPlayingRadio,
+            "picking a track ends the station"
+        )
+    }
+
+    /// A refused play must not leave the player claiming to be a radio — the flag is set
+    /// from whether playback actually started, not from having asked for it.
+    func testARefusedStationDoesNotLightTheRadioIndicator() {
+        let engine = FakeAudioPlaybackEngine()
+        let controller = PlaybackController(engine: engine)
+        let songs = makeSongs(["Seed", "Near"])
+
+        controller.setServerUnavailable("The local library server is unavailable.")
+        controller.playStation(song: songs[0], queue: songs)
+
+        XCTAssertNil(controller.currentSong)
+        XCTAssertFalse(controller.isPlayingRadio)
+    }
+
+
+    /// The control that started a station has to be able to recognise its own. Coming back
+    /// to an artist mid-station and finding a button offering to start what is already
+    /// playing is the small dishonesty this exists to prevent — and it must be specific:
+    /// some *other* seed's Radio button is still an offer, not a status.
+    func testAStationIsRecognisedOnlyByTheSeedThatStartedIt() {
+        let engine = FakeAudioPlaybackEngine()
+        let controller = PlaybackController(engine: engine)
+        let songs = makeSongs(["Seed", "Near"])
+        defer { controller.stopAndClear() }
+
+        controller.playStation(
+            song: songs[0],
+            queue: songs,
+            seededBy: "seed-hash"
+        )
+
+        XCTAssertTrue(controller.isPlayingStation(seededBy: "seed-hash"))
+        XCTAssertFalse(
+            controller.isPlayingStation(seededBy: "a-different-seed"),
+            "another seed's control is still an offer"
+        )
+        XCTAssertFalse(
+            controller.isPlayingStation(seededBy: nil),
+            "an unanalysed seed matches nothing"
+        )
+
+        controller.play(song: songs[1], queue: songs)
+        XCTAssertNil(controller.radioSeedHash)
+        XCTAssertFalse(
+            controller.isPlayingStation(seededBy: "seed-hash"),
+            "playing by hand ends the station and its badge"
+        )
+    }
+
     func testPreviousRestartsAfterThreeSecondsOtherwiseMovesBack() {
         let engine = FakeAudioPlaybackEngine()
         let controller = PlaybackController(engine: engine)
@@ -806,6 +878,107 @@ final class PlaybackControllerTests: XCTestCase {
             controller.queue.contains(where: { $0.id == extra.id }),
             "the queued track was lost when shuffle was turned off: \(controller.queue.map(\.title))"
         )
+    }
+
+    /// A station has to keep playing, which means fetching more before the queue runs out.
+    /// The threshold is the point of the test: refilling only once the last track started
+    /// would leave a gap exactly where a station is supposed to be seamless.
+    func testAStationFetchesMoreBeforeItsQueueRunsOut() async throws {
+        let engine = FakeAudioPlaybackEngine()
+        let controller = PlaybackController(engine: engine)
+        let station = makeHashedSongs(["Seed", "One", "Two"])
+        let more = makeHashedSongs(["Three", "Four"])
+        defer { controller.stopAndClear() }
+
+        let requests = Requests()
+        controller.stationExtender = { seed, offset in
+            await requests.record(seed: seed, offset: offset)
+            return more
+        }
+
+        controller.playStation(
+            song: station[0],
+            queue: station,
+            seededBy: "hash-Seed"
+        )
+
+        try await Task.sleep(for: .milliseconds(200))
+
+        let recorded = await requests.all
+        XCTAssertEqual(
+            recorded.first?.seed,
+            "hash-Seed",
+            "the station has to be continued from the seed that started it"
+        )
+        XCTAssertEqual(
+            recorded.first?.offset,
+            2,
+            "the seed leads the queue but is not part of the ranking, so two were consumed"
+        )
+        XCTAssertEqual(
+            controller.queue.map(\.title),
+            ["Seed", "One", "Two", "Three", "Four"],
+            "fetched tracks must be appended, in order, to the queue already playing"
+        )
+    }
+
+    /// Starting something by hand ends the station, and a refill still in flight must not
+    /// then append radio tracks to whatever the listener actually chose.
+    func testAnInFlightRefillIsDiscardedWhenTheStationEnds() async throws {
+        let engine = FakeAudioPlaybackEngine()
+        let controller = PlaybackController(engine: engine)
+        let station = makeHashedSongs(["Seed", "One"])
+        let chosen = makeHashedSongs(["Chosen"])
+        let more = makeHashedSongs(["Late"])
+        defer { controller.stopAndClear() }
+
+        controller.stationExtender = { _, _ in
+            try? await Task.sleep(for: .milliseconds(100))
+            return more
+        }
+
+        controller.playStation(
+            song: station[0],
+            queue: station,
+            seededBy: "hash-Seed"
+        )
+        // Before the refill can land.
+        controller.play(song: chosen[0], queue: chosen)
+
+        try await Task.sleep(for: .milliseconds(300))
+
+        XCTAssertEqual(
+            controller.queue.map(\.title),
+            ["Chosen"],
+            "a refill for an abandoned station must not reach the listener's own queue"
+        )
+    }
+
+    private actor Requests {
+        private(set) var all: [(seed: String, offset: Int)] = []
+
+        func record(seed: String, offset: Int) {
+            all.append((seed, offset))
+        }
+    }
+
+    private func makeHashedSongs(_ titles: [String]) -> [Song] {
+        titles.map { title in
+            Song(
+                url: URL(fileURLWithPath: "/Music/\(title).wav"),
+                title: title,
+                artist: "Artist",
+                duration: 180,
+                audioProperties: AudioFileProperties(
+                    codec: "WAVE",
+                    sampleRate: 96_000,
+                    bitDepth: 24,
+                    channelCount: 2,
+                    bitrate: nil
+                ),
+                contentHash: "hash-\(title)"
+            )
+        }
     }
 
     private func makeSongs(_ titles: [String]) -> [Song] {

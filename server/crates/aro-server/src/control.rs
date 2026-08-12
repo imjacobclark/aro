@@ -117,6 +117,10 @@ enum ControlCommand {
         content_hash: String,
         #[serde(default = "default_radio_limit")]
         limit: usize,
+        /// How far out from the seed to start, so the local client can continue a station
+        /// rather than restart it. See `crate::playlists::radio`.
+        #[serde(default)]
+        offset: usize,
     },
     /// Pulls this hub's own operation log, oldest-first after `after_sequence` —
     /// the local-profile analogue of `/v1/exchange`'s pull side, for a
@@ -413,10 +417,16 @@ async fn handle(stream: &mut UnixStream, state: Arc<AppState>) -> Result<Value> 
         ControlCommand::Radio {
             content_hash,
             limit,
+            offset,
         } => {
             let store = state.store.clone();
             let seeds = tokio::task::spawn_blocking(move || store.playlist_seeds()).await??;
-            serde_json::to_value(crate::playlists::radio(&seeds, &content_hash, limit))?
+            serde_json::to_value(crate::playlists::radio(
+                &seeds,
+                &content_hash,
+                limit,
+                offset,
+            ))?
         }
         ControlCommand::ChangesAfter {
             after_sequence,
@@ -546,6 +556,7 @@ mod tests {
             artwork_http: reqwest::Client::new(),
             playlist_seeds: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             transcode_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
+            warming_transcodes: Default::default(),
         });
         (state, root)
     }

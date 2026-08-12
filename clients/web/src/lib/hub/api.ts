@@ -107,8 +107,13 @@ export const api = {
       query: { utc_offset_minutes: -new Date().getTimezoneOffset() },
     }),
 
-  radio: (hash: string, limit?: number) =>
-    call<GeneratedPlaylist>(`radio/${hash}`, { query: { limit } }),
+  /**
+   * A station seeded by one track. `offset` walks further out from that seed, which is how
+   * a station continues instead of ending — the hub's ranking is a stable total order, so
+   * paging it needs no state on either side.
+   */
+  radio: (hash: string, limit?: number, offset?: number) =>
+    call<GeneratedPlaylist>(`radio/${hash}`, { query: { limit, offset } }),
 
   /**
    * Reorders a queue so consecutive tracks sound alike. The hub answers only with hashes
@@ -259,6 +264,21 @@ export function streamUrl(track: CatalogTrack, quality: string): string {
 
   const query = parameters.toString();
   return `/api/stream/${track.content_hash}${query ? `?${query}` : ""}`;
+}
+
+/**
+ * Asks the hub to encode a track before the listener reaches it.
+ *
+ * Deliberately fire-and-forget, and deliberately never surfaced as an error: a hub too
+ * busy to warm this track simply encodes it while streaming instead, exactly as it did
+ * before. Nothing about playback depends on this call succeeding.
+ */
+export function warmTranscode(hash: string, quality: string): void {
+  if (!hash || quality === "original") return;
+  void fetch(`/api/stream/${hash}/warm?quality=${encodeURIComponent(quality)}`, {
+    method: "POST",
+    keepalive: true,
+  }).catch(() => {});
 }
 
 /** Where a cover comes from, or `null` when the hub has none for this track. */

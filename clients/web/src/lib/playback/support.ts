@@ -72,14 +72,25 @@ export function rememberUndecodable(track: CatalogTrack): void {
  * an empty string is a definite no, while "maybe" is not a yes — so this reports only the
  * definite refusals and leaves everything else to be discovered by trying.
  */
+const refusals = new Map<string, boolean>();
+
 export function refusesUpFront(track: CatalogTrack): boolean {
   if (typeof document === "undefined") return false;
 
   const probe = probeType(track);
   if (!probe) return false;
 
+  // Memoized by codec key, because the answer is a property of the browser and cannot
+  // change while the page is open — and this sits on the path a tap takes to start audio,
+  // where it was creating a throwaway `<audio>` element on every single track load.
+  const key = codecKey(track);
+  const remembered = refusals.get(key);
+  if (remembered !== undefined) return remembered;
+
   const element = document.createElement("audio");
-  return element.canPlayType(probe) === "";
+  const refuses = element.canPlayType(probe) === "";
+  refusals.set(key, refuses);
+  return refuses;
 }
 
 function probeType(track: CatalogTrack): string | null {

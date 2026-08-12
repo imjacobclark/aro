@@ -46,6 +46,9 @@ export async function GET(
     "content-length",
     "content-range",
     "accept-ranges",
+    // The hub's validator travels with the bytes: blobs are content-addressed, so the tag
+    // it sends is the hash of exactly what came back and is safe to hand to the browser.
+    "etag",
   ]) {
     const value = response.headers.get(header);
     if (value) headers.set(header, value);
@@ -69,12 +72,33 @@ export async function GET(
   // copy exists, which is why the hub answers `accept-ranges: none` for one. That must be
   // passed through honestly rather than replaced with an optimistic `bytes`.
   if (!headers.has("accept-ranges")) headers.set("accept-ranges", "bytes");
-  headers.set("cache-control", "no-store");
+  headers.set("cache-control", cachePolicy(quality, headers.has("etag")));
 
   return new NextResponse(response.body, {
     status: response.status,
     headers,
   });
+}
+
+/**
+ * How long the browser may keep a piece of audio.
+ *
+ * The original is deliberately never stored. A losslessly-ripped library averages around
+ * 24 MB a track, and filling a phone's cache with those would evict everything else the
+ * app needs to start offline — the size is the whole reason this app has a low data mode
+ * in the first place.
+ *
+ * A transcode is a different object with different economics: the same track at 96 kbps is
+ * a little over 2 MB, it is content-addressed, and it can never change. Refetching it on
+ * every replay wastes the one thing the listener on a phone is short of. So the qualities
+ * that exist to save bandwidth are allowed to actually save it.
+ */
+function cachePolicy(quality: string | undefined, hasValidator: boolean): string {
+  if (!quality || quality === "original") return "no-store";
+  // Without a validator there is nothing to revalidate against, and an encode still being
+  // produced must never be stored as though it were the finished article.
+  if (!hasValidator) return "no-store";
+  return "private, max-age=31536000, immutable";
 }
 
 /**

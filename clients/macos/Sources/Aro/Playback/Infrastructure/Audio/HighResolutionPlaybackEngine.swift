@@ -264,7 +264,7 @@ final class HighResolutionPlaybackEngine: NSObject, AudioPlaybackEngine {
             )
             currentSong = first.element.song
             applyGain(for: first.element.song)
-            streamingCoordinator?.prepareQueue(items)
+            streamingCoordinator?.prepareQueue(items, startingAt: index)
 
             try enqueue(first.element, in: player, immediate: true)
             for queued in compatibleItems.dropFirst() {

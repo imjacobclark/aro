@@ -346,6 +346,7 @@ async fn serve(config: Config, config_path: PathBuf) -> Result<()> {
         transcode_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(
             http::default_transcode_slots(),
         )),
+        warming_transcodes: Default::default(),
     };
     let _dashboard = if config.dashboard.enabled {
         let listener = tokio::net::TcpListener::bind(config.dashboard.bind)

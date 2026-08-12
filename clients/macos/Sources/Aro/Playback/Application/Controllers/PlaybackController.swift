@@ -31,6 +31,22 @@ final class PlaybackController {
     private(set) var visualizerLevels = Array(repeating: 0.0, count: 9)
     private(set) var isShuffleEnabled: Bool
     private(set) var repeatMode: PlaybackRepeatMode
+    /// Whether the current queue came from a hub station rather than from a list the
+    /// listener picked. Purely presentational — playback behaves identically either way.
+    private(set) var isPlayingRadio: Bool = false
+    /// The content hash the playing station was seeded from, so the control that started
+    /// it can show itself as on when you come back to it. Without this, walking back to
+    /// the artist you started a station from finds a button offering to start the thing
+    /// already playing.
+    private(set) var radioSeedHash: String?
+    /// How far into the hub's ranking this station has already been served, which is where
+    /// the next page starts. The seed leads the first page and is not part of the ranking.
+    @ObservationIgnored private var stationConsumed = 0
+    /// Set once the hub reports nothing further out, so a finite library stops being asked.
+    @ObservationIgnored private var stationExhausted = false
+    @ObservationIgnored private var isExtendingStation = false
+    /// How close to the end of a station's queue to get before asking for more.
+    private static let stationRefillThreshold = 5
     /// Set by the active library transport. While offline, catalogue entries remain
     /// browsable but queues are reduced to media actually present on this Mac.
     var restrictsPlaybackToLocalMedia = false
@@ -60,6 +76,12 @@ final class PlaybackController {
     /// that `LibraryRuntime` doesn't hold — see `ContentView`, which assigns it.
     @ObservationIgnored var smartShuffleOrder:
         (@MainActor ([String], String?) async -> [String]?)?
+    /// Fetches the next stretch of a station, given its seed and how far it has already
+    /// walked. Assigned from the view layer for the same reason as `smartShuffleOrder`:
+    /// turning the hub's content hashes back into songs needs the library, which this
+    /// controller deliberately does not hold.
+    @ObservationIgnored var stationExtender:
+        (@MainActor (String, Int) async -> [Song])?
     @ObservationIgnored private let progressivePlaybackEligibility:
         @MainActor (Song) -> Bool
     @ObservationIgnored private let progressiveDownloadFallbackAllowed:
@@ -93,6 +115,8 @@ final class PlaybackController {
             @escaping @MainActor (Song) -> Bool = { $0.url.isFileURL },
         smartShuffleOrder:
             (@MainActor ([String], String?) async -> [String]?)? = nil,
+        stationExtender:
+            (@MainActor (String, Int) async -> [Song])? = nil,
         progressivePlaybackEligibility:
             @escaping @MainActor (Song) -> Bool = { _ in false },
         progressiveDownloadFallbackAllowed:
@@ -119,6 +143,7 @@ final class PlaybackController {
         self.mediaLocationResolver = mediaLocationResolver
         self.localMediaAvailability = localMediaAvailability
         self.smartShuffleOrder = smartShuffleOrder
+        self.stationExtender = stationExtender
         self.progressivePlaybackEligibility = progressivePlaybackEligibility
         self.progressiveDownloadFallbackAllowed =
             progressiveDownloadFallbackAllowed
@@ -176,7 +201,94 @@ final class PlaybackController {
         return message
     }
 
+    /// Starts `queue` as a hub station, which is an ordinary play plus the knowledge that
+    /// this queue was chosen by similarity rather than by the listener. Nothing about
+    /// playback changes; the difference is only that the player can say so.
+    ///
+    /// Set after `play` because `play` clears it — anything the listener starts by hand
+    /// ends the station, which is what makes the indicator trustworthy rather than sticky.
+    /// Conditioned on playback actually having started, so a refused play (offline, no
+    /// local media) doesn't leave the player claiming to be a radio.
+    func playStation(
+        song: Song,
+        queue stationQueue: [Song],
+        seededBy seedHash: String? = nil
+    ) {
+        play(song: song, queue: stationQueue)
+        isPlayingRadio = currentSong != nil
+        radioSeedHash = isPlayingRadio ? seedHash : nil
+        // The seed leads the queue but is not part of the ranking the hub paged, so the
+        // next page starts after everything *except* it.
+        stationConsumed = max(stationQueue.count - 1, 0)
+        stationExhausted = false
+        extendStationIfNeeded()
+    }
+
+    /// Keeps a station playing by fetching the next stretch before the queue runs out.
+    ///
+    /// A station that ends is just a playlist, and radio used to end after thirty tracks.
+    /// The hub ranks the whole library against the seed in a stable order, so continuing is
+    /// a matter of asking for the next page — far enough ahead that the listener never
+    /// reaches the join, and only one request in flight at a time.
+    ///
+    /// Silent about every failure. A hub that cannot answer, a library with nothing further
+    /// out, a station whose next tracks aren't in this library — none of those are worth
+    /// interrupting someone for, and all of them simply mean the queue stands as it is.
+    private func extendStationIfNeeded() {
+        guard isPlayingRadio,
+              !stationExhausted,
+              !isExtendingStation,
+              let seedHash = radioSeedHash,
+              let stationExtender,
+              let currentIndex,
+              queue.count - currentIndex <= Self.stationRefillThreshold else {
+            return
+        }
+
+        isExtendingStation = true
+        let offset = stationConsumed
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let additions = await stationExtender(seedHash, offset)
+            defer { self.isExtendingStation = false }
+            // Still the same station? The listener may have started something else while
+            // this was in flight, and appending to that queue would be baffling.
+            guard self.isPlayingRadio,
+                  self.radioSeedHash == seedHash,
+                  self.stationConsumed == offset else {
+                return
+            }
+            guard !additions.isEmpty else {
+                self.stationExhausted = true
+                return
+            }
+            self.stationConsumed += additions.count
+            self.appendToStation(additions)
+        }
+    }
+
+    /// Adds newly-fetched station tracks to the queue, skipping anything already in it.
+    private func appendToStation(_ additions: [Song]) {
+        let known = Set(queue.compactMap(\.contentHash))
+        let fresh = additions.filter { song in
+            guard let hash = song.contentHash else { return false }
+            return !known.contains(hash)
+        }
+        guard !fresh.isEmpty else { return }
+        queue.append(contentsOf: fresh)
+        canonicalQueue.append(contentsOf: fresh)
+    }
+
+    /// Whether the station currently playing is the one `seedHash` would start — what lets
+    /// a Radio control show "Radio on" instead of offering to start what is already on.
+    func isPlayingStation(seededBy seedHash: String?) -> Bool {
+        guard isPlayingRadio, let seedHash, let radioSeedHash else { return false }
+        return radioSeedHash == seedHash
+    }
+
     func play(song: Song, queue requestedQueue: [Song]) {
+        isPlayingRadio = false
+        radioSeedHash = nil
         guard serverUnavailableReason == nil else {
             fail(serverUnavailableReason ?? "The library server is unavailable.")
             return
@@ -622,6 +734,9 @@ final class PlaybackController {
         preparationTask = nil
         state = .loading
         currentIndex = index
+        // Moving through a station is the only signal that it is running down, so the check
+        // belongs here rather than on a timer.
+        extendStationIfNeeded()
         currentSong = queue[index]
         duration = queue[index].duration ?? 0
         let startTime = min(max(requestedTime, 0), duration)

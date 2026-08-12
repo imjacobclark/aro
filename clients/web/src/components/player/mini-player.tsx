@@ -5,7 +5,10 @@ import { Loader2, Pause, Play, SkipForward } from "lucide-react";
 
 import { Artwork } from "@/components/artwork";
 import { NowPlayingSheet } from "@/components/player/now-playing-sheet";
-import { usePlayback } from "@/lib/playback/controller";
+import {
+  usePlayback,
+  usePlaybackProgress,
+} from "@/lib/playback/controller";
 
 /**
  * The bar above the tabs, and the tap target that opens the full player.
@@ -18,13 +21,13 @@ import { usePlayback } from "@/lib/playback/controller";
  */
 export function MiniPlayer() {
   const playback = usePlayback();
+  const { elapsed, duration, isBuffering } = usePlaybackProgress();
   const [expanded, setExpanded] = useState(false);
 
   if (!playback.current) return null;
 
   const track = playback.current;
-  const progress =
-    playback.duration > 0 ? (playback.elapsed / playback.duration) * 100 : 0;
+  const progress = duration > 0 ? (elapsed / duration) * 100 : 0;
 
   return (
     <>
@@ -65,7 +68,7 @@ export function MiniPlayer() {
               aria-label={playback.isPlaying ? "Pause" : "Play"}
               className="hover:bg-muted shrink-0 rounded-full p-2.5 transition-colors"
             >
-              {playback.isBuffering ? (
+              {isBuffering ? (
                 <Loader2 className="size-5 animate-spin" />
               ) : playback.isPlaying ? (
                 <Pause className="size-5 fill-current" />

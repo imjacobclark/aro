@@ -1132,10 +1132,11 @@ actor AroSyncClient {
     func radio(
         contentHash: String,
         limit: Int = 30,
+        offset: Int = 0,
         credential: HubDeviceCredential? = nil
     ) async throws -> ServerGeneratedPlaylist? {
         try await getAuthenticated(
-            "v1/radio/\(contentHash)?limit=\(limit)",
+            "v1/radio/\(contentHash)?limit=\(limit)&offset=\(offset)",
             credential: credential
         )
     }

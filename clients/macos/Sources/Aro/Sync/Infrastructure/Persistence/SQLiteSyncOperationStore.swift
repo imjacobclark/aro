@@ -568,10 +568,30 @@ struct SQLiteSyncOperationStore {
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(
                 connection,
+                // A hub this device has joined also lives in `watched_folders`, so that
+                // replicated songs have something to group under — but it is a URL, not a
+                // directory, and it belongs to the hub rather than to us. Reporting it as
+                // one of our folders told the hub about itself: it arrived as a
+                // `referenced` source with no path, which no filesystem check can ever
+                // find, so the hub marked it unavailable and handed the warning straight
+                // back to us. A closed loop, warning about a folder that only existed
+                // because we mentioned it. Identified by the convention
+                // `ensureLocalHubMembership` and `ensureRemoteLibraryFolder` already use:
+                // `id = hub_id` stands in for "this isn't really a folder." Both
+                // membership tables count, since a hub this Mac hosts itself is recorded
+                // in `local_hub_membership` rather than `hub_memberships`.
                 """
                 SELECT id, display_name, path
                 FROM watched_folders
                 WHERE removed_at IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM hub_memberships
+                      WHERE hub_memberships.hub_id = watched_folders.id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM local_hub_membership
+                      WHERE local_hub_membership.hub_id = watched_folders.id
+                  )
                 ORDER BY display_name
                 """,
                 -1,

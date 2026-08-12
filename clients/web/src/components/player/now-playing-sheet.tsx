@@ -26,7 +26,10 @@ import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { useCatalog } from "@/lib/catalog/store";
 import { api } from "@/lib/hub/api";
 import { formatDuration, formatQuality, isHighResolution } from "@/lib/format";
-import { usePlayback } from "@/lib/playback/controller";
+import {
+  usePlayback,
+  usePlaybackProgress,
+} from "@/lib/playback/controller";
 import { cn } from "@/lib/utils";
 
 /**
@@ -45,6 +48,7 @@ export function NowPlayingSheet({
   onOpenChange: (open: boolean) => void;
 }) {
   const playback = usePlayback();
+  const { elapsed, duration, isBuffering } = usePlaybackProgress();
   const { patchTrack } = useCatalog();
   const [scrubbing, setScrubbing] = useState<number | null>(null);
   const [queueOpen, setQueueOpen] = useState(false);
@@ -54,8 +58,8 @@ export function NowPlayingSheet({
 
   if (!track) return null;
 
-  const position = scrubbing ?? playback.elapsed;
-  const total = playback.duration || track.duration_seconds || 0;
+  const position = scrubbing ?? elapsed;
+  const total = duration || track.duration_seconds || 0;
 
   const toggleFavourite = async () => {
     if (!track.content_hash) return;
@@ -196,7 +200,7 @@ export function NowPlayingSheet({
                 aria-label={playback.isPlaying ? "Pause" : "Play"}
                 className="orbit-surface flex size-16 items-center justify-center rounded-full shadow-lg transition-transform active:scale-95"
               >
-                {playback.isBuffering ? (
+                {isBuffering ? (
                   <Loader2 className="size-7 animate-spin" />
                 ) : playback.isPlaying ? (
                   <Pause className="size-7 fill-current" />

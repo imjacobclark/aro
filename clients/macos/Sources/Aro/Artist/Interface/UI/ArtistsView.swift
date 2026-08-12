@@ -164,7 +164,9 @@ struct ArtistsView: View {
     private var artistDetail: some View {
         if let artist = selectedArtist {
             VStack(spacing: 0) {
-                header(title: artist.name, subtitle: artist.summary)
+                header(title: artist.name, subtitle: artist.summary) {
+                    artistActions(for: artist)
+                }
 
                 ScrollView {
                     LazyVStack(spacing: 16) {
@@ -209,7 +211,11 @@ struct ArtistsView: View {
         }
     }
 
-    private func header(title: String, subtitle: String) -> some View {
+    private func header<Actions: View>(
+        title: String,
+        subtitle: String,
+        @ViewBuilder actions: () -> Actions = { EmptyView() }
+    ) -> some View {
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
@@ -225,11 +231,65 @@ struct ArtistsView: View {
             }
 
             Spacer(minLength: 12)
+
+            actions()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 28)
         .padding(.top, 24)
         .padding(.bottom, 20)
+    }
+
+    /// Play and Radio, where you actually look for them.
+    ///
+    /// The shelf at the bottom of this page has always been able to *show* you what a hub
+    /// station would contain, but there was no way to start one without scrolling past
+    /// every album to a track row's context menu. Radio is a property of an artist, not a
+    /// reward for scrolling — the web client puts both buttons in the header and this is
+    /// the same pair.
+    ///
+    /// Radio only appears where a hub can supply one, matching `MoreLikeThisSection`: no
+    /// hub, no station, so no button rather than one that quietly does nothing.
+    @ViewBuilder
+    private func artistActions(for artist: LibraryArtist) -> some View {
+        let everything = artist.albums.flatMap(\.songs)
+
+        HStack(spacing: 8) {
+            Button {
+                guard let first = everything.first else { return }
+                playback.play(song: first, queue: everything)
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("Play")
+                        .font(AroFont.fixed(11, weight: .semibold))
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Color.primary.opacity(0.06)))
+                .overlay(Capsule().strokeBorder(AroTheme.hairline, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .disabled(everything.isEmpty)
+            .help("Play everything by \(artist.name)")
+
+            if let loadRadio, let seed = collectionSeed(everything) {
+                RadioActionButton(
+                    isOn: playback.isPlayingStation(seededBy: seed.contentHash)
+                ) {
+                    Task {
+                        await RadioStation.start(
+                            seededBy: seed,
+                            in: songs,
+                            loadRadio: loadRadio,
+                            playback: playback
+                        )
+                    }
+                }
+            }
+        }
+        .labelStyle(.titleAndIcon)
     }
 
     /// Opens the browser on the artist you're currently listening to rather
