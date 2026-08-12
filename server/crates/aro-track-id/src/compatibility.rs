@@ -16,7 +16,8 @@
 
 use crate::transcode::Error;
 use flacenc::error::Verify;
-use std::io::Write;
+use flacenc::source::Source;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::formats::FormatOptions;
@@ -47,27 +48,118 @@ pub fn needs_compatibility_copy(codec: &str) -> bool {
 /// decoder is best exercised against; there is no reason to be unusual here.
 const BLOCK_SIZE: usize = 4096;
 
-/// Decodes `source` and writes FLAC to `sink`.
+/// Decodes `source` and writes FLAC to `sink`, one frame at a time.
 ///
 /// Lossless end to end: the source's own sample rate and bit depth are preserved, and no
 /// resampling happens. That is the difference between this and `transcode_to_ogg_opus`, which
 /// deliberately lands everything on Opus's 48 kHz — here, changing the rate would make the
 /// "lossless" claim false.
-pub fn convert_to_flac(source: &Path, sink: &mut impl Write) -> Result<(), Error> {
-    let pcm = FlacSource::open(source)?;
+///
+/// Deliberately not `flacenc::encode_with_fixed_block_size`, which is the obvious call and
+/// the wrong one here. That builds a `Stream` holding every encoded `Frame` until the whole
+/// track is done, and a `Frame` keeps its residuals as `Vec<i32>` per channel — so peak
+/// memory is roughly the decoded size of the track, not of the output. Measured on the
+/// reference hub it took `aro-server` to 576 MB of RSS on a 917 MB machine with no swap,
+/// which is most of the way to the wall that has already taken it down once.
+///
+/// So the frames are written and dropped as they are produced, and only one is ever alive.
+/// The cost is having to fix up the header afterwards: FLAC puts the sample count and the
+/// MD5 of the audio in STREAMINFO, at the *front*, and neither is known until the last frame
+/// has been read. `sink` is therefore a `Seek` as well as a `Write` — it is a file in every
+/// real caller — and the header is rewritten in place at the end.
+pub fn convert_to_flac<W: Write + Seek>(source: &Path, sink: &mut W) -> Result<(), Error> {
+    let mut pcm = FlacSource::open(source)?;
     let config = flacenc::config::Encoder::default()
         .into_verified()
         .map_err(|(_, error)| Error::Flac(format!("encoder configuration rejected: {error}")))?;
 
-    let stream = flacenc::encode_with_fixed_block_size(&config, pcm, BLOCK_SIZE)
+    let channels = Source::channels(&pcm);
+    let bits_per_sample = Source::bits_per_sample(&pcm);
+    let sample_rate = Source::sample_rate(&pcm);
+
+    let mut stream = flacenc::component::Stream::new(sample_rate, channels, bits_per_sample)
+        .map_err(|error| Error::Flac(error.to_string()))?;
+    stream
+        .stream_info_mut()
+        .set_block_sizes(BLOCK_SIZE, BLOCK_SIZE)
         .map_err(|error| Error::Flac(error.to_string()))?;
 
+    // The header as it stands now: correct about format, wrong about length and digest.
+    // Written first so the frames can follow immediately, then corrected below. Its size
+    // does not change when those two fields are filled in, so the rewrite lands exactly
+    // over it.
+    let header_start = sink.stream_position()?;
+    let header_len = write_bits(&stream, sink)?;
+
+    let mut buffers = (
+        flacenc::source::FrameBuf::with_size(channels, BLOCK_SIZE)
+            .map_err(|error| Error::Flac(error.to_string()))?,
+        flacenc::source::Context::new(bits_per_sample, channels),
+    );
     let mut bytes = flacenc::bitsink::ByteSink::new();
-    flacenc::component::BitRepr::write(&stream, &mut bytes)
+
+    loop {
+        let read = pcm
+            .read_samples(BLOCK_SIZE, &mut buffers)
+            .map_err(|error| Error::Flac(error.to_string()))?;
+        if read == 0 {
+            break;
+        }
+        let frame_number = buffers
+            .1
+            .current_frame_number()
+            .ok_or_else(|| Error::Flac("frame counter unavailable".to_string()))?;
+        let frame = flacenc::encode_fixed_size_frame(
+            &config,
+            &buffers.0,
+            frame_number,
+            stream.stream_info(),
+        )
         .map_err(|error| Error::Flac(error.to_string()))?;
-    sink.write_all(bytes.as_slice())?;
+
+        bytes.clear();
+        flacenc::component::BitRepr::write(&frame, &mut bytes)
+            .map_err(|error| Error::Flac(error.to_string()))?;
+        sink.write_all(bytes.as_slice())?;
+        // `frame` and the bytes it became both go out of scope here. That is the whole
+        // point: nothing from this iteration survives into the next.
+    }
+
+    let (_, context) = buffers;
+    stream
+        .stream_info_mut()
+        .set_md5_digest(&context.md5_digest());
+    stream
+        .stream_info_mut()
+        .set_total_samples(context.total_samples());
+
+    // Back over the placeholder. Same fields, same widths, so the corrected header is
+    // exactly as long as the one it replaces — asserted rather than assumed, because
+    // being wrong here would silently corrupt every file's first frame.
+    let end = sink.stream_position()?;
+    sink.seek(SeekFrom::Start(header_start))?;
+    let rewritten = write_bits(&stream, sink)?;
+    if rewritten != header_len {
+        return Err(Error::Flac(format!(
+            "header changed size when finalised ({header_len} then {rewritten} bytes)"
+        )));
+    }
+    sink.seek(SeekFrom::Start(end))?;
     sink.flush()?;
     Ok(())
+}
+
+/// Serialises one FLAC component to `sink`, returning how many bytes it took.
+fn write_bits<T: flacenc::component::BitRepr, W: Write>(
+    value: &T,
+    sink: &mut W,
+) -> Result<u64, Error> {
+    let mut bytes = flacenc::bitsink::ByteSink::new();
+    value
+        .write(&mut bytes)
+        .map_err(|error| Error::Flac(error.to_string()))?;
+    sink.write_all(bytes.as_slice())?;
+    Ok(bytes.as_slice().len() as u64)
 }
 
 /// Pulls decoded samples out of symphonia one FLAC block at a time.
@@ -292,8 +384,7 @@ mod tests {
         }
         write_wav(source.path(), &pcm, rate, 2, 16);
 
-        let mut encoded: Vec<u8> = Vec::new();
-        convert_to_flac(source.path(), &mut encoded).expect("encode should succeed");
+        let encoded = encode(source.path());
 
         assert_eq!(&encoded[..4], b"fLaC", "output must be a FLAC stream");
         let info = StreamInfo::parse(&encoded);
@@ -330,8 +421,7 @@ mod tests {
             .collect();
         write_wav(source.path(), &pcm, rate, 1, 16);
 
-        let mut encoded: Vec<u8> = Vec::new();
-        convert_to_flac(source.path(), &mut encoded).expect("encode should succeed");
+        let encoded = encode(source.path());
 
         let info = StreamInfo::parse(&encoded);
         assert_eq!(
@@ -366,6 +456,17 @@ mod tests {
                 md5: body[18..34].try_into().expect("16 bytes of digest"),
             }
         }
+    }
+
+    /// Encodes to a real file, because the encoder rewrites its header in place and so
+    /// needs somewhere seekable — which is exactly what it is given in production.
+    fn encode(source: &Path) -> Vec<u8> {
+        let out = tempfile::Builder::new().suffix(".flac").tempfile().unwrap();
+        {
+            let mut file = std::fs::File::create(out.path()).unwrap();
+            convert_to_flac(source, &mut file).expect("encode should succeed");
+        }
+        std::fs::read(out.path()).unwrap()
     }
 
     fn write_wav(path: &Path, pcm: &[u8], rate: u32, channels: u16, bits: u16) {
