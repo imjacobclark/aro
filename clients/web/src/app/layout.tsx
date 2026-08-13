@@ -42,11 +42,13 @@ export const metadata: Metadata = {
 
 export const viewport: Viewport = {
   themeColor: "#faf9f6",
-  // A music player is a document, not a canvas: pinch-zooming it only ever happens by
-  // accident mid-scroll, but the page still scales with the system text size.
   width: "device-width",
   initialScale: 1,
-  maximumScale: 1,
+  // No `maximumScale`. Pinch-zoom used to be pinned shut on the grounds that it only ever
+  // happened by accident mid-scroll, which is true and is not the point: someone who needs
+  // to magnify a track listing has no other way to do it, and taking that away is the one
+  // accessibility failure a media player really cannot argue its way out of. An accidental
+  // zoom costs a pinch to undo.
   viewportFit: "cover",
 };
 

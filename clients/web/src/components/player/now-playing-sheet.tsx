@@ -128,7 +128,7 @@ export function NowPlayingSheet({
                 <p className="text-muted-foreground mt-1 truncate">
                   {track.artist ?? "Unknown Artist"}
                 </p>
-                <p className="text-muted-foreground/70 mt-1.5 flex items-center gap-2 text-xs">
+                <p className="text-muted-foreground mt-1.5 flex items-center gap-2 text-xs">
                   <span className="truncate">{formatQuality(track)}</span>
                   {isHighResolution(track) ? (
                     <Badge tone="hires">Hi-Res</Badge>

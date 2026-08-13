@@ -196,7 +196,7 @@ export function TrackActionsSheet({
             <p className="text-muted-foreground truncate text-sm">
               {track.artist ?? "Unknown Artist"}
             </p>
-            <p className="text-muted-foreground/70 truncate text-xs">
+            <p className="text-muted-foreground truncate text-xs">
               {formatQuality(track)}
             </p>
           </div>

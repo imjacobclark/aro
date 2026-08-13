@@ -49,15 +49,34 @@ const KNOWN_KINDS = new Set([
   "replay_month",
 ]);
 
+/**
+ * The last playlists the hub gave this session.
+ *
+ * Module scope rather than state because it has to outlive the component: Home is
+ * unmounted every time the listener opens another tab and remounted when they come back,
+ * and re-showing a skeleton for data that is seconds old is worse than showing it slightly
+ * stale. Not persisted to disk — a fresh launch should ask.
+ */
+let lastPlaylists: GeneratedPlaylist[] = [];
+
 export default function HomePage() {
   const { tracks, byHash, loading } = useCatalog();
   const playback = usePlayback();
-  const [playlists, setPlaylists] = useState<GeneratedPlaylist[]>([]);
-  const [loadingPlaylists, setLoadingPlaylists] = useState(true);
+  // Seeded from the last set this session produced, so coming back to Home shows what was
+  // here before rather than collapsing to a skeleton while the hub is asked again. Home is
+  // remounted on every visit — the tab bar is real navigation — and without this the whole
+  // screen blanked each time, which is what it did on a phone between one screenshot and
+  // the next. The macOS client keeps the same last-known-good set for the same reason.
+  const [playlists, setPlaylists] = useState<GeneratedPlaylist[]>(lastPlaylists);
+  const [loadingPlaylists, setLoadingPlaylists] = useState(
+    lastPlaylists.length === 0,
+  );
 
   const refresh = useCallback(async () => {
     try {
-      setPlaylists(await api.playlists());
+      const fresh = await api.playlists();
+      lastPlaylists = fresh;
+      setPlaylists(fresh);
     } catch {
       // A hub that is busy or briefly unreachable simply leaves the last set on screen.
     } finally {

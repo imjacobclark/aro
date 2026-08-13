@@ -123,7 +123,7 @@ export default function MetadataPage() {
                       "Identifying…"}
                   </span>
                   {status.last_group ? (
-                    <span className="text-muted-foreground/70 shrink-0 tabular-nums">
+                    <span className="text-muted-foreground shrink-0 tabular-nums">
                       {status.last_group.member_count} tracks
                     </span>
                   ) : null}

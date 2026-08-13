@@ -393,6 +393,7 @@ export default function SettingsPage() {
               />
               <Button
                 variant="outline"
+                aria-label="Add folder"
                 disabled={!newFolder.trim() || busy === "add-folder"}
                 onClick={() =>
                   void run("add-folder", async () => {

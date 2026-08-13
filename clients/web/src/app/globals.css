@@ -16,6 +16,7 @@
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
+  --color-primary-text: var(--primary-text);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
@@ -65,11 +66,21 @@
   --popover: #ffffff;
   --popover-foreground: var(--navy);
   --primary: var(--violet);
+  /* The violet used as small text rather than as a fill. The brand value measures 4.34:1
+     as the active tab label against the bar's composited background — just under AA for
+     10px text — while darkening the shared `--primary` instead would have cost the
+     white-on-violet buttons their own contrast. Two jobs, two values. */
+  --primary-text: #6850ca;
   --primary-foreground: #ffffff;
   --secondary: var(--browser-surface);
   --secondary-foreground: var(--navy);
   --muted: var(--browser-surface);
-  --muted-foreground: color-mix(in oklch, var(--navy), transparent 42%);
+  /* 35%, not 42%: at 42 this measured 4.32:1 on the page background and 4.37:1 on a
+     card, both under WCAG AA's 4.5:1 for body text — and this colour carries every
+     subtitle, every artist name under a title, and most of Settings. 35% measures 5.44:1
+     and 5.52:1 and still reads as clearly secondary. The dark theme already passes at
+     5.58:1 and is left alone. */
+  --muted-foreground: color-mix(in oklch, var(--navy), transparent 35%);
   --accent: var(--violet);
   --accent-foreground: #ffffff;
   --destructive: #c84451;
@@ -104,6 +115,8 @@
   --popover: #24242a;
   --popover-foreground: #f2f1ee;
   --primary: var(--violet);
+  /* Lightened for the dark bar; see the light-theme note above. */
+  --primary-text: #9d8be9;
   --primary-foreground: #ffffff;
   --secondary: var(--browser-surface);
   --secondary-foreground: #f2f1ee;

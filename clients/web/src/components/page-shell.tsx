@@ -27,7 +27,18 @@ export function PageShell({
   className?: string;
 }) {
   return (
-    <div className={cn("mx-auto w-full max-w-5xl px-4 pt-3", className)}>
+    // `viewport-fit=cover` plus `black-translucent` means iOS draws the status bar *over*
+    // this content when the app is on a home screen, so the title has to move down out of
+    // its way. Every other fixed edge in this app already pays `safe-area-inset-bottom`;
+    // the top was simply never claimed, and the clock sat on top of the page title. `max`
+    // rather than a sum so a desktop browser, where the inset is 0, keeps its original
+    // spacing rather than losing it.
+    <div
+      className={cn(
+        "mx-auto w-full max-w-5xl px-4 pt-[max(0.75rem,env(safe-area-inset-top))]",
+        className,
+      )}
+    >
       <header className="flex items-start gap-3 py-3">
         {backHref ? (
           <Link

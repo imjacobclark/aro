@@ -133,7 +133,7 @@ function TabBar() {
               aria-current={active ? "page" : undefined}
               className={cn(
                 "flex flex-1 flex-col items-center gap-1 py-2.5 text-[0.65rem] font-medium transition-colors",
-                active ? "text-primary" : "text-muted-foreground",
+                active ? "text-primary-text" : "text-muted-foreground",
               )}
             >
               <item.icon
