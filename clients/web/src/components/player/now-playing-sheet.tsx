@@ -23,6 +23,7 @@ import { MetadataEditor } from "@/components/metadata-editor";
 import { QueueSheet } from "@/components/player/queue-sheet";
 import { Badge, Slider } from "@/components/ui/primitives";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
+import { useSwipe } from "@/hooks/use-swipe";
 import { useCatalog } from "@/lib/catalog/store";
 import { api } from "@/lib/hub/api";
 import { formatDuration, formatQuality, isHighResolution } from "@/lib/format";
@@ -39,6 +40,11 @@ import { cn } from "@/lib/utils";
  * beside the library. A phone has no such width, so the same controls become a screen —
  * cover first, then title, then transport, in the order a listener's eye already expects
  * from every music app they own.
+ *
+ * It closes by being dragged downwards as well as by the chevron. A full-screen sheet that
+ * can only be dismissed by finding a small control in a corner is the one thing that most
+ * marks a web app out from a native one, because every iOS sheet has been dismissible this
+ * way for years and the hand tries it without asking.
  */
 export function NowPlayingSheet({
   open,
@@ -55,6 +61,12 @@ export function NowPlayingSheet({
   const [editorOpen, setEditorOpen] = useState(false);
 
   const track = playback.current;
+
+  const dismiss = useSwipe({
+    axis: "y",
+    threshold: 110,
+    onSwipeDown: () => onOpenChange(false),
+  });
 
   if (!track) return null;
 
@@ -88,7 +100,27 @@ export function NowPlayingSheet({
         description="Playback controls"
         className="bg-background"
       >
-        <div className="mx-auto flex h-full w-full max-w-md flex-col px-6 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1.5rem,env(safe-area-inset-bottom))]">
+        <div
+          {...dismiss.handlers}
+          style={{
+            transform: `translate3d(0, ${Math.max(0, dismiss.offset.y)}px, 0)`,
+            // Dragging past the threshold visibly dims the sheet, so the gesture reports
+            // what it is about to do before the finger lifts.
+            opacity: 1 - Math.min(Math.max(dismiss.offset.y, 0) / 700, 0.35),
+            transition: dismiss.dragging
+              ? "none"
+              : "transform 300ms cubic-bezier(0.22, 1, 0.36, 1), opacity 200ms ease-out",
+            touchAction: "pan-y",
+          }}
+          className="drag-surface mx-auto flex h-full w-full max-w-md flex-col px-6 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1.5rem,env(safe-area-inset-bottom))] motion-reduce:transition-none"
+        >
+          {/* The grabber every iOS sheet has. It is not a control — it is the hint that
+              tells a hand the sheet can be pulled, which is what makes the gesture
+              discoverable at all. */}
+          <div
+            aria-hidden
+            className="bg-muted-foreground/30 mx-auto mb-1 h-1 w-9 shrink-0 rounded-full"
+          />
           <div className="flex items-center justify-between py-2">
             <button
               type="button"

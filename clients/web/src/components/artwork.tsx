@@ -50,6 +50,13 @@ export function Artwork({
     <img
       src={source}
       alt={alt}
+      /*
+       * A cover is scenery, not something to pick up. Left draggable, starting a swipe on
+       * one begins a native image drag instead — which cancels the pointer stream, so the
+       * gesture that was meant to dismiss the player silently does nothing. On a phone the
+       * same default is what makes a long press offer to save the image mid-swipe.
+       */
+      draggable={false}
       loading={eager ? "eager" : "lazy"}
       decoding="async"
       /*

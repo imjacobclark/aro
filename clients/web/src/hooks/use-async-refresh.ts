@@ -10,6 +10,13 @@ import { useEffect } from "react";
  * the macOS app does it the same way, with a `.task` loop per screen. Collecting the
  * pattern here means the awkward part of it is explained once rather than five times.
  *
+ * The timer only runs while the app is actually being looked at. A phone spends most of its
+ * life with the screen off or another app in front, and a timer that keeps firing there
+ * wakes the radio, spins the hub, and updates a view nobody can see — several times a
+ * minute, on battery, for nothing. Instead the interval stops when the page is hidden and a
+ * single refresh runs on the way back, which is both cheaper and *fresher* than polling
+ * through: what matters is that the first frame after returning is current.
+ *
  * `load` must be stable (wrap it in `useCallback`), or the timer restarts on every render.
  */
 export function useAsyncRefresh(
@@ -19,12 +26,47 @@ export function useAsyncRefresh(
   const { intervalMs, key } = options;
 
   useEffect(() => {
+    let cancelled = false;
+    let timer: number | undefined;
+
+    const tick = () => {
+      if (cancelled) return;
+      void load();
+    };
+
+    const start = () => {
+      if (timer !== undefined || !intervalMs) return;
+      timer = window.setInterval(tick, intervalMs);
+    };
+
+    const stop = () => {
+      if (timer === undefined) return;
+      window.clearInterval(timer);
+      timer = undefined;
+    };
+
     // Fetching is exactly what an effect is for: everything `load` sets happens after an
     // await, on a later tick, never synchronously during this render.
-    void load();
+    tick();
 
-    if (!intervalMs) return;
-    const timer = window.setInterval(() => void load(), intervalMs);
-    return () => window.clearInterval(timer);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        // Coming back is the moment the data matters most, and the moment it is most
+        // likely to be stale.
+        tick();
+        start();
+      } else {
+        stop();
+      }
+    };
+
+    if (document.visibilityState === "visible") start();
+    document.addEventListener("visibilitychange", onVisibility);
+
+    return () => {
+      cancelled = true;
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [load, intervalMs, key]);
 }

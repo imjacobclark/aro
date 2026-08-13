@@ -200,3 +200,52 @@
     transform: translateX(calc(-100% + var(--marquee-width, 0px)));
   }
 }
+
+/* Motion is a preference, not a detail. Everything added for feel — the sheet settling, the
+   player card following a finger, tap feedback — has to collapse to an instant state change
+   for anyone who has asked their device to stop moving things, or it becomes the reason
+   they cannot use the app. `0.01ms` rather than `0` so transition-end handlers still fire
+   and nothing waits forever on an event that never comes. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* A list that has been flung should not also drag the page behind it, and a phone browser
+   should not offer to reload when a scroll runs out at the top — both read as the app
+   losing its footing rather than as browser behaviour. */
+html,
+body {
+  overscroll-behavior-y: none;
+}
+
+/* Momentum scrolling inside panes, and no grey flash on tap: the two things that most give
+   away a web view pretending to be an app. */
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* The press feedback iOS gives everything tappable. Fast in, slower out, so a tap
+   acknowledges instantly and relaxes rather than snapping. */
+@utility press {
+  transition:
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 150ms ease-out;
+}
+@utility press-sm {
+  transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Anything inside a draggable surface must not start a native drag of its own: an image or
+   a run of text that does steals the pointer stream and the gesture dies half-made. */
+@utility drag-surface {
+  -webkit-user-drag: none;
+  user-select: none;
+  -webkit-user-select: none;
+}

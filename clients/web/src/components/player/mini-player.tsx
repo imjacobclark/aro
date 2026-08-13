@@ -5,6 +5,7 @@ import { Loader2, Pause, Play, SkipForward } from "lucide-react";
 
 import { Artwork } from "@/components/artwork";
 import { NowPlayingSheet } from "@/components/player/now-playing-sheet";
+import { useSwipe } from "@/hooks/use-swipe";
 import {
   usePlayback,
   usePlaybackProgress,
@@ -18,21 +19,50 @@ import {
  * play/pause, and a hairline progress line along the top edge. Everything else lives one
  * tap away in the sheet, exactly as the transport, timeline and output controls sit side
  * by side on a Mac.
+ *
+ * It also takes gestures, because on a phone this bar is the player most of the time and
+ * reaching for a 44px button to skip a track is the slow way to do something people do
+ * constantly. Swipe up to open it, swipe across to move through the queue — the same
+ * vocabulary every iOS music app has trained people to expect, so it needs no affordance
+ * to be discovered.
  */
 export function MiniPlayer() {
   const playback = usePlayback();
   const { elapsed, duration, isBuffering } = usePlaybackProgress();
   const [expanded, setExpanded] = useState(false);
 
+  const swipe = useSwipe({
+    onSwipeUp: () => setExpanded(true),
+    onSwipeLeft: playback.next,
+    onSwipeRight: playback.previous,
+  });
+
   if (!playback.current) return null;
 
   const track = playback.current;
   const progress = duration > 0 ? (elapsed / duration) * 100 : 0;
 
+  // The card follows the finger, damped, and never further than it needs to to read as
+  // movement — a bar that slid the full width would look like it was being thrown away
+  // rather than nudged.
+  const followX = Math.max(-56, Math.min(56, swipe.offset.x * 0.5));
+  const followY = Math.min(0, Math.max(-40, swipe.offset.y * 0.5));
+
   return (
     <>
       <div className="fixed inset-x-0 bottom-[calc(3.75rem+env(safe-area-inset-bottom))] z-40 px-2 lg:bottom-4 lg:left-auto lg:right-4 lg:w-[26rem] lg:px-0">
-        <div className="bg-card/85 border-hairline relative overflow-hidden rounded-2xl border shadow-[0_5px_14px_rgba(0,0,0,0.09)] backdrop-blur-xl">
+        <div
+          {...swipe.handlers}
+          style={{
+            transform: `translate3d(${followX}px, ${followY}px, 0)`,
+            // Only animate the settle. Following the finger has to be immediate, or the
+            // card lags behind the touch and the whole thing feels broken.
+            transition: swipe.dragging
+              ? "none"
+              : "transform 260ms cubic-bezier(0.22, 1, 0.36, 1)",
+            touchAction: "pan-y",
+          }}
+          className="drag-surface bg-card/85 border-hairline relative overflow-hidden rounded-2xl border shadow-[0_5px_14px_rgba(0,0,0,0.09)] backdrop-blur-xl motion-reduce:transition-none">
           <div
             className="orbit-surface absolute inset-x-0 top-0 h-0.5 transition-[width] duration-300"
             style={{ width: `${progress}%` }}

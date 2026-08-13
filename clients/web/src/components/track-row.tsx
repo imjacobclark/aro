@@ -56,7 +56,7 @@ export function TrackRow({
         type="button"
         onClick={onPlay}
         disabled={!track.available || !track.content_hash}
-        className="flex min-w-0 flex-1 items-center gap-3 text-left disabled:opacity-45"
+        className="press active:bg-muted/50 -mx-1 flex min-w-0 flex-1 items-center gap-3 rounded-xl px-1 text-left active:scale-[0.985] disabled:opacity-45"
       >
         {showArtwork ? (
           <Artwork

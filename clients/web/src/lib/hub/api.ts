@@ -1,3 +1,4 @@
+import { cachedGet, invalidate } from "./cache";
 import type {
   ArtworkCandidate,
   CompatibilityPlan,
@@ -65,8 +66,20 @@ async function call<T>(
   return (await response.json()) as T;
 }
 
+/**
+ * Forgets the reads a write could contradict.
+ *
+ * A cache that can show someone the world from before their own action is worse than no
+ * cache: adding a folder and not seeing it appear reads as the app being broken, and no
+ * saved request is worth that.
+ */
+function afterWrite<T>(result: T, ...keys: string[]): T {
+  for (const key of keys) invalidate(key);
+  return result;
+}
+
 export const api = {
-  hub: () => call<HubInfo>("hub"),
+  hub: () => cachedGet("hub", () => call<HubInfo>("hub"), 60_000),
 
   /**
    * `paging: "stable"` makes the hub walk the catalogue by track id rather than by row
@@ -91,22 +104,33 @@ export const api = {
         : { cursor: cursor ?? 0, limit, q: query },
     }),
 
-  stats: () => call<LibraryStats>("library/stats"),
+  stats: () =>
+    cachedGet("stats", () => call<LibraryStats>("library/stats"), 30_000),
 
-  sources: () => call<SourceHealth[]>("library/sources"),
+  sources: () =>
+    cachedGet("sources", () => call<SourceHealth[]>("library/sources"), 30_000),
 
   /**
    * Duplicates, alternate encodings, moved and missing files, fragmented folders. Analysed
    * by the hub rather than here: it is the machine that actually holds the files, and a
    * client only ever sees its own.
    */
-  health: () => call<HealthReport>("library/health"),
+  health: () =>
+    cachedGet("health", () => call<HealthReport>("library/health"), 120_000),
 
   playlists: () =>
-    call<GeneratedPlaylist[]>("playlists", {
-      // The hub decides what "this morning" means, so it needs to know where the listener is.
-      query: { utc_offset_minutes: -new Date().getTimezoneOffset() },
-    }),
+    cachedGet(
+      "playlists",
+      () =>
+        call<GeneratedPlaylist[]>("playlists", {
+          // The hub decides what "this morning" means, so it needs to know where the
+          // listener is.
+          query: { utc_offset_minutes: -new Date().getTimezoneOffset() },
+        }),
+      // Home polls on a timer and remounts on every visit, while the hub only rebuilds
+      // these when the library changes. Asking more often than this asks for nothing.
+      20_000,
+    ),
 
   /**
    * A station seeded by one track. `offset` walks further out from that seed, which is how
@@ -114,7 +138,13 @@ export const api = {
    * paging it needs no state on either side.
    */
   radio: (hash: string, limit?: number, offset?: number) =>
-    call<GeneratedPlaylist>(`radio/${hash}`, { query: { limit, offset } }),
+    cachedGet(
+      `radio:${hash}:${limit ?? ""}:${offset ?? 0}`,
+      () => call<GeneratedPlaylist>(`radio/${hash}`, { query: { limit, offset } }),
+      // A ranking derived from analysis, not from what is playing: the same seed gives the
+      // same answer, and the shelf and the play control both ask for it.
+      60_000,
+    ),
 
   /**
    * Reorders a queue so consecutive tracks sound alike. The hub answers only with hashes
@@ -128,16 +158,24 @@ export const api = {
     }),
 
   /** What converting the library for cross-device compatibility would cost. */
-  compatibilityPlan: () => call<CompatibilityPlan>("compatibility/plan"),
+  compatibilityPlan: () =>
+    cachedGet(
+      "compatibility/plan",
+      () => call<CompatibilityPlan>("compatibility/plan"),
+      15_000,
+    ),
 
   /** Starts the background conversion; progress arrives through the usual job registry. */
-  startCompatibility: () => call<SyncJob>("compatibility/start", { method: "POST" }),
+  startCompatibility: () =>
+    call<SyncJob>("compatibility/start", { method: "POST" }).then((result) =>
+      afterWrite(result, "compatibility/plan"),
+    ),
 
   /** Deletes every compatibility copy. The originals are untouched by construction. */
   cleanupCompatibility: () =>
     call<{ removed: number; freed_bytes: number }>("compatibility/cleanup", {
       method: "POST",
-    }),
+    }).then((result) => afterWrite(result, "compatibility/plan")),
 
   reportActivity: (snapshot: PlaybackActivitySnapshot) =>
     call<void>("playback/activity", {
@@ -153,7 +191,7 @@ export const api = {
     call<{ updated: number }>("metadata-overrides", {
       method: "POST",
       body: JSON.stringify({ content_hashes: contentHashes, fields, reset }),
-    }),
+    }).then((result) => afterWrite(result, "playlists", "stats", "health")),
 
   setFavourite: (contentHash: string, favourite: boolean) =>
     call<{ updated: number }>("metadata-overrides", {
@@ -162,13 +200,13 @@ export const api = {
         content_hashes: [contentHash],
         fields: { favourite },
       }),
-    }),
+    }).then((result) => afterWrite(result, "playlists", "stats")),
 
   removeTrack: (contentHash: string) =>
     call<{ removed: boolean }>("library/tracks/remove", {
       method: "POST",
       body: JSON.stringify({ content_hash: contentHash }),
-    }),
+    }).then((result) => afterWrite(result, "playlists", "stats", "health")),
 
   artworkCandidates: (contentHash: string) =>
     call<ArtworkCandidate[]>("artwork/candidates", {
@@ -204,7 +242,11 @@ export const api = {
     }),
 
   identificationStatus: () =>
-    call<IdentificationQueueStatus>("identification/status"),
+    cachedGet(
+      "identification/status",
+      () => call<IdentificationQueueStatus>("identification/status"),
+      8_000,
+    ),
 
   job: (id: string) => call<SyncJob>(`jobs/${id}`),
 
@@ -234,31 +276,35 @@ export const api = {
     call<{ enabled: boolean }>("metadata/write-back/enabled", {
       method: "PUT",
       body: JSON.stringify({ enabled }),
-    }),
+    }).then((result) => afterWrite(result, "metadata/write-back/enabled")),
 
-  devices: () => call<HubDevice[]>("devices"),
+  devices: () => cachedGet("devices", () => call<HubDevice[]>("devices"), 30_000),
 
   revokeDevice: (deviceId: string) =>
     call<unknown>("devices/revoke", {
       method: "POST",
       body: JSON.stringify({ device_id: deviceId }),
-    }),
+    }).then((result) => afterWrite(result, "devices")),
 
-  folders: () => call<WatchedFolder[]>("admin/folders"),
+  folders: () =>
+    cachedGet("admin/folders", () => call<WatchedFolder[]>("admin/folders"), 30_000),
 
   addFolder: (path: string) =>
     call<unknown>("admin/folders", {
       method: "POST",
       body: JSON.stringify({ path }),
-    }),
+    }).then((result) => afterWrite(result, "admin/folders", "sources")),
 
-  scanFolders: () => call<unknown>("admin/folders/scan", { method: "POST" }),
+  scanFolders: () =>
+    call<unknown>("admin/folders/scan", { method: "POST" }).then((result) =>
+      afterWrite(result, "admin/folders", "sources", "stats"),
+    ),
 
   removeFolder: (sourceId: string) =>
     call<unknown>("admin/folders/remove", {
       method: "POST",
       body: JSON.stringify({ source_id: sourceId }),
-    }),
+    }).then((result) => afterWrite(result, "admin/folders", "sources", "stats")),
 };
 
 /**
