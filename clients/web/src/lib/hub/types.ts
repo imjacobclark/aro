@@ -144,6 +144,7 @@ export interface LibraryStats {
     top_tracks?: PlayCount[];
     top_artists?: PlayCount[];
     recent?: PlayCount[];
+    /** One entry per day for the last 30. `date` is an ISO instant at midnight UTC. */
     daily?: { date?: string; seconds?: number }[];
   };
   metadata?: {

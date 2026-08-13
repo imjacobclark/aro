@@ -291,13 +291,16 @@ function DailyChart({ days }: { days?: { date?: string; seconds?: number }[] }) 
   if (peak <= 1) return null;
 
   const total = days.reduce((sum, day) => sum + (day.seconds ?? 0), 0);
-  const label = (date?: string) =>
-    date
-      ? new Date(`${date}T00:00:00`).toLocaleDateString([], {
-          month: "short",
-          day: "numeric",
-        })
-      : "";
+  // `date` is a full ISO instant at midnight UTC, not a bare `YYYY-MM-DD`.
+  const label = (date?: string) => {
+    const at = date ? new Date(date) : null;
+    if (!at || Number.isNaN(at.getTime())) return "";
+    return at.toLocaleDateString([], {
+      month: "short",
+      day: "numeric",
+      timeZone: "UTC",
+    });
+  };
 
   return (
     <Card className="mt-3 p-4">
