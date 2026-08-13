@@ -19,7 +19,35 @@ import type { CatalogTrack, StreamQuality } from "@/lib/hub/types";
 /** Quality used when a browser cannot decode the original. Opus at 192k is transparent. */
 export const FALLBACK_QUALITY: StreamQuality = "high";
 
-const STORAGE_KEY = "aro.undecodable";
+let opusSupport: boolean | null = null;
+
+/**
+ * Whether this browser can decode the fallback at all.
+ *
+ * The fallback ladder is Ogg Opus, and Safari does not support the Ogg container — so on an
+ * iPhone, routing a track to the fallback is not a rescue, it is a guaranteed failure with
+ * "This track could not be played" at the end of it. Nothing checked this before: the code
+ * knew the browser could not read the *source* and simply assumed it could read the
+ * replacement. Chromium can, which is why every test run missed it.
+ */
+export function canPlayFallback(): boolean {
+  if (typeof document === "undefined") return true;
+  if (opusSupport !== null) return opusSupport;
+  const element = document.createElement("audio");
+  // Both spellings, because a browser may recognise the codec but not the container.
+  opusSupport =
+    element.canPlayType('audio/ogg; codecs="opus"') !== "" ||
+    element.canPlayType("audio/ogg") !== "";
+  return opusSupport;
+}
+
+// Versioned, and the version is a reset button. What lives here is a permanent judgement
+// about a browser, written from a single failure — so when a release changes *why* things
+// fail, the old judgements have to go. Cached transcodes were briefly served mislabelled as
+// `audio/mp4`, which made Safari report the one error this file treats as proof, and every
+// phone used in that window recorded "this browser cannot play lossless m4a" for good.
+// Bumping the key is what unpoisons them.
+const STORAGE_KEY = "aro.undecodable.v2";
 
 /**
  * Groups tracks that will succeed or fail together. Bit depth is the discriminator that
@@ -131,8 +159,12 @@ export function effectiveQuality(
   track: CatalogTrack,
   chosen: StreamQuality,
 ): StreamQuality {
-  if (chosen !== "original") return chosen;
-  if (isUndecodable(track) || refusesUpFront(track)) return FALLBACK_QUALITY;
+  // Even a deliberately chosen tier is no use if this browser cannot decode what it
+  // produces. Safari asked for Saver would otherwise get silence and an error.
+  if (chosen !== "original") return canPlayFallback() ? chosen : "original";
+  if (isUndecodable(track) || refusesUpFront(track)) {
+    return canPlayFallback() ? FALLBACK_QUALITY : "original";
+  }
   return "original";
 }
 
@@ -192,8 +224,13 @@ export function resolveSource(
   chosen: StreamQuality,
 ): { quality: StreamQuality; compatible: boolean } {
   const compatible = prefersCompatibleCopy(track, chosen);
-  return {
-    quality: compatible ? "original" : effectiveQuality(track, chosen),
-    compatible,
-  };
+  if (compatible) return { quality: "original", compatible: true };
+
+  // A browser with no Opus is out of substitutes, so ask for the compatible copy even
+  // where the source has not failed yet: FLAC is the only thing left that is both lossless
+  // and playable, and if the hub has not made one the original comes back unchanged.
+  if (!canPlayFallback() && chosen === "original" && refusesUpFront(track)) {
+    return { quality: "original", compatible: true };
+  }
+  return { quality: effectiveQuality(track, chosen), compatible: false };
 }
