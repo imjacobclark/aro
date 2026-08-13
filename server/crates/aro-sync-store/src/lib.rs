@@ -1845,6 +1845,15 @@ impl HubStore {
                            MAX(COALESCE(json_extract(payload, '$.completed'), 0)) AS completed,
                            MAX(observed_at) / 1000.0 AS observed_at
                     FROM playback_activity_events
+                    -- One unreadable heartbeat must not cost the listener their Home
+                    -- screen. `json_extract` fails the *whole statement* on malformed
+                    -- input, so a single corrupt row — two of 3,815 after an unclean
+                    -- power cut on the reference hub — turned every request for
+                    -- generated playlists into a 500 until the row was deleted by hand.
+                    -- This is heartbeat telemetry: skipping a bad one costs a fraction
+                    -- of one track's engagement figure, where failing costs every
+                    -- playlist the hub makes.
+                    WHERE json_valid(payload)
                     GROUP BY session_id
                 )
                 WHERE content_hash IS NOT NULL AND duration > 0
@@ -7947,6 +7956,53 @@ mod tests {
 
         // One session is not a rate: a single abandoned play is not evidence of dislike.
         assert_eq!(EngagementSummary::default().completion_rate(), None);
+    }
+
+    /// A hub that loses power mid-write can end up with a heartbeat row whose payload is not
+    /// JSON at all. `json_extract` fails the entire statement on one, so before this was
+    /// guarded, two corrupt rows out of 3,815 made every request for generated playlists
+    /// answer 500 — Home was empty until someone deleted them by hand.
+    #[test]
+    fn one_corrupt_heartbeat_does_not_cost_every_playlist() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let device_id = Uuid::new_v4();
+
+        {
+            let connection = store.connection.lock();
+            for (session, payload) in [
+                (
+                    "good",
+                    r#"{"content_hash":"abc","position_seconds":90.0,"duration_seconds":180.0,"completed":false}"#,
+                ),
+                // Exactly what the reference hub had: a truncated write that is not JSON.
+                ("corrupt", r#"{"content_hash":"def","positi"#),
+            ] {
+                connection
+                    .execute(
+                        "INSERT INTO playback_activity_events                          (session_id, revision, device_id, track_id, state, observed_at, payload)                          VALUES (?1, 1, ?2, ?3, 'playing', 1000, ?4)",
+                        params![
+                            session,
+                            device_id.to_string(),
+                            Uuid::new_v4().to_string(),
+                            payload
+                        ],
+                    )
+                    .unwrap();
+            }
+        }
+
+        let (_, engagement) = store
+            .listening_summaries()
+            .expect("a malformed heartbeat must not fail the whole query");
+        assert!(
+            engagement.contains_key("abc"),
+            "the readable heartbeat still has to count"
+        );
+        assert!(
+            !engagement.contains_key("def"),
+            "the corrupt one is skipped rather than guessed at"
+        );
     }
 
     /// The rebuild that `seed_generation` guards re-reads and re-parses the whole library,
