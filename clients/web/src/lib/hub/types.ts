@@ -93,55 +93,87 @@ export interface HubInfo {
 }
 
 /** The shape of `HubStore::dashboard_stats()`, served at `/v1/library/stats`. */
+/**
+ * The hub's own numbers, exactly as `dashboard_stats` reports them.
+ *
+ * Named to match the wire, which sounds obvious and was not: this described a shape nobody
+ * sends — `total_plays` for `logged_plays`, `most_played_tracks` for `top_tracks`, fidelity
+ * counts hanging off `library` rather than `fidelity` — and because every field was
+ * optional, TypeScript was satisfied and the Stats screen quietly rendered almost nothing.
+ * The whole Listening section was gated behind a field that never existed, so it never
+ * appeared at all. Anything added here should be checked against a real response.
+ */
 export interface LibraryStats {
   generated_at?: string;
+  scope?: string;
   library?: {
     track_count?: number;
     album_count?: number;
     artist_count?: number;
-    total_duration_seconds?: number;
+    /** Seconds. */
+    total_duration?: number;
     file_size_bytes?: number;
-    lossless_tracks?: number;
-    lossless_bytes?: number;
-    high_resolution_tracks?: number;
-    average_lossy_bitrate?: number;
     formats?: Breakdown[];
     genres?: Breakdown[];
     decades?: Breakdown[];
-    sample_rates?: Breakdown[];
-    bit_depths?: Breakdown[];
+    /** Keyed by rate in Hz, e.g. `{ "44100": 417 }`. */
+    sample_rates?: Record<string, number>;
+    /** Keyed by depth in bits. Lossy files have none, so these need not sum to the total. */
+    bit_depths?: Record<string, number>;
+  };
+  fidelity?: {
+    lossless_tracks?: number;
+    lossless_bytes?: number;
+    lossless_fraction?: number;
+    lossy_tracks?: number;
+    high_resolution_tracks?: number;
+    mean_lossy_bitrate?: number;
+    dynamic_range?: {
+      analyzed_tracks?: number;
+      mean_crest_db?: number;
+      min_crest_db?: number;
+      max_crest_db?: number;
+    };
   };
   listening?: {
-    total_plays?: number;
-    listening_seconds?: number;
-    most_played_tracks?: PlayCount[];
-    most_played_artists?: PlayCount[];
+    logged_plays?: number;
+    unique_tracks_played?: number;
+    total_seconds?: number;
+    last_30_days_seconds?: number;
+    current_streak?: number;
+    top_tracks?: PlayCount[];
+    top_artists?: PlayCount[];
     recent?: PlayCount[];
+    daily?: { date?: string; seconds?: number }[];
   };
   metadata?: {
-    complete_title?: number;
-    complete_artist?: number;
-    complete_album?: number;
-    identified_tracks?: number;
-    missing_artwork?: number;
+    title_coverage?: number;
+    artist_coverage?: number;
+    album_coverage?: number;
+  };
+  live?: {
+    active_listeners?: number;
+    connected_devices?: number;
+  };
+  sources?: {
+    total?: number;
+    unavailable?: number;
   };
 }
 
 export interface Breakdown {
   name?: string;
-  label?: string;
-  count?: number;
-  bytes?: number;
+  track_count?: number;
+  file_size_bytes?: number;
 }
 
 export interface PlayCount {
+  id?: string;
   title?: string;
-  artist?: string;
-  album?: string;
-  content_hash?: string;
-  plays?: number;
-  seconds?: number;
-  last_played_at?: string | number;
+  /** "Artist — Album" for a track, or "12 songs" for an artist. The hub composes it. */
+  subtitle?: string;
+  play_count?: number;
+  played_at?: string;
 }
 
 export interface SourceHealth {

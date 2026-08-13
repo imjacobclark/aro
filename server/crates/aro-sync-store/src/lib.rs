@@ -1758,6 +1758,9 @@ impl HubStore {
     /// playback heartbeats. Rebuilt per request, because it changes on every played track
     /// and is a fraction of the cost of the half above.
     pub fn listening_summaries(&self) -> Result<ListeningSummaries, StoreError> {
+        // Cheap and idempotent, and it has to happen before the aggregates are read or
+        // Home's mixes and radio's skip-filtering see only what the Mac reported.
+        self.materialize_listening_from_activity()?;
         let connection = self.connection.lock();
         let mut seeds = PlaylistSeeds::default();
 
@@ -1879,6 +1882,166 @@ impl HubStore {
         drop(engagement);
 
         Ok((seeds.listening, seeds.engagement))
+    }
+
+    /// Turns finished playback into listening history.
+    ///
+    /// Every client reports playback heartbeats to `/v1/playback/activity`, which is what
+    /// the live "who is listening" view is built from. Only the macOS app also records a
+    /// *listening session* — a CRDT operation that becomes a row in `listening_events` —
+    /// and `listening_events` is what every statistic, Heavy Rotation, and radio's
+    /// skip-filtering actually read. So listening from the web client counted for nothing:
+    /// on the reference hub, 4,299 heartbeats across 569 sessions had produced 108 plays,
+    /// none newer than a week, while the phone was being used daily.
+    ///
+    /// Rather than teach a second client to push operations, the hub derives the history
+    /// from the signal it already receives from everyone. That keeps the rule this codebase
+    /// already follows — one hub, one set of numbers — and fixes the playlists and the
+    /// station ranking at the same time, since they read the same table.
+    ///
+    /// Idempotent, so it can run as often as anything wants it: the event id is derived
+    /// from the session id, and re-running only refreshes a session still in progress.
+    pub fn materialize_listening_from_activity(&self) -> Result<usize, StoreError> {
+        let connection = self.connection.lock();
+
+        // Only look at what has happened since the last pass. Without this, every stats
+        // read and every playlist rebuild would re-derive the entire history of the hub —
+        // cheap at a few hundred sessions, quadratic misery at a few hundred thousand. The
+        // hour of overlap is deliberate: a session that was still playing last time needs
+        // revisiting so its final position is recorded.
+        // `ended_at` is seconds as a REAL, and the activity table stores milliseconds.
+        let watermark: f64 = connection.query_row(
+            "SELECT COALESCE(MAX(ended_at), 0.0) FROM listening_events \
+             WHERE event_id LIKE 'activity:%'",
+            [],
+            |row| row.get(0),
+        )?;
+        let since = ((watermark * 1000.0) as i64 - 3_600_000).max(0);
+
+        // One row per playback session: how far it got, how long it ran, and when.
+        let mut sessions = connection.prepare(
+            r#"
+            SELECT session_id,
+                   device_id,
+                   json_extract(payload, '$.content_hash') AS content_hash,
+                   MAX(COALESCE(json_extract(payload, '$.position_seconds'), 0)) AS position,
+                   MAX(COALESCE(json_extract(payload, '$.duration_seconds'), 0)) AS duration,
+                   MAX(COALESCE(json_extract(payload, '$.completed'), 0)) AS completed,
+                   MIN(observed_at) AS first_seen,
+                   MAX(observed_at) AS last_seen
+            FROM playback_activity_events
+            WHERE json_valid(payload)
+            GROUP BY session_id
+            HAVING content_hash IS NOT NULL AND duration > 0 AND last_seen >= ?1
+            "#,
+        )?;
+        let rows = sessions
+            .query_map([since], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, f64>(3)?,
+                    row.get::<_, f64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(sessions);
+
+        let mut written = 0usize;
+        for (session_id, device_id, content_hash, position, duration, completed, first, last) in
+            rows
+        {
+            let Some(track_id) = connection
+                .query_row(
+                    "SELECT hub_track_id FROM tracks WHERE content_hash = ?1 \
+                     AND tombstoned_at IS NULL AND purged_at IS NULL",
+                    [&content_hash],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+            else {
+                continue;
+            };
+
+            let started_at = first as f64 / 1000.0;
+            let ended_at = last as f64 / 1000.0;
+            let listened = position.min(duration).max(0.0);
+            let fraction = if duration > 0.0 {
+                listened / duration
+            } else {
+                0.0
+            };
+            // The usual definitions: near enough the end counts as finished, and abandoning
+            // it in the first half counts as a skip — which is the signal radio uses to stop
+            // recommending things nobody lets play.
+            let finished = completed != 0 || fraction >= 0.9;
+            let skipped = !finished && fraction < 0.5;
+
+            // A play the Mac already reported through sync must not be counted twice. It
+            // sends heartbeats *and* listening sessions, so the same listen arrives by two
+            // routes; the same track starting within a few minutes is the same listen.
+            let duplicate: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM listening_events \
+                 WHERE track_id = ?1 AND started_at IS NOT NULL \
+                   AND ABS(started_at - ?2) < 300 AND event_id NOT LIKE 'activity:%')",
+                params![track_id, started_at],
+                |row| row.get(0),
+            )?;
+            if duplicate {
+                continue;
+            }
+
+            let payload = serde_json::json!({
+                "content_hash": content_hash,
+                "source": "playback_activity",
+                "fraction": fraction,
+            })
+            .to_string();
+
+            // A session that was still playing on the last pass gets revisited so its final
+            // position lands, which is a refresh rather than a new listen. The count returned
+            // is new history, so callers can tell "nothing happened" from "caught up".
+            let event_id = format!("activity:{session_id}");
+            let known: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM listening_events WHERE event_id = ?1)",
+                [&event_id],
+                |row| row.get(0),
+            )?;
+
+            connection.execute(
+                r#"
+                INSERT INTO listening_events
+                    (event_id, track_id, device_id, payload, started_at, ended_at,
+                     listened_seconds, completed, skipped)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                ON CONFLICT(event_id) DO UPDATE SET
+                    ended_at = excluded.ended_at,
+                    listened_seconds = excluded.listened_seconds,
+                    completed = excluded.completed,
+                    skipped = excluded.skipped,
+                    payload = excluded.payload
+                "#,
+                params![
+                    event_id,
+                    track_id,
+                    device_id,
+                    payload,
+                    started_at,
+                    ended_at,
+                    listened,
+                    finished as i64,
+                    skipped as i64
+                ],
+            )?;
+            if !known {
+                written += 1;
+            }
+        }
+        Ok(written)
     }
 
     pub fn dashboard_stats(&self) -> Result<Value, StoreError> {
@@ -7956,6 +8119,181 @@ mod tests {
 
         // One session is not a rate: a single abandoned play is not evidence of dislike.
         assert_eq!(EngagementSummary::default().completion_rate(), None);
+    }
+
+    /// A track upsert only materialises the fields its operation carries a version for, so
+    /// a test that omits them writes a row with no content hash and nothing to match on.
+    fn track_versions(device_id: Uuid) -> BTreeMap<String, HybridTimestamp> {
+        let stamp = HybridTimestamp {
+            physical_millis: 100,
+            logical: 0,
+            device_id,
+        };
+        BTreeMap::from([
+            ("content_hash".into(), stamp.clone()),
+            ("title".into(), stamp),
+        ])
+    }
+
+    /// Listening from a client that only reports heartbeats has to count. The web client
+    /// never records a listening session — that is a macOS-only concept — so before this,
+    /// every play from a phone was invisible to stats, Heavy Rotation and radio.
+    #[test]
+    fn playback_heartbeats_become_listening_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let device_id = Uuid::new_v4();
+        let track_id = Uuid::new_v4();
+        let hash = "a".repeat(64);
+
+        store
+            .append_operations(&[Operation {
+                operation_id: Uuid::new_v4(),
+                device_id,
+                entity_type: "track".into(),
+                entity_id: track_id.to_string(),
+                kind: "upsert".into(),
+                payload: serde_json::json!({ "content_hash": hash, "title": "A Track" }),
+                field_versions: track_versions(device_id),
+            }])
+            .unwrap();
+
+        let beat = |session: &str, position: f64, at: i64| {
+            let payload = serde_json::json!({
+                "content_hash": hash,
+                "position_seconds": position,
+                "duration_seconds": 200.0,
+                "completed": false,
+            })
+            .to_string();
+            store
+                .connection
+                .lock()
+                .execute(
+                    "INSERT INTO playback_activity_events \
+                     (session_id, revision, device_id, track_id, state, observed_at, payload) \
+                     VALUES (?1, ?2, ?3, ?4, 'playing', ?5, ?6)",
+                    params![
+                        session,
+                        at,
+                        device_id.to_string(),
+                        track_id.to_string(),
+                        at,
+                        payload
+                    ],
+                )
+                .unwrap();
+        };
+
+        // One session played nearly to the end, one abandoned in the first few seconds.
+        beat("played", 10.0, 1_000_000);
+        beat("played", 190.0, 1_190_000);
+        beat("bailed", 6.0, 2_000_000);
+
+        let written = store.materialize_listening_from_activity().unwrap();
+        assert_eq!(written, 2, "both sessions are history, however they ended");
+
+        let (listening, _) = store.listening_summaries().unwrap();
+        let summary = listening
+            .get(&hash)
+            .expect("the track has listening history");
+        assert_eq!(summary.play_count, 2);
+        assert_eq!(
+            summary.completed_count, 1,
+            "190 of 200 seconds is a finished listen"
+        );
+        assert_eq!(
+            summary.skip_count, 1,
+            "six seconds is a skip, which radio needs to know"
+        );
+
+        // Running again must not invent more history.
+        store.materialize_listening_from_activity().unwrap();
+        let (again, _) = store.listening_summaries().unwrap();
+        assert_eq!(
+            again.get(&hash).unwrap().play_count,
+            2,
+            "derivation is idempotent"
+        );
+
+        // And a listen that happens *after* a pass is still picked up. Derivation only looks
+        // at sessions newer than the last one it recorded, so an over-eager watermark would
+        // silently freeze the history at whenever stats were last opened.
+        beat("later", 195.0, 9_000_000);
+        assert_eq!(store.materialize_listening_from_activity().unwrap(), 1);
+        let (fresh, _) = store.listening_summaries().unwrap();
+        assert_eq!(
+            fresh.get(&hash).unwrap().play_count,
+            3,
+            "a later session is history too"
+        );
+    }
+
+    /// The Mac reports heartbeats *and* syncs its own listening sessions, so the same listen
+    /// arrives twice. Counting it twice would quietly inflate every number on the stats
+    /// screen for the one client that reports most thoroughly.
+    #[test]
+    fn a_synced_listen_is_not_counted_again_from_its_heartbeats() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HubStore::open(directory.path()).unwrap();
+        let device_id = Uuid::new_v4();
+        let track_id = Uuid::new_v4();
+        let hash = "b".repeat(64);
+
+        store
+            .append_operations(&[
+                Operation {
+                    operation_id: Uuid::new_v4(),
+                    device_id,
+                    entity_type: "track".into(),
+                    entity_id: track_id.to_string(),
+                    kind: "upsert".into(),
+                    payload: serde_json::json!({ "content_hash": hash, "title": "A Track" }),
+                    field_versions: track_versions(device_id),
+                },
+                Operation {
+                    operation_id: Uuid::new_v4(),
+                    device_id,
+                    entity_type: LISTENING_SESSION_ENTITY.into(),
+                    entity_id: Uuid::new_v4().to_string(),
+                    kind: "upsert".into(),
+                    payload: serde_json::json!({
+                        "track_id": track_id.to_string(),
+                        "started_at": 5_000.0,
+                        "listened_seconds": 180.0,
+                        "completed": true,
+                    }),
+                    field_versions: BTreeMap::new(),
+                },
+            ])
+            .unwrap();
+
+        // The same listen, as the heartbeats the same client also sent.
+        let payload = serde_json::json!({
+            "content_hash": hash,
+            "position_seconds": 180.0,
+            "duration_seconds": 200.0,
+            "completed": true,
+        })
+        .to_string();
+        store
+            .connection
+            .lock()
+            .execute(
+                "INSERT INTO playback_activity_events \
+                 (session_id, revision, device_id, track_id, state, observed_at, payload) \
+                 VALUES ('synced', 1, ?1, ?2, 'playing', 5010000, ?3)",
+                params![device_id.to_string(), track_id.to_string(), payload],
+            )
+            .unwrap();
+
+        store.materialize_listening_from_activity().unwrap();
+        let (listening, _) = store.listening_summaries().unwrap();
+        assert_eq!(
+            listening.get(&hash).map(|s| s.play_count),
+            Some(1),
+            "one listen reported by two routes is still one listen"
+        );
     }
 
     /// A hub that loses power mid-write can end up with a heartbeat row whose payload is not

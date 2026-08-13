@@ -1102,10 +1102,17 @@ async fn library_stats(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_device_or_admin(&state, &headers)?;
     let store = state.store.clone();
-    let stats = tokio::task::spawn_blocking(move || store.dashboard_stats())
-        .await
-        .map_err(ApiError::internal)?
-        .map_err(ApiError::internal)?;
+    let stats = tokio::task::spawn_blocking(move || {
+        // Fold any finished playback into listening history first, so the numbers reflect
+        // what has actually been played rather than only what the Mac synced.
+        if let Err(error) = store.materialize_listening_from_activity() {
+            tracing::warn!(%error, "could not derive listening history from playback");
+        }
+        store.dashboard_stats()
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
     Ok(Json(stats))
 }
 
