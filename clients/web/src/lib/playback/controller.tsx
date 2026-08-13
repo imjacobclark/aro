@@ -16,10 +16,10 @@ import type { CatalogTrack, StreamQuality } from "@/lib/hub/types";
 import { useSettings } from "@/lib/settings";
 import { ActivityReporter } from "./activity";
 import {
-  effectiveQuality,
   isUndecodable,
-  prefersCompatibleCopy,
+  rememberNoCompatibleCopy,
   rememberUndecodable,
+  resolveSource,
 } from "./support";
 
 export type RepeatMode = "off" | "all" | "one";
@@ -242,12 +242,8 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
 
       // Not necessarily the quality the listener picked: a browser that cannot decode this
       // format gets the hub's transcode instead of silence. See `lib/playback/support`.
-      const resolved = effectiveQuality(track, quality);
-      const source = streamUrl(
-        track,
-        resolved,
-        prefersCompatibleCopy(track, quality),
-      );
+      const { quality: resolved, compatible } = resolveSource(track, quality);
+      const source = streamUrl(track, resolved, compatible);
       const isActive = slot === activeSlotRef.current;
 
       if (loadedRef.current[slot] !== source) {
@@ -293,11 +289,8 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
       const idle = playerAt(idleSlot);
       if (!idle || !track.content_hash) return false;
 
-      const source = streamUrl(
-        track,
-        effectiveQuality(track, quality),
-        prefersCompatibleCopy(track, quality),
-      );
+      const { quality: resolved, compatible } = resolveSource(track, quality);
+      const source = streamUrl(track, resolved, compatible);
       if (loadedRef.current[idleSlot] !== source) return false;
 
       const outgoing = activePlayer();
@@ -478,8 +471,19 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
       // A format this browser cannot decode is not a broken track — it is a track that has
       // to arrive re-encoded. Remember the format so every later track of the same kind
       // goes straight to the transcode, and retry this one where the listener left off.
-      if (unsupported && track && !isUndecodable(track)) {
-        rememberUndecodable(track);
+      if (unsupported && track) {
+        const { compatible } = resolveSource(track, qualityRef.current);
+        // Asking for a copy the hub has not made yet gets the stored file back — the very
+        // format that cannot be decoded here. Note it for this track and drop to the Opus
+        // tier, rather than telling the listener their browser is at fault.
+        if (compatible) {
+          rememberNoCompatibleCopy(track);
+        } else if (!isUndecodable(track)) {
+          rememberUndecodable(track);
+        } else {
+          setError("This browser cannot play this track, even re-encoded.");
+          return;
+        }
         const position = player.currentTime;
         loadedRef.current[slot] = null;
         loadTrack(track, qualityRef.current, isPlayingRef.current);
@@ -487,11 +491,7 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      setError(
-        unsupported
-          ? "This browser cannot play this track, even re-encoded."
-          : "This track could not be played.",
-      );
+      setError("This track could not be played.");
     };
 
     const listeners: [string, EventListener][] = [
@@ -535,8 +535,10 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
     const upcoming = queue[queueIndex + 1];
     if (!upcoming?.content_hash) return;
 
-    const quality = effectiveQuality(upcoming, settings.quality);
-    warmTranscode(upcoming.content_hash, quality);
+    // Only worth warming an encode the next track will actually use: one that will be
+    // served its lossless compatible copy needs no Opus made for it at all.
+    const { quality, compatible } = resolveSource(upcoming, settings.quality);
+    if (!compatible) warmTranscode(upcoming.content_hash, quality);
     loadInto(other(activeSlotRef.current), upcoming, settings.quality, false);
   }, [isPlaying, queue, queueIndex, repeat, settings.quality, loadInto]);
 

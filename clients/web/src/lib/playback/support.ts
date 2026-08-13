@@ -137,6 +137,20 @@ export function effectiveQuality(
 }
 
 /**
+ * Tracks whose compatible copy the hub turned out not to have yet.
+ *
+ * Deliberately per-track and deliberately not persisted. A library part-way through
+ * converting has copies for some tracks and not others, so remembering this per *codec*
+ * would switch the whole format back to lossy on the first miss; and forgetting it on
+ * reload is what lets a track start using its copy as soon as one exists.
+ */
+const withoutCompatibleCopy = new Set<string>();
+
+export function rememberNoCompatibleCopy(track: CatalogTrack): void {
+  if (track.content_hash) withoutCompatibleCopy.add(track.content_hash);
+}
+
+/**
  * Whether to ask the hub for its lossless compatibility copy instead of the stored file.
  *
  * This is the better answer to a format the browser cannot decode. The Opus fallback above
@@ -153,5 +167,33 @@ export function prefersCompatibleCopy(
   chosen: StreamQuality,
 ): boolean {
   if (chosen !== "original") return false;
+  if (track.content_hash && withoutCompatibleCopy.has(track.content_hash)) {
+    return false;
+  }
   return isUndecodable(track) || refusesUpFront(track);
+}
+
+/**
+ * What to actually ask the hub for: which quality, and whether to request the lossless
+ * compatible copy.
+ *
+ * One function because the two answers are not independent, and computing them separately
+ * is what broke this the first time. A browser that cannot decode the stored format was
+ * asking for the Opus tier *and* the compatible copy in the same URL — and since the hub
+ * only reaches for a compatible copy when the request is for `original`, the lossy tier won
+ * every time and the lossless copies were never served at all.
+ *
+ * So: if a compatible copy is wanted, the quality stays `original`, because that copy *is*
+ * the lossless original in a format this browser can read. The Opus ladder is what happens
+ * when there is no copy to have.
+ */
+export function resolveSource(
+  track: CatalogTrack,
+  chosen: StreamQuality,
+): { quality: StreamQuality; compatible: boolean } {
+  const compatible = prefersCompatibleCopy(track, chosen);
+  return {
+    quality: compatible ? "original" : effectiveQuality(track, chosen),
+    compatible,
+  };
 }
