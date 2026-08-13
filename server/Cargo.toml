@@ -60,7 +60,10 @@ tokio = { version = "1.47", features = ["full"] }
 tokio-stream = "0.1"
 tokio-util = "0.7"
 toml = "0.9"
-tower-http = { version = "0.6", features = ["limit", "trace"] }
+tower-http = { version = "0.6", features = ["limit", "trace", "compression-gzip"] }
+# Cover downscaling only. Default features pull in a dozen codecs and a great deal of
+# build time for a Pi that needs to decode exactly what album art is: JPEG, PNG, WebP.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.17", features = ["serde", "v4"] }

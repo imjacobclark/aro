@@ -4289,6 +4289,66 @@ impl HubStore {
         Ok(())
     }
 
+    /// A cached thumbnail for `source_hash` at `size`, if one has been made and still exists.
+    pub fn artwork_thumbnail(
+        &self,
+        source_hash: &str,
+        size: &str,
+    ) -> Result<Option<PathBuf>, StoreError> {
+        validate_hash(source_hash)?;
+        let path: Option<String> = self
+            .connection
+            .lock()
+            .query_row(
+                "SELECT path FROM artwork_thumbnails WHERE source_hash = ?1 AND size = ?2",
+                params![source_hash, size],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(path.map(PathBuf::from).filter(|path| path.is_file()))
+    }
+
+    /// Where a thumbnail of `source_hash` at `size` should be written.
+    pub fn artwork_thumbnail_path(&self, source_hash: &str, size: &str) -> PathBuf {
+        self.root
+            .join("thumbnails")
+            .join(size)
+            .join(&source_hash[..2])
+            .join(format!("{source_hash}.jpg"))
+    }
+
+    pub fn record_artwork_thumbnail(
+        &self,
+        source_hash: &str,
+        size: &str,
+        path: &Path,
+        byte_count: u64,
+    ) -> Result<(), StoreError> {
+        validate_hash(source_hash)?;
+        self.connection.lock().execute(
+            r#"
+            INSERT INTO artwork_thumbnails(source_hash, size, path, byte_count, created_at)
+            VALUES (?1, ?2, ?3, ?4, unixepoch())
+            ON CONFLICT(source_hash, size) DO UPDATE SET
+                path = excluded.path,
+                byte_count = excluded.byte_count,
+                created_at = excluded.created_at
+            "#,
+            params![source_hash, size, path.to_string_lossy(), byte_count as i64],
+        )?;
+        Ok(())
+    }
+
+    /// How much disk the derived covers currently occupy, and how many there are.
+    pub fn artwork_thumbnail_usage(&self) -> Result<(u64, u64), StoreError> {
+        let row = self.connection.lock().query_row(
+            "SELECT COUNT(*), COALESCE(SUM(byte_count), 0) FROM artwork_thumbnails",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        Ok((row.0.max(0) as u64, row.1.max(0) as u64))
+    }
+
     /// Live tracks with no compatibility copy yet, with their codec and duration so the
     /// caller can decide which actually need one and quote the work before starting it.
     pub fn tracks_missing_compatibility_copy(
@@ -5316,7 +5376,20 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
             created_at INTEGER NOT NULL,
             PRIMARY KEY(content_hash, quality)
         );
+        -- Downscaled cover art, derived from a source blob and cached by (blob, size).
+        -- Its own root for the same reason compatibility copies have one: the space is
+        -- visible as a directory, and deleting it whole loses nothing that cannot be
+        -- rebuilt from the covers themselves.
+        CREATE TABLE IF NOT EXISTS artwork_thumbnails (
+            source_hash TEXT NOT NULL,
+            size TEXT NOT NULL,
+            path TEXT NOT NULL,
+            byte_count INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY(source_hash, size)
+        );
         INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (16, unixepoch());
+        INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (20, unixepoch());
         "#,
     )?;
     // Votes cast before a track was re-identified were never withdrawn, so a track filed

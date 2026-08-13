@@ -726,6 +726,7 @@ mod integration_tests {
             artwork_http: reqwest::Client::new(),
             playlist_seeds: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             transcode_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
+            thumbnail_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
             warming_transcodes: Default::default(),
         };
         (Arc::new(DlnaState::new(app, &config)), root)

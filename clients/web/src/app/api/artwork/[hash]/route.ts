@@ -14,7 +14,7 @@ const HASH = /^[0-9a-f]{64}$/;
  * most of what makes a scrolling grid of albums feel instant over a home network.
  */
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   context: { params: Promise<{ hash: string }> },
 ) {
   const { hash } = await context.params;
@@ -25,7 +25,14 @@ export async function GET(
     );
   }
 
-  const response = await hubFetch({ path: `blobs/${hash}` });
+  // The size travels to the hub, which derives and caches the smaller copy. An older hub
+  // that does not know the parameter simply ignores it and sends the original, so a client
+  // ahead of its hub still shows covers — just the large ones it always did.
+  const size = request.nextUrl.searchParams.get("size") ?? undefined;
+  const response = await hubFetch({
+    path: `blobs/${hash}`,
+    query: size ? { size } : undefined,
+  });
   if (!response.ok) {
     return new NextResponse(null, { status: response.status });
   }
@@ -44,6 +51,8 @@ export async function GET(
   );
   const length = response.headers.get("content-length");
   if (length) headers.set("content-length", length);
+  // Each size is a distinct immutable object, and the URL carries the size, so the two can
+  // never collide in a cache.
   headers.set("cache-control", "public, max-age=31536000, immutable");
 
   return new NextResponse(response.body, { status: 200, headers });

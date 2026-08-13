@@ -1192,13 +1192,29 @@ actor AroSyncClient {
         }
     }
 
+    /// Downloads a blob, optionally asking the hub for a downscaled rendering of it.
+    ///
+    /// `size` is for cover art being displayed and nothing else. Artwork the app is going to
+    /// *keep* — adopted from a metadata candidate, or written back into a file — must be
+    /// fetched without it, or the library ends up holding a thumbnail in place of the real
+    /// cover. An older hub ignores the parameter and sends the original, which is a larger
+    /// download but never a wrong one.
     func downloadBlob(
         hash: String,
         from offset: UInt64,
+        size: String? = nil,
         credential: HubDeviceCredential? = nil
     ) async throws -> Data {
         try await logged("GET", "v1/blobs/\(hash)") {
-            var request = URLRequest(url: try url(for: "v1/blobs/\(hash)"))
+            var components = URLComponents(
+                url: try url(for: "v1/blobs/\(hash)"),
+                resolvingAgainstBaseURL: false
+            )
+            if let size {
+                components?.queryItems = [URLQueryItem(name: "size", value: size)]
+            }
+            let plain = try url(for: "v1/blobs/\(hash)")
+            var request = URLRequest(url: components?.url ?? plain)
             request.httpMethod = "GET"
             request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range")
             authenticate(&request, credential: credential)

@@ -16,6 +16,7 @@ bs1770.workspace = true
 ogg.workspace = true
 rubato.workspace = true
 chrono.workspace = true
+image.workspace = true
 lofty.workspace = true
 reqwest.workspace = true
 rustfft.workspace = true

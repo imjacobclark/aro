@@ -23,6 +23,7 @@ pub mod musicbrainz;
 pub mod queue;
 pub mod rate_limit;
 pub mod tags;
+pub mod thumbnail;
 pub mod transcode;
 
 pub use queue::{IdentificationConfig, IdentificationQueue, QueueStatus};

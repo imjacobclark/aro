@@ -46,6 +46,7 @@ export default function AlbumPage({
           hash={album.artworkHash}
           alt={album.name}
           eager
+          size="detail"
           className="w-44 shadow-xl sm:w-52"
           rounded="rounded-2xl"
         />

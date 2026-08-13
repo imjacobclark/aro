@@ -531,8 +531,15 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
    * arrives — and until it finishes, that track has no duration and cannot be seeked.
    */
   useEffect(() => {
-    if (!isPlaying || repeat === "one") return;
-    const upcoming = queue[queueIndex + 1];
+    if (repeat === "one") return;
+    // Not gated on `isPlaying`. It used to be, which meant the very first press of play —
+    // and every resume after a pause — started from a cold element: connection, first byte
+    // and decode all happening while someone waited, at the one moment they are certainly
+    // watching. When nothing is playing the track worth having ready is the one at the
+    // playhead; once it is, it is the one after.
+    const upcoming = isPlaying
+      ? queue[queueIndex + 1]
+      : (queue[queueIndex] ?? queue[0]);
     if (!upcoming?.content_hash) return;
 
     // Only worth warming an encode the next track will actually use: one that will be
@@ -552,10 +559,15 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
    */
   const resolve = useCallback(
     (hashes: string[], seed?: CatalogTrack): CatalogTrack[] => {
-      const lookup = new Map(byHash);
-      if (seed?.content_hash) lookup.set(seed.content_hash, seed);
+      // Read through rather than copying. This used to clone the whole catalogue purely to
+      // add one optional seed, on every station refill — which happens repeatedly through a
+      // long session, on the main thread, while audio is playing. Harmless at 400 tracks, a
+      // multi-millisecond allocation and GC pause mid-playback at ten thousand.
       return hashes
-        .map((hash) => lookup.get(hash))
+        .map((hash) =>
+          byHash.get(hash) ??
+          (seed?.content_hash === hash ? seed : undefined),
+        )
         .filter((item): item is CatalogTrack => Boolean(item));
     },
     [byHash],
@@ -639,7 +651,9 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!("mediaSession" in navigator) || !current) return;
 
-    const cover = artworkUrl(current.artwork_hash);
+    // The lock screen and the car stereo draw this large, and it is one image rather than a
+    // grid, so it is the one place the bigger copy is worth fetching.
+    const cover = artworkUrl(current.artwork_hash, "detail");
     navigator.mediaSession.metadata = new MediaMetadata({
       title: current.title,
       artist: current.artist ?? "Unknown Artist",

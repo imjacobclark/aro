@@ -346,6 +346,9 @@ async fn serve(config: Config, config_path: PathBuf) -> Result<()> {
         transcode_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(
             http::default_transcode_slots(),
         )),
+        thumbnail_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            http::default_thumbnail_slots(),
+        )),
         warming_transcodes: Default::default(),
     };
     let _dashboard = if config.dashboard.enabled {

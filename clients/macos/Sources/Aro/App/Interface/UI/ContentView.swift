@@ -965,9 +965,15 @@ struct ContentView: View {
         await withTaskGroup(of: (String, Data?).self) { group in
             for hash in hashes {
                 group.addTask {
+                    // The grid rendering, not the stored cover. These bytes are only ever
+                    // drawn — into a 96pt tile at the largest — and the stored originals in
+                    // this library average 3.2 MB apiece, so fetching them in full to show a
+                    // catalogue page was most of what the hub was asked for. Artwork the app
+                    // keeps is downloaded elsewhere, at full size, on purpose.
                     let data = try? await client.downloadBlob(
                         hash: hash,
                         from: 0,
+                        size: "grid",
                         credential: credential
                     )
                     return (hash, data)

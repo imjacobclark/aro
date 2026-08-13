@@ -348,7 +348,25 @@ export function warmTranscode(hash: string, quality: string): void {
   }).catch(() => {});
 }
 
-/** Where a cover comes from, or `null` when the hub has none for this track. */
-export function artworkUrl(hash: string | null | undefined): string | null {
-  return hash ? `/api/artwork/${hash}` : null;
+/**
+ * Where a cover comes from, at the size it is going to be drawn.
+ *
+ * The size is not an optimisation to add later — it is most of what the app weighs. Covers
+ * are stored as they arrived, which in this library means 3000×3000 JPEGs averaging 3.2 MB,
+ * and asking for them unqualified made opening the albums grid transfer 60.84 MB for cells
+ * 171 pixels wide. The hub derives and caches the smaller copies; the only thing a client
+ * has to get right is saying which one it wants.
+ */
+export function artworkUrl(
+  hash: string | null | undefined,
+  size: ArtworkSize = "grid",
+): string | null {
+  return hash ? `/api/artwork/${hash}?size=${size}` : null;
 }
+
+/**
+ * `grid` covers every list row, grid cell and the mini player; `detail` covers the full
+ * screen player and the lock screen. Matches the hub's ladder — see
+ * `aro_track_id::thumbnail::ThumbnailSize`.
+ */
+export type ArtworkSize = "grid" | "detail";

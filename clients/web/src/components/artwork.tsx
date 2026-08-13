@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { Disc3 } from "lucide-react";
 
-import { artworkUrl } from "@/lib/hub/api";
+import { artworkUrl, type ArtworkSize } from "@/lib/hub/api";
 import { cn } from "@/lib/utils";
 
 /**
@@ -19,15 +19,22 @@ export function Artwork({
   className,
   rounded = "rounded-xl",
   eager = false,
+  size = "grid",
 }: {
   hash: string | null | undefined;
   alt: string;
   className?: string;
   rounded?: string;
   eager?: boolean;
+  /**
+   * Defaults to the small copy, because almost every cover on screen is a list row or a
+   * grid cell. Only the surfaces that fill a phone — the full screen player, an album
+   * header — need `detail`, and they ask for it.
+   */
+  size?: ArtworkSize;
 }) {
   const [failed, setFailed] = useState(false);
-  const source = artworkUrl(hash);
+  const source = artworkUrl(hash, size);
 
   if (!source || failed) {
     return (
@@ -60,11 +67,11 @@ export function Artwork({
       loading={eager ? "eager" : "lazy"}
       decoding="async"
       /*
-       * Covers are served at whatever size they were embedded or fetched at, and in a real
-       * library that ranges from 10 KB to well over 20 MB. A grid of them will happily
-       * occupy every connection the browser allows per origin, and audio — requested from
-       * that same origin — then waits behind them. Marking them low priority is what keeps
-       * a page of album art from stalling the music it belongs to.
+       * Covers used to be served at whatever size they were embedded or fetched at — 10 KB
+       * to well over 20 MB — and a grid of them would occupy every connection the browser
+       * allows per origin, leaving audio from that same origin waiting behind them. The hub
+       * now sends a copy sized for the box, which fixes the cause; this stays because
+       * ordering still matters when a grid and a track start at the same moment.
        */
       fetchPriority={eager ? "high" : "low"}
       onError={() => setFailed(true)}

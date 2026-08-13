@@ -96,6 +96,10 @@ pub struct AppState {
     /// free to keep serving requests, and means neither machine is designed around the
     /// other's limits.
     pub transcode_slots: Arc<tokio::sync::Semaphore>,
+    /// Cover downscaling runs one at a time by default. A decode is a large, short-lived
+    /// allocation, and a grid of covers asks for a dozen at once — on a Pi with no swap the
+    /// queue is what keeps that from being fatal.
+    pub thumbnail_slots: Arc<tokio::sync::Semaphore>,
     /// Encodes currently being warmed ahead of a listener reaching them, so two clients —
     /// or one client asking twice — cannot spend the same CPU twice over. Keyed by
     /// (content hash, quality), the same key the cache itself uses.
@@ -106,6 +110,18 @@ pub struct AppState {
 pub fn default_transcode_slots() -> usize {
     std::thread::available_parallelism()
         .map(|value| value.get().saturating_sub(1).max(1))
+        .unwrap_or(1)
+}
+
+/// How many covers may be downscaled at once.
+///
+/// Deliberately stingier than the transcode pool. A decode holds width × height × 3 bytes
+/// resident, so two 3000×3000 covers at once is over 50 MB of transient allocation on a
+/// machine with 917 MB and no swap — and unlike a transcode, this work is triggered by
+/// simply scrolling a grid.
+pub fn default_thumbnail_slots() -> usize {
+    std::thread::available_parallelism()
+        .map(|value| (value.get() / 2).max(1))
         .unwrap_or(1)
 }
 
@@ -305,11 +321,40 @@ pub fn router(state: AppState) -> Router {
 
     admin_only
         .merge(shared)
+        .layer(json_compression())
         .layer(middleware::from_fn_with_state(
             state.clone(),
             request_telemetry,
         ))
         .with_state(state)
+}
+
+/// Compresses the hub's JSON, and nothing else.
+///
+/// Measured against a real library, the catalogue walk shrinks 4.5× (36,217 → 8,060 bytes),
+/// the playlist read 3.4× (54,482 → 15,942) and the stats read 3.1×. Over a LAN that is
+/// noise; from a phone on Tailscale it is most of the wait before a screen has content, and
+/// it grows with the library.
+///
+/// The exclusions are the important half. Every route that serves bytes off disk — originals,
+/// compatibility copies, transcodes, derived covers — answers `Range` requests, and
+/// compressing a `206` would make `Content-Range` describe a length the body no longer has,
+/// which is how seeking breaks. Those routes are also the ones whose payloads are already
+/// compressed, so the CPU would be spent on a Pi for a rounding error. Excluding by content
+/// type rather than by path covers all of them, including any added later: audio, images and
+/// opaque blobs are exactly the four types `download_range_inner` can emit.
+fn json_compression()
+-> tower_http::compression::CompressionLayer<impl tower_http::compression::Predicate> {
+    use tower_http::compression::predicate::{NotForContentType, Predicate, SizeAbove};
+
+    tower_http::compression::CompressionLayer::new().compress_when(
+        // Below a kilobyte the framing costs more than the saving.
+        SizeAbove::new(1024)
+            .and(NotForContentType::new("application/octet-stream"))
+            .and(NotForContentType::new("audio/"))
+            .and(NotForContentType::new("image/"))
+            .and(NotForContentType::SSE),
+    )
 }
 
 /// Slower than this and a request gets logged at `warn` regardless of its outcome —
@@ -1225,12 +1270,26 @@ async fn commit_blob(
     }))
 }
 
+#[derive(Deserialize)]
+struct BlobQuery {
+    /// Asks for a downscaled cover rather than the stored blob. See [`thumbnail_response`].
+    size: Option<String>,
+}
+
 async fn download_blob(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(hash): Path<String>,
+    Query(query): Query<BlobQuery>,
 ) -> Result<Response, ApiError> {
     require_device_or_admin(&state, &headers)?;
+
+    if let Some(requested) = query.size.as_deref() {
+        let size = aro_track_id::thumbnail::ThumbnailSize::parse(requested)
+            .ok_or_else(|| ApiError::bad_request("unknown_size"))?;
+        return thumbnail_response(&state, &hash, size, &headers).await;
+    }
+
     // The conditional check comes before the path lookup: a client that already holds these
     // bytes should not make the hub touch the disk at all, and on a referenced library that
     // lookup can mean hashing the file.
@@ -1251,6 +1310,126 @@ async fn download_blob(
     )
     .await
 }
+
+/// Serves a cover at the size the client is actually going to draw it.
+///
+/// Covers are stored as they arrived, which in a real library means 3000×3000 JPEGs of
+/// several megabytes. Opening the album grid on a phone measured 60.84 MB of artwork for
+/// cells 171 pixels wide. The bytes were the entire cost, so the fix has to be in what is
+/// sent, not in how it is scheduled — which is all the clients could do on their own.
+///
+/// Derived once and cached on disk, like a compatibility copy or a transcode. A cover that
+/// is already smaller than the requested size is served untouched rather than re-encoded:
+/// that would cost quality to save nothing.
+async fn thumbnail_response(
+    state: &Arc<AppState>,
+    hash: &str,
+    size: aro_track_id::thumbnail::ThumbnailSize,
+    headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    // The thumbnail's validator has to differ from the original's, or a client holding the
+    // 384px copy would be told its cached full-size cover was current — and vice versa.
+    let tag = format!("{hash}-{}", size.as_str());
+    let identity = BlobCacheIdentity::new(&tag, headers);
+    if identity.is_fresh() {
+        return Ok(not_modified(&identity));
+    }
+
+    if let Some(cached) = state.store.artwork_thumbnail(hash, size.as_str())? {
+        return download_range_inner(cached, None, None, Some(identity), THUMBNAIL_CONTENT_TYPE)
+            .await;
+    }
+
+    let source = state
+        .store
+        .blob_path_for_download(hash)?
+        .ok_or_else(|| ApiError::not_found("blob_not_found"))?;
+
+    // Bounded before the work is queued, not inside it. Decoding a 3000×3000 JPEG needs
+    // around 27 MB resident, and a grid of covers arriving at once on a 917 MB Pi with no
+    // swap is exactly the burst that would otherwise take the hub down.
+    let permit = state
+        .thumbnail_slots
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(ApiError::internal)?;
+
+    let destination = state.store.artwork_thumbnail_path(hash, size.as_str());
+    let store = state.store.clone();
+    let owned_hash = hash.to_string();
+
+    let produced = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let bytes = std::fs::read(&source)?;
+        let Some(thumbnail) = aro_track_id::thumbnail::downscale(&bytes, size)
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+        else {
+            // Already small enough. Nothing is cached for this: the original is the answer,
+            // and recording a "thumbnail" that is a copy of it would double the disk it uses.
+            return Ok::<_, std::io::Error>(None);
+        };
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // Written beside the destination and renamed, so a request that arrives mid-write
+        // never finds a half-encoded JPEG.
+        let temporary = destination.with_extension("jpg.partial");
+        std::fs::write(&temporary, &thumbnail.bytes)?;
+        std::fs::rename(&temporary, &destination)?;
+        let byte_count = thumbnail.bytes.len() as u64;
+        if let Err(error) =
+            store.record_artwork_thumbnail(&owned_hash, size.as_str(), &destination, byte_count)
+        {
+            tracing::warn!(%error, "could not record a derived cover");
+        }
+        Ok(Some(destination))
+    })
+    .await
+    .map_err(ApiError::internal)?;
+
+    match produced {
+        Ok(Some(path)) => {
+            download_range_inner(path, None, None, Some(identity), THUMBNAIL_CONTENT_TYPE).await
+        }
+        Ok(None) => {
+            // Small enough already, so hand back the stored bytes under the original's own
+            // validator rather than the thumbnail's.
+            let path = state
+                .store
+                .blob_path_for_download(hash)?
+                .ok_or_else(|| ApiError::not_found("blob_not_found"))?;
+            download_range_inner(
+                path,
+                None,
+                Some(state.telemetry.clone()),
+                Some(BlobCacheIdentity::new(hash, headers)),
+                BLOB_CONTENT_TYPE,
+            )
+            .await
+        }
+        Err(error) => {
+            // A blob that is not an image, or one this build cannot decode. The cover is not
+            // worth failing a page over — send the original and let the client draw it.
+            tracing::debug!(%error, %hash, "no thumbnail could be derived; serving the original");
+            let path = state
+                .store
+                .blob_path_for_download(hash)?
+                .ok_or_else(|| ApiError::not_found("blob_not_found"))?;
+            download_range_inner(
+                path,
+                None,
+                Some(state.telemetry.clone()),
+                Some(BlobCacheIdentity::new(hash, headers)),
+                BLOB_CONTENT_TYPE,
+            )
+            .await
+        }
+    }
+}
+
+/// Derived covers are always JPEG — see `aro_track_id::thumbnail`.
+const THUMBNAIL_CONTENT_TYPE: &str = "image/jpeg";
 
 #[derive(Serialize)]
 struct TranscodePlan {
@@ -2735,7 +2914,11 @@ async fn download_range_inner(
             .await
             .map_err(ApiError::internal)?;
     }
-    let stream = ReaderStream::new(file.take(length));
+    // 64 KB rather than tokio-util's 4 KB default. A 24 MB track is otherwise delivered as
+    // roughly 6,100 separate buffer allocations, read syscalls and HTTP/2 data frames — real
+    // CPU on an armv7 Pi, spent on framing rather than on moving bytes. This also matches the
+    // block size the macOS progressive reader already asks for.
+    let stream = ReaderStream::with_capacity(file.take(length), 64 * 1024);
     let mut response = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, content_type)
@@ -2824,6 +3007,63 @@ mod download_tests {
     use super::*;
     use axum::body::to_bytes;
     use tempfile::NamedTempFile;
+
+    /// The compression predicate is the one part of this that can silently corrupt audio:
+    /// a compressed `206` leaves `Content-Range` describing a length the body no longer has,
+    /// and a client seeking in a track reads the wrong bytes. Every content type
+    /// `download_range_inner` can emit must therefore be refused by it.
+    #[test]
+    fn nothing_that_serves_byte_ranges_is_ever_compressed() {
+        use tower_http::compression::Predicate;
+
+        let predicate = {
+            use tower_http::compression::predicate::{NotForContentType, SizeAbove};
+            SizeAbove::new(1024)
+                .and(NotForContentType::new("application/octet-stream"))
+                .and(NotForContentType::new("audio/"))
+                .and(NotForContentType::new("image/"))
+                .and(NotForContentType::SSE)
+        };
+
+        // A real body, not a header claiming one: `SizeAbove` reads the body's size hint and
+        // ignores `Content-Length`, so an empty body is refused whatever the header says.
+        let response = |content_type: &str| {
+            Response::builder()
+                .header(header::CONTENT_TYPE, content_type)
+                .body(Body::from(vec![b'x'; 4096]))
+                .unwrap()
+        };
+
+        for content_type in [
+            BLOB_CONTENT_TYPE,
+            COMPATIBILITY_CONTENT_TYPE,
+            TRANSCODE_CONTENT_TYPE,
+            THUMBNAIL_CONTENT_TYPE,
+        ] {
+            assert!(
+                !predicate.should_compress(&response(content_type)),
+                "{content_type} serves byte ranges and must never be compressed"
+            );
+        }
+
+        // The whole point of the layer: the JSON the clients actually wait on.
+        assert!(predicate.should_compress(&response("application/json")));
+    }
+
+    /// Small JSON is not worth the framing, and compressing it would cost CPU on a Pi to
+    /// make some responses larger.
+    #[test]
+    fn tiny_responses_are_left_alone() {
+        use tower_http::compression::Predicate;
+        use tower_http::compression::predicate::{NotForContentType, SizeAbove};
+
+        let predicate = SizeAbove::new(1024).and(NotForContentType::new("audio/"));
+        let small = Response::builder()
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(vec![b'x'; 64]))
+            .unwrap();
+        assert!(!predicate.should_compress(&small));
+    }
 
     #[test]
     fn parses_bounded_and_open_ended_ranges() {

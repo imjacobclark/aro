@@ -148,6 +148,7 @@ export function NowPlayingSheet({
               hash={track.artwork_hash}
               alt={track.album ?? track.title}
               eager
+              size="detail"
               className="mx-auto w-full max-w-[min(78vw,20rem)] shadow-2xl"
               rounded="rounded-3xl"
             />
