@@ -2,7 +2,7 @@
 
 import { use } from "react";
 import Link from "next/link";
-import { Play, Shuffle } from "lucide-react";
+import { Play, Radio, Shuffle } from "lucide-react";
 
 import { Artwork } from "@/components/artwork";
 import { MoreLikeThis } from "@/components/more-like-this";
@@ -81,6 +81,21 @@ export default function AlbumPage({
             >
               <Shuffle className="size-4" />
               Shuffle
+            </Button>
+            {/* An album page could show you what it sounds like and offer no way to hear
+                any of it: the shelf below has been listing similar music with nothing to
+                press, while artists and playlists both had this control. Seeded by the
+                record, matching the shelf. */}
+            <Button
+              variant="outline"
+              onClick={() => {
+                const seed = album.tracks.find((track) => track.content_hash);
+                if (seed) void playback.startRadio(seed);
+              }}
+              className="flex-1 sm:flex-none"
+            >
+              <Radio className="size-4" />
+              Radio
             </Button>
           </div>
         </div>

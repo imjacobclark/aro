@@ -816,6 +816,11 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
       try {
         const playlist = await api.radio(track.content_hash);
         const tracks = resolve(playlist.content_hashes, track);
+        play(tracks.length > 0 ? tracks : [track]);
+        // *After* `play`, which clears it — anything started by hand ends the station, and
+        // that rule cannot tell the difference between a listener picking an album and this
+        // function starting one. Setting it first meant the station was wiped the instant
+        // it began, so radio never refilled and stopped dead after its first page.
         stationRef.current = {
           seed: track.content_hash,
           // What has been taken from the ranking so far, which is where the next page
@@ -823,7 +828,6 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
           consumed: Math.max(playlist.content_hashes.length - 1, 0),
           exhausted: false,
         };
-        play(tracks.length > 0 ? tracks : [track]);
       } catch {
         stationRef.current = null;
         play([track]);
