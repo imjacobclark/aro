@@ -41,7 +41,7 @@ export function QueueSheet({
           ) : null}
         </div>
 
-        <div className="overflow-y-auto overscroll-contain px-2 pb-[max(1rem,env(safe-area-inset-bottom))]">
+        <div className="overflow-y-auto overscroll-contain px-2 pb-[calc(1rem+var(--safe-bottom))]">
           {playback.queue.length === 0 ? (
             <EmptyState
               title="Nothing Queued"

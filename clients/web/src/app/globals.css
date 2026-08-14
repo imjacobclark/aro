@@ -182,12 +182,32 @@
   }
 }
 
+/*
+ * Safe-area insets, but only where the app actually owns the screen.
+ *
+ * `viewport-fit: cover` is set for the installed app, and it applies in an ordinary Safari
+ * tab too — where the browser's own address bar and toolbar already occupy that space.
+ * Paying `env(safe-area-inset-*)` on top of chrome that is already there counted the same
+ * gap twice and pushed the header and the tab bar off screen in the browser, while looking
+ * correct once installed. Insets are therefore zero by default and real only in standalone
+ * mode, and every fixed edge reads these two names rather than calling `env()` itself.
+ */
+:root {
+  --safe-top: 0px;
+  --safe-bottom: 0px;
+}
+
+@media (display-mode: standalone) {
+  :root {
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+  }
+}
+
 /* The area a fixed bottom bar must clear on a notched phone, so pages can pad themselves
-   by one name rather than repeating the same `env()` arithmetic. */
+   by one name rather than repeating the same arithmetic. */
 @utility pb-player {
-  padding-bottom: calc(
-    var(--player-clearance, 0px) + env(safe-area-inset-bottom, 0px)
-  );
+  padding-bottom: calc(var(--player-clearance, 0px) + var(--safe-bottom));
 }
 
 @keyframes aro-marquee {
@@ -248,4 +268,98 @@ body {
   -webkit-user-drag: none;
   user-select: none;
   -webkit-user-select: none;
+}
+
+/*
+ * Motion for generated-mix covers. See `components/mix-motion.tsx` for why it looks the way
+ * it does; this is only the mechanics.
+ *
+ * Every layer's 0% and 100% frames are identical, so each loop closes on itself with no
+ * seam. The durations are deliberately unequal and long, which means the three together
+ * take much longer to visibly repeat than any one of them.
+ */
+.aro-mix-drift {
+  position: absolute;
+  inset: -45%;
+  border-radius: 9999px;
+  filter: blur(28px);
+  opacity: 0.55;
+  will-change: transform;
+}
+
+.aro-mix-drift-a {
+  background: radial-gradient(
+    circle at 50% 50%,
+    color-mix(in oklab, var(--primary) 85%, white) 0%,
+    transparent 62%
+  );
+  animation: aro-mix-a 34s linear infinite;
+}
+
+.aro-mix-drift-b {
+  background: radial-gradient(
+    circle at 50% 50%,
+    color-mix(in oklab, var(--accent, var(--primary)) 75%, white) 0%,
+    transparent 58%
+  );
+  animation: aro-mix-b 47s linear infinite;
+}
+
+.aro-mix-drift-c {
+  background: radial-gradient(
+    circle at 50% 50%,
+    rgb(255 255 255 / 0.5) 0%,
+    transparent 55%
+  );
+  animation: aro-mix-c 61s linear infinite;
+}
+
+@keyframes aro-mix-a {
+  0% { transform: translate3d(-12%, -6%, 0) scale(1); }
+  50% { transform: translate3d(10%, 8%, 0) scale(1.15); }
+  100% { transform: translate3d(-12%, -6%, 0) scale(1); }
+}
+
+@keyframes aro-mix-b {
+  0% { transform: translate3d(14%, 10%, 0) scale(1.1); }
+  50% { transform: translate3d(-8%, -12%, 0) scale(0.95); }
+  100% { transform: translate3d(14%, 10%, 0) scale(1.1); }
+}
+
+@keyframes aro-mix-c {
+  0% { transform: translate3d(0, 12%, 0) scale(1.05); }
+  50% { transform: translate3d(6%, -10%, 0) scale(1.2); }
+  100% { transform: translate3d(0, 12%, 0) scale(1.05); }
+}
+
+/* Only on the mix that is playing: one slow pass of light, so "this is the live one" reads
+   without a badge competing with the title. */
+.aro-mix-sheen {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 38%,
+    rgb(255 255 255 / 0.28) 50%,
+    transparent 62%
+  );
+  transform: translateX(-100%);
+  animation: aro-mix-sheen 4.5s ease-in-out infinite;
+}
+
+@keyframes aro-mix-sheen {
+  0%, 55% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+/* A still cover is the correct fallback, not a different effect: the layers hold the
+   position they open in, which is the frame the design was drawn around. */
+@media (prefers-reduced-motion: reduce) {
+  .aro-mix-drift,
+  .aro-mix-sheen {
+    animation: none;
+  }
+  .aro-mix-sheen {
+    display: none;
+  }
 }

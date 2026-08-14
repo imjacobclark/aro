@@ -50,7 +50,7 @@ export function MiniPlayer() {
 
   return (
     <>
-      <div className="fixed inset-x-0 bottom-[calc(3.75rem+env(safe-area-inset-bottom))] z-40 px-2 lg:bottom-4 lg:left-auto lg:right-4 lg:w-[26rem] lg:px-0">
+      <div className="fixed inset-x-0 bottom-[calc(4.35rem+var(--safe-bottom))] z-40 px-2 lg:bottom-4 lg:left-auto lg:right-4 lg:w-[26rem] lg:px-0">
         <div
           {...swipe.handlers}
           style={{

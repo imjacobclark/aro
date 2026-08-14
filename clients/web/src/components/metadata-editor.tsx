@@ -289,7 +289,7 @@ function EditorForm({
           ) : null}
         </div>
 
-        <div className="border-hairline flex gap-2 border-t px-5 py-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
+        <div className="border-hairline flex gap-2 border-t px-5 py-4 pb-[calc(1rem+var(--safe-bottom))]">
           <Button
             variant="ghost"
             onClick={reset}

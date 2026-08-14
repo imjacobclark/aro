@@ -35,7 +35,7 @@ export function PageShell({
     // spacing rather than losing it.
     <div
       className={cn(
-        "mx-auto w-full max-w-5xl px-4 pt-[max(0.75rem,env(safe-area-inset-top))]",
+        "mx-auto w-full max-w-5xl px-4 pt-[calc(0.75rem+var(--safe-top))]",
         className,
       )}
     >

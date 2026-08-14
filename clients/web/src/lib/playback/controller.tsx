@@ -657,20 +657,51 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
 
     // The lock screen and the car stereo draw this large, and it is one image rather than a
     // grid, so it is the one place the bigger copy is worth fetching.
-    const cover = artworkUrl(current.artwork_hash, "detail");
+    // Sizes must describe the images actually served, not a pair of round numbers. iOS
+    // picks an entry by declared size and then fetches it; when the declaration was a
+    // guess, the Dynamic Island could end up with nothing to draw. These are the hub's two
+    // real rungs, so both entries are true and either one is usable.
+    const large = artworkUrl(current.artwork_hash, "detail");
+    const small = artworkUrl(current.artwork_hash, "grid");
     navigator.mediaSession.metadata = new MediaMetadata({
       title: current.title,
       artist: current.artist ?? "Unknown Artist",
       album: current.album ?? "",
-      artwork: cover
-        ? [
-            { src: cover, sizes: "512x512", type: "image/jpeg" },
-            { src: cover, sizes: "256x256", type: "image/jpeg" },
-          ]
-        : [],
+      artwork:
+        large && small
+          ? [
+              { src: small, sizes: "384x384", type: "image/jpeg" },
+              { src: large, sizes: "1024x1024", type: "image/jpeg" },
+            ]
+          : [],
     });
     navigator.mediaSession.playbackState = isPlaying ? "playing" : "paused";
   }, [current, isPlaying]);
+
+  /**
+   * Keeps the system's scrubber honest.
+   *
+   * Without a position state iOS has a title and a pair of buttons but no idea how long the
+   * track is or how far in it is, so the Dynamic Island shows a dead scrubber and elapsed
+   * time that never moves. It is cheap to publish and has to be republished on every seek,
+   * not only when the track changes.
+   */
+  useEffect(() => {
+    if (!("mediaSession" in navigator)) return;
+    const session = navigator.mediaSession;
+    if (typeof session.setPositionState !== "function") return;
+    if (!current || !Number.isFinite(duration) || duration <= 0) return;
+    try {
+      session.setPositionState({
+        duration,
+        playbackRate: 1,
+        position: Math.min(Math.max(elapsed, 0), duration),
+      });
+    } catch {
+      // Safari throws if position exceeds duration during a track change; the next tick
+      // publishes a consistent pair.
+    }
+  }, [current, duration, elapsed]);
 
   const toggle = useCallback(() => {
     const player = activePlayer();
@@ -685,6 +716,20 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
       player.pause();
     }
   }, [activePlayer, current, unlock]);
+
+  /** Starts the active element, whatever the app currently believes. */
+  const resume = useCallback(() => {
+    const player = activePlayer();
+    if (!player || !current) return;
+    unlock(other(activeSlotRef.current));
+    if (player.paused) void player.play().catch(() => setIsPlaying(false));
+  }, [activePlayer, current, unlock]);
+
+  /** Stops it, likewise. */
+  const suspend = useCallback(() => {
+    const player = activePlayer();
+    if (player && !player.paused) player.pause();
+  }, [activePlayer]);
 
   const seek = useCallback(
     (seconds: number) => {
@@ -713,22 +758,48 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
     if (!("mediaSession" in navigator)) return;
     const session = navigator.mediaSession;
 
-    session.setActionHandler("play", toggle);
-    session.setActionHandler("pause", toggle);
+    // `play` and `pause` are distinct intents and must not both toggle.
+    //
+    // The system sends the action it believes is needed, from the state *it* holds. When
+    // that had drifted — which it does, because iOS updates its own view of us
+    // asynchronously — a `play` sent while we were already playing was turned into a pause
+    // by a shared toggle, and the lock screen and the app then disagreed about whether
+    // anything was happening. Honouring each action literally means the two converge
+    // instead of fighting: a `play` can only ever start, a `pause` can only ever stop.
+    session.setActionHandler("play", resume);
+    session.setActionHandler("pause", suspend);
+    session.setActionHandler("stop", suspend);
     session.setActionHandler("nexttrack", next);
     session.setActionHandler("previoustrack", previous);
     session.setActionHandler("seekto", (details) => {
       if (details.seekTime !== undefined) seek(details.seekTime);
     });
+    session.setActionHandler("seekbackward", (details) => {
+      const player = activePlayer();
+      if (player) seek(Math.max(player.currentTime - (details.seekOffset ?? 10), 0));
+    });
+    session.setActionHandler("seekforward", (details) => {
+      const player = activePlayer();
+      if (player) {
+        seek(Math.min(player.currentTime + (details.seekOffset ?? 10), player.duration || 0));
+      }
+    });
 
     return () => {
-      session.setActionHandler("play", null);
-      session.setActionHandler("pause", null);
-      session.setActionHandler("nexttrack", null);
-      session.setActionHandler("previoustrack", null);
-      session.setActionHandler("seekto", null);
+      for (const action of [
+        "play",
+        "pause",
+        "stop",
+        "nexttrack",
+        "previoustrack",
+        "seekto",
+        "seekbackward",
+        "seekforward",
+      ] as const) {
+        session.setActionHandler(action, null);
+      }
     };
-  }, [toggle, next, previous, seek]);
+  }, [resume, suspend, next, previous, seek, activePlayer]);
 
   const play = useCallback(
     (tracks: CatalogTrack[], startIndex = 0) => {

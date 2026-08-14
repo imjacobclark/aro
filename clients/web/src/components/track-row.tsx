@@ -182,7 +182,7 @@ export function TrackActionsSheet({
       <SheetContent
         title={track.title}
         description="Actions for this track"
-        className="pb-[env(safe-area-inset-bottom)]"
+        className="pb-[var(--safe-bottom)]"
       >
         <div className="border-hairline flex items-center gap-3 border-b px-5 py-4">
           <Artwork

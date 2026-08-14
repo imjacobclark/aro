@@ -112,7 +112,7 @@ export function NowPlayingSheet({
               : "transform 300ms cubic-bezier(0.22, 1, 0.36, 1), opacity 200ms ease-out",
             touchAction: "pan-y",
           }}
-          className="drag-surface mx-auto flex h-full w-full max-w-md flex-col px-6 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1.5rem,env(safe-area-inset-bottom))] motion-reduce:transition-none"
+          className="drag-surface mx-auto flex h-full w-full max-w-md flex-col px-6 pt-[calc(1rem+var(--safe-top))] pb-[calc(1.5rem+var(--safe-bottom))] motion-reduce:transition-none"
         >
           {/* The grabber every iOS sheet has. It is not a control — it is the hint that
               tells a hand the sheet can be pulled, which is what makes the gesture

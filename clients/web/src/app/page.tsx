@@ -2,9 +2,10 @@
 
 import { useCallback, useMemo, useState } from "react";
 import Link from "next/link";
-import { Play, Radio, Sparkles } from "lucide-react";
+import { Pause, Play, Radio, Sparkles } from "lucide-react";
 
 import { Artwork } from "@/components/artwork";
+import { MixMotion } from "@/components/mix-motion";
 import { Carousel, PageShell, SectionHeader } from "@/components/page-shell";
 import { useAsyncRefresh } from "@/hooks/use-async-refresh";
 import { useClientValue } from "@/hooks/use-client-value";
@@ -155,12 +156,11 @@ export default function HomePage() {
   const greeting = useGreeting();
 
   if (loading && tracks.length === 0) {
+    // The greeting, not "Home": the title is known before any request finishes, and
+    // swapping it afterwards moved every heading on the screen down by a line.
     return (
-      <PageShell title="Home">
-        <div className="grid gap-3">
-          <Skeleton className="h-44 w-full rounded-2xl" />
-          <Skeleton className="h-40 w-full rounded-2xl" />
-        </div>
+      <PageShell title={greeting} subtitle="Built entirely from your own library">
+        <HomeSkeleton />
       </PageShell>
     );
   }
@@ -169,7 +169,7 @@ export default function HomePage() {
     <PageShell title={greeting} subtitle="Built entirely from your own library">
       {!sections.any ? (
         loadingPlaylists ? (
-          <Skeleton className="h-44 w-full rounded-2xl" />
+          <HomeSkeleton />
         ) : (
           <EmptyState
             icon={<Sparkles className="size-10" />}
@@ -228,6 +228,46 @@ export default function HomePage() {
   );
 }
 
+/**
+ * The shape of Home before Home exists.
+ *
+ * A skeleton earns its place by being the same shape as what replaces it — same shelf
+ * heights, same card widths, same gaps — so the screen settles instead of rearranging. Two
+ * grey rectangles told you something was loading and then moved everything when the real
+ * layout arrived, which reads as slower than it is even when the wait is identical.
+ *
+ * The hub answers the catalogue in a few hundred milliseconds and generated playlists in
+ * well over a second, so this is on screen for long enough to be worth getting right.
+ */
+function HomeSkeleton() {
+  return (
+    <div className="flex flex-col gap-8 pb-4" aria-hidden>
+      <section>
+        <Skeleton className="mb-3 h-5 w-28 rounded-md" />
+        <div className="flex gap-3 overflow-hidden">
+          {[0, 1].map((index) => (
+            <Skeleton key={index} className="h-44 w-[17rem] shrink-0 rounded-2xl" />
+          ))}
+        </div>
+      </section>
+      {[0, 1].map((shelf) => (
+        <section key={shelf}>
+          <Skeleton className="mb-3 h-5 w-36 rounded-md" />
+          <div className="flex gap-3 overflow-hidden">
+            {[0, 1, 2].map((index) => (
+              <div key={index} className="w-36 shrink-0">
+                <Skeleton className="aspect-square w-36 rounded-xl" />
+                <Skeleton className="mt-2 h-3.5 w-28 rounded" />
+                <Skeleton className="mt-1.5 h-3 w-20 rounded" />
+              </div>
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
 function HeroMixCard({
   playlist,
   tracks,
@@ -239,6 +279,16 @@ function HeroMixCard({
   // A playlist has no cover of its own; its first track's is the one the hub would
   // have picked anyway, since the list is already in the order the hub chose.
   const cover = tracks.find((track) => track.artwork_hash)?.artwork_hash;
+
+  // Whether *this* mix is the one you are listening to. The button used to be a Play icon
+  // unconditionally, so the mix that was playing looked exactly like the five that were
+  // not, and pressing it restarted the thing already in your ears.
+  const playingHere =
+    playback.isPlaying &&
+    Boolean(playback.current?.content_hash) &&
+    tracks.some(
+      (track) => track.content_hash === playback.current?.content_hash,
+    );
 
   return (
     <article className="relative w-[17rem] shrink-0 snap-start overflow-hidden rounded-2xl">
@@ -253,6 +303,9 @@ function HeroMixCard({
           className="h-44 w-full"
           rounded="rounded-2xl"
         />
+        {/* The mixes shelf is the one place this belongs: a generated mix has an identity
+            of its own, whereas an album cover is already the record's own artwork. */}
+        <MixMotion playing={playingHere} />
       </Link>
       {/* The scrim is what keeps the title legible over any cover it lands on. It must not
           swallow the tap that opens the playlist behind it. */}
@@ -269,11 +322,17 @@ function HeroMixCard({
         </div>
         <button
           type="button"
-          onClick={() => playback.play(tracks)}
-          aria-label={`Play ${playlist.title}`}
+          onClick={() => (playingHere ? playback.toggle() : playback.play(tracks))}
+          aria-label={
+            playingHere ? `Pause ${playlist.title}` : `Play ${playlist.title}`
+          }
           className="orbit-surface flex size-11 shrink-0 items-center justify-center rounded-full shadow-lg transition-transform active:scale-95"
         >
-          <Play className="ml-0.5 size-5 fill-current" />
+          {playingHere ? (
+            <Pause className="size-5 fill-current" />
+          ) : (
+            <Play className="ml-0.5 size-5 fill-current" />
+          )}
         </button>
       </div>
     </article>

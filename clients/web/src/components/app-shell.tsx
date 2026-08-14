@@ -122,7 +122,7 @@ function TabBar() {
   const pathname = usePathname();
 
   return (
-    <nav className="bg-sidebar/92 border-hairline fixed inset-x-0 bottom-0 z-40 border-t pb-[env(safe-area-inset-bottom)] backdrop-blur-xl lg:hidden">
+    <nav className="bg-sidebar/92 border-hairline fixed inset-x-0 bottom-0 z-40 border-t pb-[var(--safe-bottom)] backdrop-blur-xl lg:hidden">
       <div className="flex">
         {TABS.map((item) => {
           const active = isActive(pathname, item.href);
