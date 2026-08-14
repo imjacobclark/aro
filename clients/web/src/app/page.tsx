@@ -93,11 +93,21 @@ export default function HomePage() {
   });
 
   const resolve = useCallback(
-    (playlist: GeneratedPlaylist): CatalogTrack[] =>
-      playlist.content_hashes
+    (playlist: GeneratedPlaylist): CatalogTrack[] => {
+      const found = playlist.content_hashes
         .map((hash) => byHash.get(hash))
-        .filter((track): track is CatalogTrack => Boolean(track)),
-    [byHash],
+        .filter((track): track is CatalogTrack => Boolean(track));
+
+      // A shelf resolved against a catalogue that has not finished arriving is not a short
+      // playlist — it is an incomplete one. The hub answers with content hashes and the
+      // client maps them through the catalogue, which is walked a page at a time and
+      // finishes *after* the playlists do; anything unresolved was being dropped in
+      // silence, so a thirty-track mix could render as eleven and look simply wrong.
+      // Reporting nothing while still loading keeps the skeleton up instead.
+      if (loading && found.length < playlist.content_hashes.length) return [];
+      return found;
+    },
+    [byHash, loading],
   );
 
   const sections = useMemo(() => {

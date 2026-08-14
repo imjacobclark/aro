@@ -1918,8 +1918,32 @@ impl HubStore {
         )?;
         let since = ((watermark * 1000.0) as i64 - 3_600_000).max(0);
 
+        // Which sessions are even worth aggregating.
+        //
+        // The window has to be applied here rather than in the aggregate's HAVING clause.
+        // `last_seen` is `MAX(observed_at)`, so filtering on it can only happen *after*
+        // grouping — which meant every request grouped the entire activity table and ran
+        // `json_extract` on all of it before discarding almost all of it. That is thousands
+        // of rows of work on a Pi for every stats read and every playlist rebuild, growing
+        // with the log. A session whose newest heartbeat is inside the window must have at
+        // least one row inside it, so this finds the same sessions off an index and the
+        // aggregate below then reads each one whole.
+        let mut recent = connection.prepare(
+            "SELECT DISTINCT session_id FROM playback_activity_events WHERE observed_at >= ?1",
+        )?;
+        let candidates = recent
+            .query_map([since], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(recent);
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+        let placeholders = std::iter::repeat_n("?", candidates.len())
+            .collect::<Vec<_>>()
+            .join(",");
+
         // One row per playback session: how far it got, how long it ran, and when.
-        let mut sessions = connection.prepare(
+        let mut sessions = connection.prepare(&format!(
             r#"
             SELECT session_id,
                    device_id,
@@ -1930,13 +1954,13 @@ impl HubStore {
                    MIN(observed_at) AS first_seen,
                    MAX(observed_at) AS last_seen
             FROM playback_activity_events
-            WHERE json_valid(payload)
+            WHERE json_valid(payload) AND session_id IN ({placeholders})
             GROUP BY session_id
-            HAVING content_hash IS NOT NULL AND duration > 0 AND last_seen >= ?1
-            "#,
-        )?;
+            HAVING content_hash IS NOT NULL AND duration > 0
+            "#
+        ))?;
         let rows = sessions
-            .query_map([since], |row| {
+            .query_map(rusqlite::params_from_iter(candidates.iter()), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -5389,6 +5413,10 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
             PRIMARY KEY(source_hash, size)
         );
         INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (16, unixepoch());
+        -- Deriving listening history walks the activity log by time. Without this it is a
+        -- full scan of a table that only ever grows, on every stats read and playlist build.
+        CREATE INDEX IF NOT EXISTS playback_activity_observed_at
+            ON playback_activity_events(observed_at);
         INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (20, unixepoch());
         "#,
     )?;

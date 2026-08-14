@@ -30,7 +30,7 @@ export default function PlaylistPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
-  const { byHash } = useCatalog();
+  const { byHash, loading: catalogueLoading } = useCatalog();
   const playback = usePlayback();
   const [playlist, setPlaylist] = useState<GeneratedPlaylist | null>(null);
   const [loading, setLoading] = useState(true);
@@ -50,14 +50,21 @@ export default function PlaylistPage({
   // cadence Home does rather than freezing whatever was true on arrival.
   useAsyncRefresh(load, { intervalMs: 15_000 });
 
-  const tracks: CatalogTrack[] = (playlist?.content_hashes ?? [])
+  // See Home's `resolve`: a hash the catalogue has not reached yet is not a missing track,
+  // and dropping it silently renders a playlist as a fraction of itself.
+  const hashes = playlist?.content_hashes ?? [];
+  const resolved: CatalogTrack[] = hashes
     .map((hash) => byHash.get(hash))
     .filter((track): track is CatalogTrack => Boolean(track));
+  const settling = catalogueLoading && resolved.length < hashes.length;
+  const tracks: CatalogTrack[] = settling ? [] : resolved;
 
-  if (!playlist) {
+  // `settling` too: the playlist is known but the catalogue has not caught up with it, and
+  // a half-resolved track list is worse than a skeleton for the moment it takes.
+  if (!playlist || settling) {
     return (
-      <PageShell title="Playlist" backHref="/">
-        {loading ? (
+      <PageShell title={playlist?.title ?? "Playlist"} backHref="/">
+        {loading || settling ? (
           <Skeleton className="h-40 w-full rounded-2xl" />
         ) : (
           <EmptyState
