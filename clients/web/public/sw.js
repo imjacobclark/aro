@@ -5,14 +5,44 @@
  * offline shell and a cover-art cache, and a build-time plugin would bring a dependency
  * and a config file to do less.
  *
- * The important rule is what it does *not* touch. Audio is served from `/api/stream/`
- * with byte ranges, and a service worker that answers those from a cache — or answers
- * them at all — turns seeking into silence. Those requests fall straight through.
+ * Two rules matter more than anything else here.
+ *
+ * **Audio is never intercepted.** It is served from `/api/stream/` with byte ranges, and a
+ * worker that answers those from a cache — or answers them at all — turns seeking into
+ * silence.
+ *
+ * **A deployment must win immediately.** This previously kept a fixed `VERSION` string and
+ * served navigations stale-while-revalidate, and the combination made the installed app
+ * permanently one deploy behind: the cached HTML document names hashed JS chunks, so
+ * handing back yesterday's document hands back yesterday's JavaScript, and the new build
+ * only appeared on the launch *after* the one that fetched it. Worse, `/sw.js` was
+ * byte-identical after every deploy, so `registration.update()` found nothing new, no
+ * worker ever reinstalled, and `activate` — which deletes caches whose name does not match
+ * `VERSION` — never had a different version to compare against and so never deleted
+ * anything. A fix could be deployed, verified on the server, and still not be what the
+ * phone was running. Hence: the version comes from the build and rides on the worker's own
+ * URL, and navigations go to the network first.
  */
 
-const VERSION = "aro-v1";
-const SHELL = `${VERSION}-shell`;
-const ARTWORK = `${VERSION}-artwork`;
+/**
+ * The build that registered this worker, taken from its own script URL.
+ *
+ * A different query string is a different worker script as far as the browser is concerned,
+ * so a deploy installs a genuinely new worker and `activate` gets a real version change to
+ * clean up after.
+ */
+const VERSION =
+  new URL(self.location.href).searchParams.get("v") || "dev";
+const SHELL = `aro-shell-${VERSION}`;
+
+/**
+ * Covers are content-addressed and immutable, so this cache deliberately does *not* carry
+ * the build version — there is no reason to refetch a cover because the app changed. The
+ * `-v2` is a one-off: every artwork URL gained a `?size=` parameter when the hub started
+ * deriving thumbnails, so the old entries are unreachable multi-megabyte originals worth
+ * reclaiming once.
+ */
+const ARTWORK = "aro-artwork-v2";
 
 /** Enough to launch to a usable screen with no network at all. */
 const SHELL_URLS = ["/", "/songs", "/albums", "/artists", "/search", "/stats"];
@@ -42,7 +72,8 @@ self.addEventListener("activate", (event) => {
       .then((keys) =>
         Promise.all(
           keys
-            .filter((key) => !key.startsWith(VERSION))
+            // Every shell but this build's, and any cache from the older naming scheme.
+            .filter((key) => key !== SHELL && key !== ARTWORK)
             .map((key) => caches.delete(key)),
         ),
       )
@@ -70,10 +101,39 @@ self.addEventListener("fetch", (event) => {
   // someone tapping tracks that no longer exist.
   if (url.pathname.startsWith("/api/")) return;
 
-  // Everything else — the app shell and its assets — renders from cache and revalidates,
-  // which is what lets the app open instantly and still pick up a new deployment.
-  event.respondWith(staleWhileRevalidate(request, SHELL));
+  // A page. This is the document that names which JavaScript to run, so it is the one
+  // thing that must never be answered from yesterday's copy while the network is right
+  // there. Cache is the offline fallback, not the default.
+  if (request.mode === "navigate") {
+    event.respondWith(networkFirst(request, SHELL));
+    return;
+  }
+
+  // Build output under `/_next/static/` is content-hashed in its filename: a changed file
+  // is a changed URL, so a hit can never be stale and a new build simply misses.
+  event.respondWith(cacheFirst(request, SHELL));
 });
+
+/**
+ * Network, falling back to whatever was last stored.
+ *
+ * The fallback is what keeps the app opening on a train; the network attempt is what keeps
+ * it from being a build behind. Being briefly slower on a bad connection is the right trade
+ * for a document that decides which code runs.
+ */
+async function networkFirst(request, cacheName) {
+  const cache = await caches.open(cacheName);
+  try {
+    const response = await fetch(request);
+    if (response.ok) void cache.put(request, response.clone());
+    return response;
+  } catch {
+    const hit = await cache.match(request);
+    // `/` is precached, so a deep link opened cold offline still reaches the app shell
+    // rather than the browser's error page.
+    return hit ?? (await cache.match("/")) ?? Response.error();
+  }
+}
 
 async function cacheFirst(request, cacheName, limit) {
   const cache = await caches.open(cacheName);
@@ -83,23 +143,9 @@ async function cacheFirst(request, cacheName, limit) {
   const response = await fetch(request);
   if (response.ok) {
     await cache.put(request, response.clone());
-    await trim(cache, limit);
+    if (limit) await trim(cache, limit);
   }
   return response;
-}
-
-async function staleWhileRevalidate(request, cacheName) {
-  const cache = await caches.open(cacheName);
-  const hit = await cache.match(request);
-
-  const network = fetch(request)
-    .then((response) => {
-      if (response.ok) void cache.put(request, response.clone());
-      return response;
-    })
-    .catch(() => hit);
-
-  return hit ?? network;
 }
 
 /** Oldest-first eviction; a cache entry's insertion order is its age here. */

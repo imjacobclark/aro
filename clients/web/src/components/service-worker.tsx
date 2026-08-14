@@ -16,9 +16,15 @@ export function ServiceWorker() {
     if (!("serviceWorker" in navigator)) return;
     if (process.env.NODE_ENV !== "production") return;
 
+    // The build id rides on the worker's URL. A different script URL is a different worker
+    // to the browser, which is what makes a deploy actually install one — `/sw.js` is a
+    // static file whose bytes never change, so an unversioned URL looked identical after
+    // every deploy, nothing reinstalled, and the old caches were never cleaned out.
+    const url = `/sw.js?v=${process.env.NEXT_PUBLIC_BUILD_ID ?? "dev"}`;
+
     const register = () =>
       navigator.serviceWorker
-        .register("/sw.js")
+        .register(url)
         // Asking explicitly on every launch means a redeployed hub is picked up on the
         // next visit rather than whenever the browser next decides to look.
         .then((registration) => registration.update())
