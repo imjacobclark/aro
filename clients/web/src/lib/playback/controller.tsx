@@ -532,14 +532,18 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
    */
   useEffect(() => {
     if (repeat === "one") return;
-    // Not gated on `isPlaying`. It used to be, which meant the very first press of play —
-    // and every resume after a pause — started from a cold element: connection, first byte
-    // and decode all happening while someone waited, at the one moment they are certainly
-    // watching. When nothing is playing the track worth having ready is the one at the
-    // playhead; once it is, it is the one after.
-    const upcoming = isPlaying
-      ? queue[queueIndex + 1]
-      : (queue[queueIndex] ?? queue[0]);
+    // Always the *next* track, and never the one at the playhead.
+    //
+    // This is the idle element, and the idle element is precisely what `adoptPreloaded`
+    // hands playback to when it already holds the track being asked for. Preloading the
+    // current track here therefore put the same source in both elements, and the handover
+    // could leave each of them playing it a fraction apart — which is heard as a track
+    // running fast and skipping, not as an echo. Whatever is at the playhead is the active
+    // element's job, and it is already loaded there.
+    //
+    // Not gated on `isPlaying`, which it used to be: a paused queue should still have its
+    // next track ready, and that part costs nothing.
+    const upcoming = queue[queueIndex + 1];
     if (!upcoming?.content_hash) return;
 
     // Only worth warming an encode the next track will actually use: one that will be
